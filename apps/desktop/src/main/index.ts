@@ -36,6 +36,7 @@ import type { AgentStreamEvent } from '../preload/index';
 import { registerAppMenu } from './app-menu';
 import { showBootDialog, writeBootErrorSync } from './boot-fallback';
 import { registerChatMessagesIpc, registerChatMessagesUnavailableIpc } from './chat-messages-ipc';
+import { ensureFreshClaudeCodeToken } from './claude-code-token-refresh';
 import {
   CHATGPT_CODEX_PROVIDER_ID,
   getCodexTokenStore,
@@ -977,6 +978,10 @@ function registerIpcHandlers(db: Database | null): void {
       const allowKeyless = active.allowKeyless;
       let apiKey: string;
       try {
+        // OAuth refresh for `claude-code-imported`: runs before the key
+        // resolver so the now-fresh token gets read out of the cached
+        // config. No-op for every other provider.
+        await ensureFreshClaudeCodeToken(active.model.provider);
         apiKey = await resolveApiKeyForActive(active.model.provider, allowKeyless);
       } catch (err) {
         inFlight.delete(id);
@@ -1153,6 +1158,18 @@ function registerIpcHandlers(db: Database | null): void {
               // /jsx /vanilla and forwards via the IPC payload). Defaults
               // to undefined → JSX guidance in agent.ts.
               ...(payload.pattern !== undefined ? { pattern: payload.pattern } : {}),
+              // Read prompt-assist constraints from the design so the system
+              // prompt can render them as load-bearing scope guidance. Only
+              // available when the design has metadata (long prompts skip
+              // the dialog and leave it null/undefined). See backlog-1 #9.
+              ...(payload.designId !== undefined && db !== null
+                ? (() => {
+                    const design = getDesign(db, payload.designId);
+                    return design?.promptAssistMetadata
+                      ? { promptAssist: design.promptAssistMetadata }
+                      : {};
+                  })()
+                : {}),
             },
             id,
             payload.designId ?? null,
@@ -1379,6 +1396,7 @@ function registerIpcHandlers(db: Database | null): void {
       const allowKeyless = active.allowKeyless;
       let apiKey: string;
       try {
+        await ensureFreshClaudeCodeToken(active.model.provider);
         apiKey = await resolveApiKeyForActive(active.model.provider, allowKeyless);
       } catch (err) {
         inFlight.delete(id);
@@ -1532,6 +1550,7 @@ function registerIpcHandlers(db: Database | null): void {
       const hint = payload.model ?? { provider: cfg.provider, modelId: cfg.modelPrimary };
       const active = resolveActiveModel(cfg, hint);
       const allowKeyless = active.allowKeyless;
+      await ensureFreshClaudeCodeToken(active.model.provider);
       const apiKey = await resolveApiKeyForActive(active.model.provider, allowKeyless);
       const baseUrl = active.baseUrl ?? undefined;
       const promptContext = await preparePromptContext({
@@ -1570,6 +1589,18 @@ function registerIpcHandlers(db: Database | null): void {
           ...(allowKeyless ? { allowKeyless: true } : {}),
           ...(active.reasoningLevel !== undefined ? { reasoningLevel: active.reasoningLevel } : {}),
           ...(active.cacheRetention !== undefined ? { cacheRetention: active.cacheRetention } : {}),
+          // Inherit prompt-assist constraints from the design so the
+          // refinement turn stays on-brief. No-op when the payload omits
+          // designId (legacy clients), when the snapshots DB is unavailable,
+          // or when the design has no metadata.
+          ...(payload.designId !== undefined && db !== null
+            ? (() => {
+                const design = getDesign(db, payload.designId);
+                return design?.promptAssistMetadata
+                  ? { promptAssist: design.promptAssistMetadata }
+                  : {};
+              })()
+            : {}),
           // Forward each text delta to the renderer so the comment-revise UI
           // can show partial output instead of waiting on the full buffer.
           // Channel intentionally separate from the agent's `agent:event:v1`
@@ -1625,6 +1656,7 @@ function registerIpcHandlers(db: Database | null): void {
         modelId: cfg.activeModel,
       });
       const allowKeyless = active.allowKeyless;
+      await ensureFreshClaudeCodeToken(active.model.provider);
       const apiKey = await resolveApiKeyForActive(active.model.provider, allowKeyless);
       const baseUrl = active.baseUrl ?? undefined;
       const titleLogger: CoreLogger = {
