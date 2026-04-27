@@ -566,6 +566,7 @@ export const SNAPSHOTS_CHANNELS_V1 = [
   'snapshots:v1:get-design',
   'snapshots:v1:rename-design',
   'snapshots:v1:set-thumbnail',
+  'snapshots:v1:set-prompt-assist',
   'snapshots:v1:soft-delete-design',
   'snapshots:v1:duplicate-design',
   'snapshots:v1:list',
