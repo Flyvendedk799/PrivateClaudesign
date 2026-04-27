@@ -134,6 +134,24 @@ function findMissingAlt(html: string): DoneError[] {
 }
 
 /**
+ * Detect a JSX-via-Babel-standalone artifact. Generated artifacts run as
+ * `<script type="text/babel">` which means JSX self-closing component tags
+ * (`<Header />`) and `style={{ … }}` look invalid to an HTML validator —
+ * but they're the runtime, not user error. Used to gate the HTML-only
+ * checks below so the agent doesn't ping-pong "fix" loops on its own
+ * runtime semantics. See backlog-1 #10.
+ */
+export function isReactBabelArtifact(src: string): boolean {
+  return (
+    /<script[^>]*type=["']text\/babel["']/.test(src) ||
+    /ReactDOM\.createRoot\s*\(/.test(src) ||
+    /\/\*\s*EDITMODE-BEGIN\s*\*\//.test(src) ||
+    /(?:^|\n)\s*function\s+App\s*\(/.test(src) ||
+    /(?:^|\n)\s*const\s+App\s*=/.test(src)
+  );
+}
+
+/**
  * Cheap structural JSX sanity check — catches the 90% of agent mistakes that
  * break Babel compile before the 3-second runtime BrowserWindow load even
  * has a chance. These are SYNCHRONOUS and deterministic so they surface in
@@ -143,12 +161,7 @@ function findMissingAlt(html: string): DoneError[] {
  * skipped — those have their own checks via findUnclosedTags etc.
  */
 function findJsxStructuralIssues(src: string): DoneError[] {
-  const looksJsx =
-    /ReactDOM\.createRoot\s*\(/.test(src) ||
-    /\/\*\s*EDITMODE-BEGIN\s*\*\//.test(src) ||
-    /(?:^|\n)\s*function\s+App\s*\(/.test(src) ||
-    /(?:^|\n)\s*const\s+App\s*=/.test(src);
-  if (!looksJsx) return [];
+  if (!isReactBabelArtifact(src)) return [];
 
   const issues: DoneError[] = [];
 
@@ -386,11 +399,18 @@ export function makeDoneTool(
       } catch {
         /* no-op — single-file pattern, no sibling files to validate. */
       }
+      // text/babel JSX artifacts use component self-closing tags (<Card />)
+      // and style={{ … }} attributes that look like malformed HTML to a
+      // strict validator. Skip the HTML-only checks for them — the JSX
+      // structural pass already covers what matters (compile-breaking
+      // imbalances). findDuplicateIds is still valid in JSX so it stays.
+      // See backlog-1 #10.
+      const isJsxArtifact = isReactBabelArtifact(file.content);
       const errors: DoneError[] = [
         ...findJsxStructuralIssues(file.content),
-        ...findUnclosedTags(file.content),
+        ...(isJsxArtifact ? [] : findUnclosedTags(file.content)),
         ...findDuplicateIds(file.content),
-        ...findMissingAlt(file.content),
+        ...(isJsxArtifact ? [] : findMissingAlt(file.content)),
         // Quality heuristics — content / a11y / responsive / multi-file.
         // Advisory ones show up but don't trip has_errors. Fatal ones
         // (WCAG A failures, missing local refs) DO trip has_errors so the
