@@ -77,6 +77,34 @@ export function buildSecretRef(plaintext: string): SecretRef {
   };
 }
 
+/** Variant for OAuth-bearing secrets (e.g. Claude Code import). Encrypts
+ *  the access token like `buildSecretRef` and additionally captures the
+ *  refresh token (encrypted with the same envelope), expiry, and OAuth
+ *  client id so the refresh helper can run unattended later. Fields are
+ *  optional — when omitted, the returned ref is identical to
+ *  `buildSecretRef(plaintext)`. */
+export function buildOAuthSecretRef(input: {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  oauthClientId?: string;
+}): SecretRef {
+  const ref: SecretRef = {
+    ciphertext: encryptSecret(input.accessToken),
+    mask: maskSecret(input.accessToken),
+  };
+  if (input.refreshToken !== undefined && input.refreshToken.length > 0) {
+    ref.refreshToken = encryptSecret(input.refreshToken);
+  }
+  if (input.expiresAt !== undefined && Number.isFinite(input.expiresAt) && input.expiresAt > 0) {
+    ref.expiresAt = input.expiresAt;
+  }
+  if (input.oauthClientId !== undefined && input.oauthClientId.length > 0) {
+    ref.oauthClientId = input.oauthClientId;
+  }
+  return ref;
+}
+
 /**
  * One-shot migration run on boot:
  *   1. Any secret stored in legacy safeStorage base64 format → decrypt

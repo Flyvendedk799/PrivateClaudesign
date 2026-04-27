@@ -595,6 +595,12 @@ export type {
 
 export { looksLikeGatewayMissingMessagesApi } from './gateway-compat';
 
+export { refreshClaudeCodeToken, shouldRefresh, parseRefreshResponse } from './oauth-refresh';
+export type {
+  RefreshClaudeCodeTokenInput,
+  RefreshClaudeCodeTokenResult,
+} from './oauth-refresh';
+
 export { injectSkillsIntoMessages, formatSkillsForPrompt, filterActive } from './skill-injector';
 
 export { defaultImageBaseUrl, defaultImageModel, generateImage } from './images';

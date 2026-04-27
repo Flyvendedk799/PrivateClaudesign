@@ -49,6 +49,10 @@ export const ERROR_CODES = {
   CONFIG_NOT_LOADED: 'CONFIG_NOT_LOADED',
   CONFIG_MISSING: 'CONFIG_MISSING',
 
+  // OAuth refresh (Claude Code imported provider)
+  CLAUDE_CODE_TOKEN_REFRESH_FAILED: 'CLAUDE_CODE_TOKEN_REFRESH_FAILED',
+  CLAUDE_CODE_REIMPORT_REQUIRED: 'CLAUDE_CODE_REIMPORT_REQUIRED',
+
   // Snapshot / design DB
   SNAPSHOTS_UNAVAILABLE: 'SNAPSHOTS_UNAVAILABLE',
   CHAT_SCHEMA_MISMATCH: 'CHAT_SCHEMA_MISMATCH',
@@ -278,6 +282,17 @@ export const ERROR_CODE_DESCRIPTIONS: Record<CodesignErrorCode, ErrorCodeDescrip
       'A chat history entry was written by a newer version of the app and cannot be read.',
     userFacingKey: 'err.CHAT_SCHEMA_MISMATCH',
     category: 'snapshot',
+  },
+  CLAUDE_CODE_TOKEN_REFRESH_FAILED: {
+    userFacing:
+      'Could not refresh the Claude Code access token. The next request will retry; if it keeps failing, re-import from Claude Code.',
+    userFacingKey: 'err.CLAUDE_CODE_TOKEN_REFRESH_FAILED',
+    category: 'connection',
+  },
+  CLAUDE_CODE_REIMPORT_REQUIRED: {
+    userFacing: 'Claude Code login is no longer valid. Re-import from Claude Code to continue.',
+    userFacingKey: 'err.CLAUDE_CODE_REIMPORT_REQUIRED',
+    category: 'connection',
   },
 
   // Storage settings

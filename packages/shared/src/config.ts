@@ -60,6 +60,22 @@ export const SecretRef = z.object({
    * migrated on first read by decrypting once and writing the mask back.
    */
   mask: z.string().optional(),
+  /** Unix-ms timestamp at which the access token expires. Set when the
+   *  secret was sourced from a refresh-capable OAuth flow (e.g. Claude
+   *  Code import). Long-lived API keys leave this undefined. Used by the
+   *  auth header builder to refresh before each request when the window
+   *  is close to (or past) expiry. */
+  expiresAt: z.number().int().nonnegative().optional(),
+  /** Encrypted refresh token, persisted alongside the access token so
+   *  the OAuth refresh helper can mint a fresh access token without
+   *  re-onboarding. Same `plain:`/`enc:` ciphertext envelope as the
+   *  access token. */
+  refreshToken: z.string().min(1).optional(),
+  /** OAuth client id captured from the source (e.g. Claude Code's
+   *  keychain blob). Required by the refresh endpoint. Optional so
+   *  legacy imports without it still parse — but refresh fails for
+   *  those and the user is asked to re-import. */
+  oauthClientId: z.string().min(1).optional(),
 });
 export type SecretRef = z.infer<typeof SecretRef>;
 

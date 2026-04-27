@@ -29,6 +29,7 @@ import { buildAuthHeadersForWire } from './auth-headers';
 import { defaultConfigDir, readConfig, writeConfig } from './config';
 import { dialog, ipcMain, shell } from './electron-runtime';
 import { type ClaudeCodeImport, readClaudeCodeSettings } from './imports/claude-code-config';
+import { readClaudeCodeKeychainCredentials } from './imports/claude-code-keychain';
 import {
   ALLOWED_IMPORT_ENV_KEYS,
   type CodexImport,
@@ -37,7 +38,7 @@ import {
 } from './imports/codex-config';
 import { type GeminiImport, readGeminiCliConfig } from './imports/gemini-cli-config';
 import { type OpencodeImport, readOpencodeConfig } from './imports/opencode-config';
-import { buildSecretRef, decryptSecret, migrateSecrets } from './keychain';
+import { buildOAuthSecretRef, buildSecretRef, decryptSecret, migrateSecrets } from './keychain';
 import { defaultLogsDir, getLogger } from './logger';
 import {
   type ProviderRow,
@@ -953,10 +954,34 @@ async function runImportClaudeCode(imported: ClaudeCodeImport): Promise<Onboardi
     }
   }
   nextProviders[imported.provider.id] = imported.provider;
-  const importedApiKey = imported.apiKey?.trim();
+
+  // Best-effort: fetch the macOS keychain blob so we can persist the
+  // refresh token + expiry alongside the access token. Lets the OAuth
+  // refresh helper keep this identity alive without re-onboarding.
+  // Falls back silently on non-Darwin or when the keychain entry is
+  // missing — the user keeps the static access-token path unchanged.
+  const keychainCreds = await readClaudeCodeKeychainCredentials().catch(() => null);
+  const settingsApiKey = imported.apiKey?.trim();
+  // Prefer the keychain access token when present (refreshable); fall back
+  // to the settings.json/shell-env value otherwise.
+  const importedApiKey =
+    keychainCreds?.accessToken ?? (settingsApiKey !== undefined ? settingsApiKey : undefined);
   const keySaved = importedApiKey !== undefined && importedApiKey.length > 0;
-  if (keySaved) {
-    nextSecrets[imported.provider.id] = buildSecretRef(importedApiKey);
+  if (keySaved && importedApiKey !== undefined) {
+    if (keychainCreds !== null && keychainCreds.accessToken === importedApiKey) {
+      nextSecrets[imported.provider.id] = buildOAuthSecretRef({
+        accessToken: importedApiKey,
+        ...(keychainCreds.refreshToken !== undefined
+          ? { refreshToken: keychainCreds.refreshToken }
+          : {}),
+        ...(keychainCreds.expiresAt !== undefined ? { expiresAt: keychainCreds.expiresAt } : {}),
+        ...(keychainCreds.oauthClientId !== undefined
+          ? { oauthClientId: keychainCreds.oauthClientId }
+          : {}),
+      });
+    } else {
+      nextSecrets[imported.provider.id] = buildSecretRef(importedApiKey);
+    }
   }
 
   // Flip active only when we have a key the new provider can actually use,

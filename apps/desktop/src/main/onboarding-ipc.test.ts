@@ -56,6 +56,13 @@ vi.mock('./config', () => ({
   writeConfig: vi.fn(async () => {}),
 }));
 
+vi.mock('./imports/claude-code-keychain', () => ({
+  // Tests run on darwin, so the production reader would shell out to
+  // `security`. Stub to null so import paths stay deterministic; specific
+  // tests can override via vi.mocked().mockResolvedValueOnce.
+  readClaudeCodeKeychainCredentials: vi.fn(async () => null),
+}));
+
 vi.mock('./keychain', () => ({
   encryptSecret: vi.fn((s: string) => `enc:${s}`),
   decryptSecret: vi.fn((s: string) => s.replace('enc:', '')),
@@ -64,6 +71,23 @@ vi.mock('./keychain', () => ({
     ciphertext: `enc:${s}`,
     mask: s.length > 8 ? `${s.slice(0, 4)}***${s.slice(-4)}` : '***',
   })),
+  buildOAuthSecretRef: vi.fn(
+    (input: {
+      accessToken: string;
+      refreshToken?: string;
+      expiresAt?: number;
+      oauthClientId?: string;
+    }) => ({
+      ciphertext: `enc:${input.accessToken}`,
+      mask:
+        input.accessToken.length > 8
+          ? `${input.accessToken.slice(0, 4)}***${input.accessToken.slice(-4)}`
+          : '***',
+      ...(input.refreshToken !== undefined ? { refreshToken: `enc:${input.refreshToken}` } : {}),
+      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+      ...(input.oauthClientId !== undefined ? { oauthClientId: input.oauthClientId } : {}),
+    }),
+  ),
   migrateSecrets: vi.fn((cfg: { secrets?: Record<string, unknown> }) => ({
     config: cfg,
     changed: false,
@@ -496,6 +520,81 @@ describe('config:v1:import-claude-code-config — user-type branching', () => {
     const written = vi.mocked(writeConfig).mock.calls.at(-1)?.[0];
     expect(written?.activeProvider).toBe('claude-code-imported');
     expect(written?.secrets['claude-code-imported']).toBeDefined();
+  });
+
+  it('persists refreshToken + expiresAt + oauthClientId when the keychain blob has them', async () => {
+    const { readClaudeCodeSettings } = await import('./imports/claude-code-config');
+    const { readClaudeCodeKeychainCredentials } = await import('./imports/claude-code-keychain');
+    const { writeConfig } = await import('./config');
+    vi.mocked(writeConfig).mockClear();
+    vi.mocked(readClaudeCodeSettings).mockResolvedValueOnce({
+      provider: {
+        id: 'claude-code-imported',
+        name: 'Claude Code (imported)',
+        builtin: false,
+        wire: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        defaultModel: 'claude-sonnet-4-6',
+        envKey: 'ANTHROPIC_AUTH_TOKEN',
+        reasoningLevel: 'medium',
+      },
+      apiKey: 'sk-ant-from-settings',
+      apiKeySource: 'settings-json',
+      userType: 'has-api-key',
+      hasOAuthEvidence: false,
+      activeModel: 'claude-sonnet-4-6',
+      settingsPath: '/tmp/.claude/settings.json',
+      warnings: [],
+    });
+    vi.mocked(readClaudeCodeKeychainCredentials).mockResolvedValueOnce({
+      accessToken: 'sk-ant-oat01-from-keychain',
+      refreshToken: 'sk-ant-ort01-r',
+      expiresAt: 1735689600000,
+      oauthClientId: 'cli-id-123',
+    });
+    const handler = handlers.get('config:v1:import-claude-code-config');
+    await handler?.({} as unknown);
+    const written = vi.mocked(writeConfig).mock.calls.at(-1)?.[0];
+    const secret = written?.secrets['claude-code-imported'];
+    expect(secret?.ciphertext).toBe('enc:sk-ant-oat01-from-keychain');
+    expect(secret?.refreshToken).toBe('enc:sk-ant-ort01-r');
+    expect(secret?.expiresAt).toBe(1735689600000);
+    expect(secret?.oauthClientId).toBe('cli-id-123');
+  });
+
+  it('falls back to settings.json key when keychain is absent (no refresh fields)', async () => {
+    const { readClaudeCodeSettings } = await import('./imports/claude-code-config');
+    const { readClaudeCodeKeychainCredentials } = await import('./imports/claude-code-keychain');
+    const { writeConfig } = await import('./config');
+    vi.mocked(writeConfig).mockClear();
+    vi.mocked(readClaudeCodeSettings).mockResolvedValueOnce({
+      provider: {
+        id: 'claude-code-imported',
+        name: 'Claude Code (imported)',
+        builtin: false,
+        wire: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        defaultModel: 'claude-sonnet-4-6',
+        envKey: 'ANTHROPIC_AUTH_TOKEN',
+        reasoningLevel: 'medium',
+      },
+      apiKey: 'sk-ant-from-settings',
+      apiKeySource: 'settings-json',
+      userType: 'has-api-key',
+      hasOAuthEvidence: false,
+      activeModel: 'claude-sonnet-4-6',
+      settingsPath: '/tmp/.claude/settings.json',
+      warnings: [],
+    });
+    vi.mocked(readClaudeCodeKeychainCredentials).mockResolvedValueOnce(null);
+    const handler = handlers.get('config:v1:import-claude-code-config');
+    await handler?.({} as unknown);
+    const written = vi.mocked(writeConfig).mock.calls.at(-1)?.[0];
+    const secret = written?.secrets['claude-code-imported'];
+    expect(secret?.ciphertext).toBe('enc:sk-ant-from-settings');
+    expect(secret?.refreshToken).toBeUndefined();
+    expect(secret?.expiresAt).toBeUndefined();
+    expect(secret?.oauthClientId).toBeUndefined();
   });
 });
 

@@ -1340,17 +1340,18 @@ function registerIpcHandlers(db: Database | null): void {
       }
     });
     // withRun returns Promise<T> | T; for async fn we always get a Promise but
-    // the type widens, so wrap so `.finally` is available unconditionally.
+    // the type widens, so wrap so we can attach a settlement listener.
     const wrapped = Promise.resolve(promise);
     inFlightGenerations.set(id, wrapped);
     inFlightContentToId.set(contentKey, id);
-    wrapped.finally(() => {
-      // Settle order: per-id then per-content. The content map is best-effort —
-      // an unrelated generation that happens to reuse the contentKey would only
-      // collapse if the original is still in-flight.
+    // Side-effect-only cleanup. .then(_, _) catches both branches so the
+    // cleanup chain doesn't surface a phantom unhandled rejection — the
+    // original `wrapped` keeps the rejection for the awaiting caller.
+    const cleanupDedup = () => {
       if (inFlightGenerations.get(id) === wrapped) inFlightGenerations.delete(id);
       if (inFlightContentToId.get(contentKey) === id) inFlightContentToId.delete(contentKey);
-    });
+    };
+    wrapped.then(cleanupDedup, cleanupDedup);
     return wrapped;
   });
 
