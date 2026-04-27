@@ -1,9 +1,19 @@
 import { useT } from '@open-codesign/i18n';
-import { Download, MessageSquare } from 'lucide-react';
+import { Download, MessageSquare, Monitor, Smartphone, Tablet } from 'lucide-react';
 import { type ReactElement, useEffect, useRef, useState } from 'react';
 import type { ExportFormat } from '../../../preload/index';
 import type { PreviewViewport } from '../store';
 import { useCodesignStore } from '../store';
+
+const VIEWPORT_OPTIONS: Array<{
+  value: PreviewViewport;
+  Icon: typeof Monitor;
+  label: 'preview.viewport.desktop' | 'preview.viewport.tablet' | 'preview.viewport.mobile';
+}> = [
+  { value: 'desktop', Icon: Monitor, label: 'preview.viewport.desktop' },
+  { value: 'tablet', Icon: Tablet, label: 'preview.viewport.tablet' },
+  { value: 'mobile', Icon: Smartphone, label: 'preview.viewport.mobile' },
+];
 
 interface ExportItem {
   format: ExportFormat;
@@ -21,6 +31,7 @@ export function PreviewToolbar(): ReactElement {
   const toastMessage = useCodesignStore((s) => s.toastMessage);
   const dismissToast = useCodesignStore((s) => s.dismissToast);
   const previewViewport = useCodesignStore((s) => s.previewViewport);
+  const setPreviewViewport = useCodesignStore((s) => s.setPreviewViewport);
   const previewZoom = useCodesignStore((s) => s.previewZoom);
   const setPreviewZoom = useCodesignStore((s) => s.setPreviewZoom);
   const interactionMode = useCodesignStore((s) => s.interactionMode);
@@ -96,6 +107,34 @@ export function PreviewToolbar(): ReactElement {
           {toastMessage}
         </output>
       )}
+
+      <div
+        role="group"
+        aria-label={t('preview.viewport.label')}
+        className="inline-flex items-center"
+      >
+        {VIEWPORT_OPTIONS.map(({ value, Icon, label }) => {
+          const isActive = previewViewport === value;
+          return (
+            <button
+              key={value}
+              type="button"
+              disabled={disabled}
+              aria-pressed={isActive}
+              aria-label={t(label)}
+              title={t(label)}
+              onClick={() => setPreviewViewport(value)}
+              className={`inline-flex items-center justify-center w-[28px] h-[26px] transition-[background-color,color,transform] duration-[var(--duration-faster)] active:scale-[var(--scale-press-down)] disabled:opacity-40 disabled:pointer-events-none ${
+                isActive
+                  ? 'text-[var(--color-accent)]'
+                  : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]'
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+          );
+        })}
+      </div>
 
       <button
         type="button"

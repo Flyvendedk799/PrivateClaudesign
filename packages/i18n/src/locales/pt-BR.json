@@ -104,7 +104,13 @@
     "commentModeHint": "Clique em qualquer elemento para comentar",
     "runtimeError": "Erro de execução na pré-visualização",
     "dismissErrors": "Dispensar erros da pré-visualização",
-    "zoom": "Zoom"
+    "zoom": "Zoom",
+    "viewport": {
+      "label": "Viewport da pré-visualização",
+      "desktop": "Pré-visualização desktop",
+      "tablet": "Pré-visualização tablet",
+      "mobile": "Pré-visualização mobile"
+    }
   },
   "tweaks": {
     "title": "Ajustes",

@@ -104,7 +104,13 @@
     "commentModeHint": "Click any element to comment",
     "runtimeError": "Preview runtime error",
     "dismissErrors": "Dismiss preview errors",
-    "zoom": "Zoom"
+    "zoom": "Zoom",
+    "viewport": {
+      "label": "Preview viewport",
+      "desktop": "Desktop preview",
+      "tablet": "Tablet preview",
+      "mobile": "Mobile preview"
+    }
   },
   "tweaks": {
     "title": "Tweaks",
