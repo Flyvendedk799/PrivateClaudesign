@@ -20,7 +20,6 @@ import { CodesignError, ERROR_CODES } from '@open-codesign/shared';
 import { remapProviderError } from './errors.js';
 import { type CoreLogger, NOOP_LOGGER } from './logger.js';
 import { type PromptComposeOptions, composeSystemPrompt } from './prompts/index.js';
-import { loadBuiltinSkills } from './skills/loader.js';
 
 export type { PromptComposeOptions };
 export type { CoreLogger } from './logger.js';
@@ -609,6 +608,7 @@ async function collectAllSkillBlobs(
   const start = Date.now();
   let skills: LoadedSkill[];
   try {
+    const { loadBuiltinSkills } = await import('./skills/loader.js');
     skills = await loadBuiltinSkills();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

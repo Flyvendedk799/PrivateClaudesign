@@ -34,6 +34,8 @@ import type { RetryDecision, RetryReason } from '@open-codesign/providers';
 import {
   classifyError,
   claudeCodeIdentityHeaders,
+  filterActive,
+  formatSkillsForPrompt,
   looksLikeClaudeOAuthToken,
   shouldForceClaudeCodeIdentity,
   withBackoff,
@@ -336,7 +338,6 @@ async function collectSkills(
   const start = Date.now();
   try {
     const { loadBuiltinSkills } = await import('./skills/loader.js');
-    const { filterActive, formatSkillsForPrompt } = await import('@open-codesign/providers');
     const skills = await loadBuiltinSkills();
     const active = filterActive(skills, providerId);
     const blobs = formatSkillsForPrompt(active);
