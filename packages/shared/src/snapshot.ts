@@ -63,11 +63,18 @@ export const ChatMessageRowV1 = z.object({
 });
 export type ChatMessageRow = z.infer<typeof ChatMessageRowV1>;
 
+/** Current on-disk schema version for `chat_messages` rows. Bump together
+ *  with `migrateChatMessageRow` in the main process when shapes change. */
+export const CHAT_MESSAGE_SCHEMA_VERSION = 1 as const;
+
 export interface ChatAppendInput {
   designId: string;
   kind: ChatMessageKind;
   payload: unknown;
   snapshotId?: string | null;
+  /** Persisted alongside the row so the read path can refuse / migrate
+   *  forward-incompatible rows. Defaults to the current writer version. */
+  schemaVersion?: typeof CHAT_MESSAGE_SCHEMA_VERSION;
 }
 
 // Payload shapes (not strictly validated — payload is opaque JSON in DB).

@@ -51,6 +51,7 @@ export const ERROR_CODES = {
 
   // Snapshot / design DB
   SNAPSHOTS_UNAVAILABLE: 'SNAPSHOTS_UNAVAILABLE',
+  CHAT_SCHEMA_MISMATCH: 'CHAT_SCHEMA_MISMATCH',
 
   // Storage settings (user-data relocation)
   BOOT_ORDER: 'BOOT_ORDER',
@@ -270,6 +271,12 @@ export const ERROR_CODE_DESCRIPTIONS: Record<CodesignErrorCode, ErrorCodeDescrip
   SNAPSHOTS_UNAVAILABLE: {
     userFacing: 'The local design database is unavailable. Restarting the app may help.',
     userFacingKey: 'err.SNAPSHOTS_UNAVAILABLE',
+    category: 'snapshot',
+  },
+  CHAT_SCHEMA_MISMATCH: {
+    userFacing:
+      'A chat history entry was written by a newer version of the app and cannot be read.',
+    userFacingKey: 'err.CHAT_SCHEMA_MISMATCH',
     category: 'snapshot',
   },
 

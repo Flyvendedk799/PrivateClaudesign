@@ -237,6 +237,27 @@ export class CodesignError extends Error {
   }
 }
 
+/** Thrown when a row read off disk carries a `schema_version` newer than the
+ *  current writer can safely deserialise. Callers in the read path should
+ *  catch and either skip the row (best-effort, with a log warning) or surface
+ *  the failure to the user. Older rows go through `migrateChatMessageRow`
+ *  instead and never raise this. */
+export class SchemaMismatchError extends CodesignError {
+  constructor(
+    public readonly table: string,
+    public readonly got: number,
+    public readonly expected: number,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `${table} row schema_version=${got} exceeds supported version ${expected}`,
+      'CHAT_SCHEMA_MISMATCH',
+      options,
+    );
+    this.name = 'SchemaMismatchError';
+  }
+}
+
 export {
   BUILTIN_PROVIDERS,
   CHATGPT_CODEX_PROVIDER_ID,
@@ -319,6 +340,7 @@ export { DesignTokenV1, DesignTokenSet } from './design-token';
 export type { DesignToken } from './design-token';
 
 export {
+  CHAT_MESSAGE_SCHEMA_VERSION,
   ChatMessageKind,
   ChatMessageRowV1,
   CommentKind,

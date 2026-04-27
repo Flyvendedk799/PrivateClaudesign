@@ -11,24 +11,26 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import type {
-  ChatAppendInput,
-  ChatMessageKind,
-  ChatMessageRow,
-  CommentCreateInput,
-  CommentKind,
-  CommentRect,
-  CommentRow,
-  CommentScope,
-  CommentStatus,
-  CommentUpdateInput,
-  Design,
-  DesignFile,
-  DesignSnapshot,
-  DiagnosticEventInput,
-  DiagnosticEventRow,
-  DiagnosticLevel,
-  SnapshotCreateInput,
+import {
+  CHAT_MESSAGE_SCHEMA_VERSION,
+  type ChatAppendInput,
+  type ChatMessageKind,
+  type ChatMessageRow,
+  type CommentCreateInput,
+  type CommentKind,
+  type CommentRect,
+  type CommentRow,
+  type CommentScope,
+  type CommentStatus,
+  type CommentUpdateInput,
+  type Design,
+  type DesignFile,
+  type DesignSnapshot,
+  type DiagnosticEventInput,
+  type DiagnosticEventRow,
+  type DiagnosticLevel,
+  SchemaMismatchError,
+  type SnapshotCreateInput,
 } from '@open-codesign/shared';
 import type BetterSqlite3 from 'better-sqlite3';
 import { getLogger } from './logger';
@@ -120,19 +122,20 @@ function applySchema(db: Database): void {
     );
 
     CREATE TABLE IF NOT EXISTS chat_messages (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      design_id   TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
-      seq         INTEGER NOT NULL,
-      kind        TEXT NOT NULL CHECK (kind IN (
-                    'user',
-                    'assistant_text',
-                    'tool_call',
-                    'artifact_delivered',
-                    'error'
-                  )),
-      payload     TEXT NOT NULL,
-      snapshot_id TEXT REFERENCES design_snapshots(id) ON DELETE SET NULL,
-      created_at  TEXT NOT NULL,
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      schema_version  INTEGER NOT NULL DEFAULT 1,
+      design_id       TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+      seq             INTEGER NOT NULL,
+      kind            TEXT NOT NULL CHECK (kind IN (
+                        'user',
+                        'assistant_text',
+                        'tool_call',
+                        'artifact_delivered',
+                        'error'
+                      )),
+      payload         TEXT NOT NULL,
+      snapshot_id     TEXT REFERENCES design_snapshots(id) ON DELETE SET NULL,
+      created_at      TEXT NOT NULL,
       UNIQUE (design_id, seq)
     );
 
@@ -223,6 +226,19 @@ function applyAdditiveMigrations(db: Database): void {
   }
   if (!commentCols.includes('parent_outer_html')) {
     db.exec('ALTER TABLE comments ADD COLUMN parent_outer_html TEXT');
+  }
+
+  // chat_messages v1 — schema_version column was added after the table was
+  // first created. Backfill existing rows to 1 (the only writer version that
+  // has ever produced rows on disk). Future bumps land migration logic in
+  // `migrateChatMessageRow`; this column lets the read path catch a row
+  // written by a newer install via SchemaMismatchError instead of silently
+  // deserialising into the wrong shape.
+  const chatCols = (db.prepare('PRAGMA table_info(chat_messages)').all() as ColumnInfo[]).map(
+    (c) => c.name,
+  );
+  if (!chatCols.includes('schema_version')) {
+    db.exec('ALTER TABLE chat_messages ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1');
   }
 
   // diagnostic_events v2 — add `context_json` (TEXT, nullable) so rows from
@@ -620,33 +636,74 @@ interface ChatMessageRowDb {
   payload: string;
   snapshot_id: string | null;
   created_at: string;
+  /** May be undefined on rows written before the additive migration backfilled
+   *  the column. Treated as schema 1 for those rows. */
+  schema_version: number | null | undefined;
+}
+
+/** Forward-migrate a chat_messages row read from disk to the current writer
+ *  shape. Currently only schema 1 exists, so this is an identity function for
+ *  v1 rows; bumping the writer version lands a new branch here. Throws
+ *  `SchemaMismatchError` when `fromVersion` is newer than the writer can
+ *  understand. */
+function migrateChatMessageRow(row: ChatMessageRowDb, fromVersion: number): ChatMessageRowDb {
+  if (fromVersion === CHAT_MESSAGE_SCHEMA_VERSION) return row;
+  if (fromVersion < CHAT_MESSAGE_SCHEMA_VERSION) {
+    // Future: switch on fromVersion to walk through 1→2, 2→3, etc. For now
+    // there is only v1, so nothing to migrate.
+    return row;
+  }
+  throw new SchemaMismatchError('chat_messages', fromVersion, CHAT_MESSAGE_SCHEMA_VERSION);
 }
 
 function rowToChatMessage(row: ChatMessageRowDb): ChatMessageRow {
+  const persistedVersion =
+    typeof row.schema_version === 'number' && Number.isFinite(row.schema_version)
+      ? row.schema_version
+      : 1;
+  const migrated = migrateChatMessageRow(row, persistedVersion);
   let payload: unknown = null;
   try {
-    payload = JSON.parse(row.payload);
+    payload = JSON.parse(migrated.payload);
   } catch {
-    payload = { _raw: row.payload };
+    payload = { _raw: migrated.payload };
   }
   return {
-    schemaVersion: 1,
-    id: row.id,
-    designId: row.design_id,
-    seq: row.seq,
-    kind: row.kind as ChatMessageKind,
+    schemaVersion: CHAT_MESSAGE_SCHEMA_VERSION,
+    id: migrated.id,
+    designId: migrated.design_id,
+    seq: migrated.seq,
+    kind: migrated.kind as ChatMessageKind,
     payload,
-    snapshotId: row.snapshot_id,
-    createdAt: row.created_at,
+    snapshotId: migrated.snapshot_id,
+    createdAt: migrated.created_at,
   };
 }
 
 export function listChatMessages(db: Database, designId: string): ChatMessageRow[] {
-  return (
-    db
-      .prepare('SELECT * FROM chat_messages WHERE design_id = ? ORDER BY seq ASC')
-      .all(designId) as ChatMessageRowDb[]
-  ).map(rowToChatMessage);
+  const rows = db
+    .prepare('SELECT * FROM chat_messages WHERE design_id = ? ORDER BY seq ASC')
+    .all(designId) as ChatMessageRowDb[];
+  const out: ChatMessageRow[] = [];
+  for (const r of rows) {
+    try {
+      out.push(rowToChatMessage(r));
+    } catch (err) {
+      if (err instanceof SchemaMismatchError) {
+        // Forward-compat row written by a newer install. Skip rather than
+        // breaking the whole list — diagnostics surface the mismatch separately.
+        getLogger('snapshots-db').warn('chat_messages.skip_unknown_schema', {
+          designId,
+          rowId: r.id,
+          got: err.got,
+          expected: err.expected,
+        });
+        continue;
+      }
+      throw err;
+    }
+  }
+  return out;
 }
 
 /**
@@ -659,6 +716,8 @@ export function appendChatMessage(db: Database, input: ChatAppendInput): ChatMes
   const payloadJson = JSON.stringify(input.payload ?? {});
   const snapshotId = input.snapshotId ?? null;
 
+  const schemaVersion = input.schemaVersion ?? CHAT_MESSAGE_SCHEMA_VERSION;
+
   const tx = db.transaction((): ChatMessageRow => {
     const nextSeqRow = db
       .prepare(
@@ -667,10 +726,18 @@ export function appendChatMessage(db: Database, input: ChatAppendInput): ChatMes
       .get(input.designId) as { nextSeq: number };
     const info = db
       .prepare(
-        `INSERT INTO chat_messages (design_id, seq, kind, payload, snapshot_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chat_messages (design_id, seq, kind, payload, snapshot_id, created_at, schema_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(input.designId, nextSeqRow.nextSeq, input.kind, payloadJson, snapshotId, now);
+      .run(
+        input.designId,
+        nextSeqRow.nextSeq,
+        input.kind,
+        payloadJson,
+        snapshotId,
+        now,
+        schemaVersion,
+      );
     const row = db.prepare('SELECT * FROM chat_messages WHERE id = ?').get(info.lastInsertRowid) as
       | ChatMessageRowDb
       | undefined;

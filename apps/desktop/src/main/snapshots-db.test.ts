@@ -699,3 +699,40 @@ describe('tool_status_normalize_2026_04_20 migration', () => {
     expect((recentRow?.payload as { status: string }).status).toBe('running');
   });
 });
+
+describe('chat_messages schema_version validation', () => {
+  it('writes schemaVersion=1 on insert and reads it back', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'hi' } });
+    const raw = db
+      .prepare('SELECT schema_version FROM chat_messages WHERE design_id = ?')
+      .all(d.id) as Array<{ schema_version: number }>;
+    expect(raw[0]?.schema_version).toBe(1);
+    const list = listChatMessages(db, d.id);
+    expect(list[0]?.schemaVersion).toBe(1);
+  });
+
+  it('skips rows with a future schema_version and returns the rest', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'one' } });
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'two' } });
+    // Forge a row from a hypothetical future writer.
+    db.prepare('UPDATE chat_messages SET schema_version = 99 WHERE seq = 0').run();
+    const list = listChatMessages(db, d.id);
+    expect(list).toHaveLength(1);
+    expect((list[0]?.payload as { text: string }).text).toBe('two');
+  });
+
+  it('rows backfilled by the additive migration default to schema_version=1', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'legacy' } });
+    // The CREATE TABLE + ALTER TABLE both default schema_version to 1, so
+    // existing rows from before the migration land at 1 without intervention.
+    const list = listChatMessages(db, d.id);
+    expect(list).toHaveLength(1);
+    expect(list[0]?.schemaVersion).toBe(1);
+  });
+});
