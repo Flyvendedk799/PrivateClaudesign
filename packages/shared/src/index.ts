@@ -163,6 +163,10 @@ export const ApplyCommentPayload = z.object({
   model: ModelRef.optional(),
   referenceUrl: z.string().url().optional(),
   attachments: z.array(LocalInputFile).max(12).default([]),
+  /** Optional — when provided, the IPC handler reads the design's
+   *  promptAssistMetadata so the refinement turn keeps the same
+   *  scope/taste constraints as the initial generation (backlog-1 #9). */
+  designId: z.string().min(1).optional(),
 });
 export type ApplyCommentPayload = z.infer<typeof ApplyCommentPayload>;
 

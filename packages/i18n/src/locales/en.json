@@ -661,6 +661,11 @@
     "generationFailedFixUnavailable": "Auto-fix unavailable",
     "generationFailedFixUnavailableDescription": "This app version can't apply the fix automatically. Please edit the Base URL manually in Settings.",
     "generationFailedFixApplyFailed": "Could not apply fix",
+    "claudeCodeReimport": "Re-import Claude Code",
+    "claudeCodeReimportSucceeded": "Claude Code re-imported. Try the request again.",
+    "claudeCodeReimportFailed": "Could not re-import Claude Code",
+    "claudeCodeReimportUnavailable": "Re-import unavailable",
+    "claudeCodeReimportUnavailableDescription": "This app version can't trigger the re-import automatically. Open Settings and import Claude Code manually.",
     "cancellationFailed": "Cancellation failed",
     "inlineCommentFailed": "Inline comment failed",
     "commentNeedsSnapshot": "Generate a design first before leaving a comment",
@@ -797,6 +802,48 @@
     "modelListFailed": "Could not load model list.",
     "unknown": "Unknown error",
     "localePersistFailed": "Failed to save language preference"
+  },
+  "promptAssist": {
+    "title": "Quick scope check",
+    "body": "Your prompt is short — a few constraints help the agent stay on-brief instead of guessing.",
+    "skip": "Skip",
+    "submit": "Use these",
+    "skipIn": "Auto-skipping in {{seconds}}s…",
+    "skipPaused": "Auto-skip paused",
+    "persistFailed": "Could not save the prompt-assist picks",
+    "rows": {
+      "audience": "Audience",
+      "device": "Primary device",
+      "depth": "Depth",
+      "vibe": "Vibe",
+      "a11y": "Accessibility"
+    },
+    "audience": {
+      "devs": "Developers",
+      "pms": "PMs",
+      "endUsers": "End users",
+      "designers": "Designers"
+    },
+    "device": {
+      "desktop": "Desktop",
+      "tablet": "Tablet / Laptop",
+      "mobile": "Mobile"
+    },
+    "depth": {
+      "quick": "Quick",
+      "standard": "Standard",
+      "deep": "Deep"
+    },
+    "vibe": {
+      "calm": "Calm",
+      "energetic": "Energetic",
+      "editorial": "Editorial",
+      "minimal": "Minimal"
+    },
+    "a11y": {
+      "baseline": "Baseline",
+      "enhanced": "Enhanced (WCAG AA+)"
+    }
   },
   "projects": {
     "untitled": "Untitled design",

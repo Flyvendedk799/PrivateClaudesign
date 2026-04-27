@@ -176,7 +176,9 @@ describe('generationStage transitions', () => {
       setTimeout,
     });
 
-    await useCodesignStore.getState().sendPrompt({ prompt: '你是什么模型' });
+    await useCodesignStore
+      .getState()
+      .sendPrompt({ prompt: '你是什么模型', skipPromptAssist: true });
 
     const kinds = append.mock.calls.map(([input]) => (input as { kind: string }).kind);
     expect(kinds).toContain('user');

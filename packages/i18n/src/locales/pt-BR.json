@@ -617,7 +617,12 @@
     "commentUpdateFailed": "Não foi possível atualizar o comentário",
     "commentDeleteFailed": "Não foi possível excluir o comentário",
     "noDesignToExport": "Nenhum design para exportar ainda.",
-    "exportedTo": "Exportado para {{path}}"
+    "exportedTo": "Exportado para {{path}}",
+    "claudeCodeReimport": "Reimportar Claude Code",
+    "claudeCodeReimportSucceeded": "Claude Code reimportado. Tente a requisição novamente.",
+    "claudeCodeReimportFailed": "Não foi possível reimportar o Claude Code",
+    "claudeCodeReimportUnavailable": "Reimportação indisponível",
+    "claudeCodeReimportUnavailableDescription": "Esta versão do app não consegue acionar a reimportação automaticamente. Abra Configurações e importe o Claude Code manualmente."
   },
   "inlineComment": {
     "title": "Comentar em",
@@ -746,6 +751,48 @@
     "modelListFailed": "Não foi possível carregar a lista de modelos.",
     "unknown": "Erro desconhecido",
     "localePersistFailed": "Falha ao salvar a preferência de idioma"
+  },
+  "promptAssist": {
+    "title": "Verificação rápida de escopo",
+    "body": "Seu prompt é curto — algumas restrições ajudam o agente a manter o foco em vez de adivinhar.",
+    "skip": "Pular",
+    "submit": "Usar essas",
+    "skipIn": "Pulando automaticamente em {{seconds}}s…",
+    "skipPaused": "Pulagem automática pausada",
+    "persistFailed": "Não foi possível salvar as escolhas de prompt-assist",
+    "rows": {
+      "audience": "Público",
+      "device": "Dispositivo principal",
+      "depth": "Profundidade",
+      "vibe": "Tom",
+      "a11y": "Acessibilidade"
+    },
+    "audience": {
+      "devs": "Desenvolvedores",
+      "pms": "PMs",
+      "endUsers": "Usuários finais",
+      "designers": "Designers"
+    },
+    "device": {
+      "desktop": "Desktop",
+      "tablet": "Tablet / Laptop",
+      "mobile": "Mobile"
+    },
+    "depth": {
+      "quick": "Rápido",
+      "standard": "Padrão",
+      "deep": "Profundo"
+    },
+    "vibe": {
+      "calm": "Calmo",
+      "energetic": "Energético",
+      "editorial": "Editorial",
+      "minimal": "Minimalista"
+    },
+    "a11y": {
+      "baseline": "Base",
+      "enhanced": "Aprimorada (WCAG AA+)"
+    }
   },
   "projects": {
     "untitled": "Design sem título",
