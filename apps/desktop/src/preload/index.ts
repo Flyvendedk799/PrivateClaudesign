@@ -1,4 +1,5 @@
 import type {
+  CacheRetention,
   CancelGenerationPayloadV1,
   ChatAppendInput,
   ChatMessage,
@@ -71,6 +72,10 @@ export interface ProviderRow {
   defaultModel: string;
   hasKey: boolean;
   reasoningLevel?: ReasoningLevel;
+  cacheRetention?: CacheRetention;
+  /** Per-chunk wall-clock budget for the agent runtime, in milliseconds.
+   *  Mirrors `ProviderEntry.wallClockBudgetMs` in @open-codesign/shared. */
+  wallClockBudgetMs?: number;
   error?: 'decryption_failed' | string;
 }
 
@@ -124,6 +129,17 @@ export interface Preferences {
  * lockstep change here — useAgentStream in the renderer tolerates unknown
  * event types by ignoring them.
  */
+/** Wire shape for the `apply-comment:event:v1` channel. Smaller than
+ *  AgentStreamEvent because applyComment is a one-shot revise (no tool
+ *  loop) — only text deltas + a terminal `done` event. */
+export interface ApplyCommentStreamEvent {
+  /** Per-call run identifier (matches the `runId` from withRun()). */
+  runId: string;
+  kind: 'text_delta' | 'done';
+  /** Present on text_delta events. */
+  delta?: string;
+}
+
 export interface AgentStreamEvent {
   type:
     | 'turn_start'
@@ -132,6 +148,8 @@ export interface AgentStreamEvent {
     | 'tool_call_start'
     | 'tool_call_result'
     | 'fs_updated'
+    | 'chunk_start'
+    | 'chunk_end'
     | 'agent_end'
     | 'error';
   designId: string;
@@ -159,6 +177,13 @@ export interface AgentStreamEvent {
   // generation so the user can watch the design take shape.
   path?: string;
   content?: string;
+  // chunk_start / chunk_end — emitted by the IPC handler around each
+  // auto-continue chunk. Lets the renderer show "Chunk N of M · X:YY
+  // remaining" without inferring from log lines.
+  chunkIndex?: number;
+  chunkCap?: number;
+  chunkBudgetMs?: number;
+  chunkInterrupted?: boolean;
   // error
   message?: string;
   code?: string;
@@ -181,6 +206,10 @@ const api = {
     generationId: string;
     designId?: string;
     previousHtml?: string;
+    /** Slash-command-driven artifact pattern override. Omit for default
+     *  ('jsx'). 'vanilla' selects the multi-source-file guidance + the
+     *  vanilla preview inliner. */
+    pattern?: 'jsx' | 'vanilla';
   }) =>
     ipcRenderer.invoke('codesign:v1:generate', {
       schemaVersion: 1,
@@ -191,6 +220,13 @@ const api = {
       schemaVersion: 1,
       generationId,
     } satisfies CancelGenerationPayloadV1),
+  /** Push a "wrap up now" override into the agent's pending-steers queue.
+   *  The agent picks it up at the next turn_end and converges to `done`
+   *  ASAP. No-op + warn if the generationId isn't currently in flight. */
+  requestWrapUp: (generationId: string) =>
+    ipcRenderer.invoke('codesign:v1:request-wrap-up', { generationId }) as Promise<{
+      queued: boolean;
+    }>,
   generateTitle: (prompt: string) =>
     ipcRenderer.invoke('codesign:v1:generate-title', { prompt }) as Promise<string>,
   applyComment: (payload: {
@@ -207,8 +243,16 @@ const api = {
     ipcRenderer.invoke('codesign:pick-design-system-directory') as Promise<OnboardingState>,
   clearDesignSystem: () =>
     ipcRenderer.invoke('codesign:clear-design-system') as Promise<OnboardingState>,
-  export: (payload: { format: ExportFormat; htmlContent: string; defaultFilename?: string }) =>
-    ipcRenderer.invoke('codesign:export', payload) as Promise<ExportInvokeResponse>,
+  export: (payload: {
+    format: ExportFormat;
+    htmlContent: string;
+    defaultFilename?: string;
+    /** When supplied AND format='zip', main loads the design's full
+     *  virtual FS from SQLite and bundles every sibling file (CSS, JS,
+     *  assets) alongside index.html. Required for vanilla-pattern zips
+     *  to mirror Claude Design's multi-file layout. */
+    designId?: string;
+  }) => ipcRenderer.invoke('codesign:export', payload) as Promise<ExportInvokeResponse>,
   locale: {
     getSystem: () => ipcRenderer.invoke('locale:get-system') as Promise<string>,
     getCurrent: () => ipcRenderer.invoke('locale:get-current') as Promise<string>,
@@ -303,6 +347,14 @@ const api = {
       /** `null` explicitly clears the override and falls back to the model
        *  default; a level string sets it; omit to leave untouched. */
       reasoningLevel?: ReasoningLevel | null;
+      /** Same tri-state as reasoningLevel: `null` clears, value sets, omit
+       *  leaves alone. Effective on the legacy `complete()` path; the agent
+       *  path inherits via the PI_CACHE_RETENTION env var. */
+      cacheRetention?: CacheRetention | null;
+      /** Per-chunk wall-clock budget (ms) for the agent runtime. Same
+       *  tri-state: `null` clears (use core default), positive number sets,
+       *  omit leaves alone. Range enforced server-side: 60000-600000. */
+      wallClockBudgetMs?: number | null;
       /** Non-empty string rotates the stored secret; empty string clears it
        *  (keyless providers); omit to leave the existing secret untouched. */
       apiKey?: string;
@@ -491,6 +543,15 @@ const api = {
       const listener = (_e: unknown, event: AgentStreamEvent) => cb(event);
       ipcRenderer.on('agent:event:v1', listener);
       return () => ipcRenderer.removeListener('agent:event:v1', listener);
+    },
+    /** Subscribe to streaming text deltas from `applyComment`. The callback
+     *  fires once per text chunk while the model is producing the revised
+     *  HTML, then once with kind='done' when the call resolves. Returns an
+     *  unsubscribe function. */
+    onApplyCommentEvent: (cb: (event: ApplyCommentStreamEvent) => void) => {
+      const listener = (_e: unknown, event: ApplyCommentStreamEvent) => cb(event);
+      ipcRenderer.on('apply-comment:event:v1', listener);
+      return () => ipcRenderer.removeListener('apply-comment:event:v1', listener);
     },
   },
   comments: {

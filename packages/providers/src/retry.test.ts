@@ -7,7 +7,14 @@ const MODEL: ModelRef = { provider: 'anthropic', modelId: 'claude-sonnet-4-6' };
 const MESSAGES: ChatMessage[] = [{ role: 'user', content: 'hi' }];
 const OPTS: GenerateOptions = { apiKey: 'test-key' };
 
-const ok: GenerateResult = { content: 'hello', inputTokens: 1, outputTokens: 1, costUsd: 0 };
+const ok: GenerateResult = {
+  content: 'hello',
+  inputTokens: 1,
+  outputTokens: 1,
+  cachedInputTokens: 0,
+  cacheCreationInputTokens: 0,
+  costUsd: 0,
+};
 
 class HttpError extends Error {
   constructor(

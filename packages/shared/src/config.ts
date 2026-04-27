@@ -96,6 +96,13 @@ export type StoredDesignSystem = z.infer<typeof StoredDesignSystem>;
 export const ReasoningLevelSchema = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']);
 export type ReasoningLevel = z.infer<typeof ReasoningLevelSchema>;
 
+/** Anthropic prompt-cache TTL knob. `'short'` = 5-min ephemeral (default,
+ *  works on every endpoint). `'long'` = 1-hour, only honored on official
+ *  api.anthropic.com — gateways will silently fall back to short. `'none'`
+ *  disables cache markers entirely. */
+export const CacheRetentionSchema = z.enum(['short', 'long', 'none']);
+export type CacheRetention = z.infer<typeof CacheRetentionSchema>;
+
 export const ProviderModelDiscoveryModeSchema = z.enum(['models', 'static-hint', 'manual']);
 export type ProviderModelDiscoveryMode = z.infer<typeof ProviderModelDiscoveryModeSchema>;
 
@@ -164,6 +171,23 @@ export const ProviderEntrySchema = z.object({
    * per endpoint. The UI surfaces this as a "Reasoning depth" dropdown.
    */
   reasoningLevel: ReasoningLevelSchema.optional(),
+  /**
+   * Per-provider Anthropic prompt-cache TTL override. When unset, requests
+   * use the `'short'` (5-min) default that pi-ai applies and that the
+   * providers layer pins explicitly. Set to `'long'` (1 h) for official
+   * api.anthropic.com sessions where the user wants cache hits to survive
+   * lunch breaks; gateways will silently fall back to short. Set to
+   * `'none'` to disable cache markers entirely (debug only).
+   */
+  cacheRetention: CacheRetentionSchema.optional(),
+  /**
+   * Per-provider per-chunk wall-clock budget for the agent runtime, in
+   * milliseconds. Caps how long a single agent run may go before
+   * gracefully checkpointing and handing off to the auto-continue loop.
+   * Range = 1–10 minutes. Unset → use the core default (5 min). Surface
+   * as a slider/numeric in Settings (UX uses seconds; storage is ms).
+   */
+  wallClockBudgetMs: z.number().int().min(60_000).max(600_000).optional(),
   capabilities: ProviderCapabilitiesSchema.optional(),
 });
 export type ProviderEntry = z.infer<typeof ProviderEntrySchema>;

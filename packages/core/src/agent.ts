@@ -1,11 +1,11 @@
 /**
- * Workstream B — Phase 1 agent-runtime wrapper.
+ * Workstream B — agent-runtime wrapper (now the default code path).
  *
  * Routes a `generate()`-shaped request through `@mariozechner/pi-agent-core`
- * with an empty tool list. Purpose: de-risk the runtime integration before
- * Phase 2 introduces real tools (str_replace_based_edit_tool, set_todos,
- * load_skill, verify_syntax). When `USE_AGENT_RUNTIME` is off this file is
- * not imported, so behavior for existing users is unchanged.
+ * with the full tool set wired (str_replace_based_edit_tool, set_todos,
+ * list_files, read_design_system, read_url, generate_image_asset,
+ * declare_tweak_schema, done). The legacy single-turn `generate()` path stays
+ * available as `USE_AGENT_RUNTIME=0` opt-out for one minor version.
  *
  * Design doc: docs/plans/2026-04-20-agentic-sidebar-custom-endpoint-design.md §4.
  *
@@ -61,6 +61,11 @@ import { reasoningForModel } from './index.js';
 import { type CoreLogger, NOOP_LOGGER } from './logger.js';
 import { composeSystemPrompt } from './prompts/index.js';
 import { makeDeclareTweakSchemaTool } from './tools/declare-tweak-schema.js';
+import {
+  makeListDesignSkillsTool,
+  makeViewDesignSkillTool,
+  makeViewFrameTool,
+} from './tools/design-library.js';
 import { type DoneRuntimeVerifier, makeDoneTool } from './tools/done.js';
 import {
   type GenerateImageAssetFn,
@@ -85,6 +90,8 @@ interface PiAssistantMessage {
   usage?: {
     input?: number;
     output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
     cost?: { total?: number };
   };
   stopReason: 'stop' | 'length' | 'toolUse' | 'error' | 'aborted';
@@ -288,8 +295,16 @@ function buildPiModel(
     reasoning: true,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 200000,
-    maxTokens: 32000,
+    contextWindow: 400000,
+    // 196608 = 3 × 65536 (matches MAX_OUTPUT_TOKENS in index.ts). pi-ai's
+    // anthropic adapter sends `max_tokens = model.maxTokens / 3` when no
+    // per-call override is supplied (see node_modules/.../anthropic.js
+    // buildParams), so to land an effective per-turn cap of 65536 we
+    // pre-multiply by 3 here. Without this, the agent path got 64000/3 ≈
+    // 21333 and a single fat `text_editor.str_replace` would truncate
+    // mid-tool-input — which is exactly the failure mode that motivated
+    // this fix (see the 2026-04-26 generate.ok log with output=32000).
+    maxTokens: 196608,
   };
   if (httpHeaders !== undefined) out.headers = httpHeaders;
 
@@ -393,75 +408,43 @@ const AGENTIC_TOOL_GUIDANCE = [
   '- Reference them as `TWEAK_DEFAULTS.accentColor` in your JSX.',
   "- Don't rewrite the marker block at runtime; the host edits it.",
   '',
-  '### Required cadence',
-  '1. **First turn — plan.** Call `set_todos` with **7–10 checklist items** naming concrete sections AND an explicit `Interactive polish` step near the end (e.g. "Hero", "Metrics row", "CFO pull quote", "How we did it", "Logo strip", "Interactive polish: hover/press, tabs, empty states", "Final proof-read"). Each item is a single component or refinement pass — not "Build page". Mark all unchecked.',
-  '2. **Second turn — skeleton.** Use `text_editor.create("index.html", ...)` to write a minimal scaffold: the EDITMODE block, an empty `App` returning a basic layout container, and the `ReactDOM.createRoot` line. **Do not** include any section content yet. Then `set_todos` with skeleton ticked.',
-  '3. **One section per turn — fill.** For each remaining todo, in its own turn:',
-  '   1. One short prose line announcing what you\'re about to do ("Adding the metrics row now.").',
-  '   2. `view` the file (1 call).',
-  "   3. `str_replace` to add ONE section's JSX (1 call).",
-  '   4. One short prose line reflecting on what landed ("Three KPIs in place — the deltas use mono tnum so they line up.").',
-  '   5. Tick the matching todo via `set_todos`.',
-  '   That is **2 prose lines + 3 tool calls per turn**. Never batch multiple sections into a single str_replace; never run two str_replace tools in the same turn without a prose line in between.',
-  '4. **Polish passes — interactive depth (MANDATORY, ≥2 dedicated turns).** The first polish turn wires interactions; the second adds small-detail craft. These are NOT optional — if the user sees static pixels where they expected live UI, the artifact fails. Before `done` every item on this list must be TRUE:',
-  '   (a) **≥3 functional state changes** that a user can trigger and observe. Tab switch revealing a different view, accordion open/close, drawer slide-in, favorite/like toggle that persists, dropdown/menu expand, inline-edit, filter chip toggle, modal open. Pure hover effects do NOT count toward this three.',
-  '   (b) **≥1 animated view/page transition** if there is any nav (tabs, sidebar, bottom bar, breadcrumbs). 180–260ms, opacity + small translate. A hard cut between views is a failure.',
-  '   (c) **Every `<button>` and `<a>` does something.** No decorative buttons. Wire a state change, open a modal, fire a toast, or remove it. Login / Sign-up / CTA buttons on marketing pages may open a modal stub — still real, not dead.',
-  '   (d) **Uniform hover + press + focus** across ALL clickable elements. Required cadence: `transition: transform 120ms var(--ease-out), background-color 120ms, box-shadow 160ms;` hover lifts 2px; press = `scale(0.96)`; focus = 2px offset ring in accent color (never rely on browser default outline).',
-  '   (e) **≥3 small-detail "craft-surplus" touches** from the craft-directives catalog. Pick from: stateful counter/badge with pop animation, keyboard shortcut chip (`⌘K`, `/`, `esc`), inline-editable field, copy-to-clipboard with "Copied ✓" feedback, dismissible toast/banner, contextual tooltip with directional arrow, scroll-linked header shrink, relative-time tick ("3m ago"), segmented control with weighted active state, thoughtful empty-state SVG scene, expandable accordion inside a card, a deliberate visual rhythm-break section. Adding a gradient and shadow does NOT count.',
-  '   (f) **≥1 empty-state variant** visible or coded (icon + one-sentence reason + CTA) on a list/grid/table, even when current data is non-empty.',
-  '   (g) **Active nav indicator uses weight/shape, not color alone** — underline, inset background, side-accent bar, or pill — so color-blind users can tell where they are.',
-  '   (h) Data reads real: varied names, non-round numbers (87 %, $14.2k), relative dates ("3h ago", "yesterday"), not Lorem / 100 % / Jan 1 2020.',
-  '   Break this into TWO todo items: `Interactive wiring (state + transitions)` and `Craft surplus (small details)`. Tick them explicitly so the user can see both phases landed.',
-  '5. **Final turn — summary.** 2–4 sentences of natural-language prose explaining 2–3 design decisions worth noting (e.g. "Used three distinct surface tones for depth"). Do NOT re-emit the file content; the host extracts it from the virtual fs. Pasting the full file here wastes ~2M tokens on the next turn and will crash the request — this is a hard failure, not a style nit.',
+  '### Tool-use shape (loose — figure out the rhythm yourself)',
   '',
-  '### File output policy (STRICT)',
-  "- Use `str_replace_based_edit_tool` for ALL file content. Do NOT emit `<artifact>` tags or fenced ```jsx/```html blocks containing the source in your prose — the host extracts the artifact from the virtual fs and any inline source spams the user's chat.",
-  '- Your assistant text is for explanation, planning, and progress notes only.',
-  '- Prefer small, specific `old_str` values so each edit is unambiguous.',
-  '- Minimum 6 tool calls per design; 10–15 is typical.',
+  'You decide the cadence. There are no per-turn quotas.',
+  '- Start with a brief plan via `set_todos` (5-8 items naming concrete sections), then `text_editor.create("index.html", ...)` for the skeleton (EDITMODE block + empty App + ReactDOM.createRoot).',
+  '- Then add sections via `str_replace`. Group adjacent sections in the same turn when convenient. Tick todos as they land.',
+  '- Aim for visual + interactive completeness: ≥2 functional state changes (tab/accordion/toggle/modal), uniform hover/press/focus on clickables, real-feeling data (no Lorem / 100% / Jan 1 2020), ≥1 empty-state variant.',
+  '- When the artifact feels complete, call `done`. The host runs static lint + a 3s runtime load to surface console errors — fix what comes back via `str_replace` and call `done` again. After 3 unfixed rounds the next `done` force-accepts.',
+  '- Final assistant message: 2-4 sentences of plain-text prose noting 2-3 design decisions worth highlighting. NEVER re-emit the file source — the host extracts it from the virtual fs; pasting it would blow the context limit on the next turn.',
   '',
-  '### Token-budget discipline (CRITICAL)',
-  '- `view("index.html")` WITHOUT `view_range` returns the ENTIRE file — each call accumulates in your context window.',
-  '- **Full-file view at most ONCE per generation run**: right before your first `str_replace`, for initial orientation. After that the file WILL grow with every edit, so a second full-file view becomes very expensive.',
-  '- **For any re-inspection after the first view, pass `view_range`** — it takes `[startLine, endLine]` (1-indexed, inclusive; either bound may be `-1` for "end of file"). Examples:',
-  '    `view("index.html", view_range: [1, 40])` — re-read the top 40 lines to check imports / EDITMODE block',
-  '    `view("index.html", view_range: [200, 260])` — re-inspect a section you just edited',
-  '    `view("index.html", view_range: [-1, -1])` — wrong; use a real line number for start',
-  '- A second full-file view (no `view_range`) within the same run auto-truncates to a 400-char head snippet — the host enforces this to protect the context window. If you need to see a region, issue a ranged view; if you just need to pick an `old_str`, work from memory of the first view.',
-  '- Never `view` "just to verify" a str_replace succeeded — the tool reports errors when it fails; silence means success. Use `done` for verification, not re-view.',
-  '- Keep `str_replace` edits tight: `old_str` should be the minimum unique anchor (often 1-3 lines), and `new_str` should be the new JSX only. Large old_str + new_str pairs also live in context.',
+  '### Tool-use rules that prevent real bugs',
+  '- Use `str_replace_based_edit_tool` for ALL file content. NEVER inline source in prose — the host extracts it from the virtual fs.',
+  '- Per-call size caps (enforced by the tool): `index.html` create ≤ 8 KB / str_replace ≤ 12 KB. Sidecar files (.css / .js, vanilla pattern only) get 64 KB / 32 KB.',
+  '- Follow-up turns when `index.html` already exists: use `str_replace`, NEVER `create`. `create` overwrites and destroys prior work. Only re-`create` when the user explicitly asks to start over.',
+  '- **Trust your context — DO NOT `view` to verify a write.** After a successful `create` or `str_replace`, you already know the post-state. The tool errors loudly when an edit fails (`old_str not found` / `ambiguous`); silence means it landed exactly as you wrote it. Re-viewing "just to be safe" burned 48 of 76 tool calls in a recent production trace and added ~6 minutes of latency. Only `view` when (a) `str_replace` returned an error and you need its candidate line numbers, or (b) you genuinely need to re-read a section heavily edited by *prior* turns.',
+  "- Use `view_range: [start, end]` (1-indexed, `-1` = EOF) for tight re-inspections. A second full-file view auto-truncates to a 400-char snippet — that's the system telling you the same thing.",
+  "- When `str_replace` says `old_str not found`: the error includes candidate line numbers where the first line of your `old_str` *does* appear. Re-`view` that region, then retry with the exact snippet — don't guess again. When it says `ambiguous` / `matched N times`: extend `old_str` with 1-3 extra lines of context.",
+  '- **`set_todos` cadence — 3-5 calls per design, max.** Initial plan + 1-3 progress updates as major sections land. Each call sends the FULL list back, so calling it after every single section is wasteful. Batch checkbox toggles when convenient.',
+  '- **A11y baseline (FATAL — `done` will reject):** every `<button>` needs visible text or `aria-label`; every `<input>` (text/email/password/etc.) needs a `<label>` or `aria-label`; every `<a href>` needs link text, `aria-label`, or an `<img alt="…">` child. Bake these into your scaffold — fixing post-hoc costs an extra `done` round.',
   '',
-  '## Frames (optional starters)',
+  '## Design library (use these — discover via tools)',
   '',
-  'For mobile / tablet / watch / desktop shells, view one of these first:',
+  '12 bundled **design-skill** starter snippets and 5 **device frame** shells are available as tools, NOT static prose. Reach for them BEFORE scaffolding `index.html` — they encode dozens of design decisions you would otherwise rederive.',
   '',
-  '  frames/iphone.jsx       — iPhone 16 Pro shell (Dynamic Island + home indicator)',
-  '  frames/ipad.jsx         — iPad chrome',
-  '  frames/watch.jsx        — Apple Watch Ultra (digital crown + side buttons)',
-  '  frames/android.jsx      — Android Material 3 phone (gesture or 3-button nav)',
-  '  frames/macos-safari.jsx — macOS Safari window (traffic lights + tabs)',
+  '**Skills (call `list_design_skills` first to see the catalogue + when_to_use hints, then `view_design_skill({name})` on the best match):**',
+  '  slide-deck · dashboard · landing-page · chart-svg · glassmorphism · editorial-typography · heroes · pricing · footers · chat-ui · data-table · calendar',
   '',
-  'Frame files export their device components onto window (e.g. `AppleWatchUltra`, `AndroidPhone`, `MacOSSafari`) so you can drop them straight into your `App` after copying.',
+  '**Frames (call `view_frame({name})` directly when the brief implies a device shell):**',
+  '  iphone · ipad · watch · android · macos-safari',
   '',
-  '## Design skills (optional starter snippets)',
+  'Frame files export their device components onto window (`IOSDevice`, `AppleWatchUltra`, `AndroidPhone`, `MacOSSafari`) so you can drop them straight into your `App` after viewing.',
   '',
-  'For common patterns, view the matching skill before writing:',
+  '**Workflow:**',
+  '  1. `list_design_skills` — single call, returns name + when_to_use + size for all 12.',
+  '  2. `view_design_skill({name})` on the best match (or `view_frame({name})` for a device shell).',
+  '  3. Adapt — never paste verbatim. The skill is the starting structure; the brief decides the content.',
   '',
-  '  skills/slide-deck.jsx',
-  '  skills/dashboard.jsx',
-  '  skills/landing-page.jsx',
-  '  skills/chart-svg.jsx',
-  '  skills/glassmorphism.jsx',
-  '  skills/editorial-typography.jsx',
-  '  skills/heroes.jsx       — 5 hero section variants',
-  '  skills/pricing.jsx      — 4 pricing variants',
-  '  skills/footers.jsx      — 4 footer variants',
-  '  skills/chat-ui.jsx      — Chat UI primitives (bubbles, thinking, tool cards)',
-  '  skills/data-table.jsx   — Data table with sortable / filterable',
-  '  skills/calendar.jsx     — Month-view calendar',
-  '',
-  'Each declares a `// when_to_use:` hint at the top — read it before adopting.',
+  'Skipping the library means rewriting things the bundle already does well. Use it.',
   '',
   '## Multi-view designs — when the brief implies navigation',
   '',
@@ -605,6 +588,132 @@ const AGENTIC_TOOL_GUIDANCE = [
   'italic serif numbers visually collide and feel low-quality.',
 ].join('\n');
 
+/**
+ * VANILLA pattern guidance — multi-source-file (HTML + CSS + JS) matching
+ * the structure of real Claude Design exports (see Neurolayer.zip:
+ * `index.html` 8 KB + `styles.css` 42 KB + `mindspace.js` 127 KB +
+ * `ui.js` 34 KB + `case-data.js` 21 KB). Selected via the `/vanilla`
+ * slash command in the chat input.
+ *
+ * Why this exists: the JSX-via-Babel-standalone pattern (default
+ * `AGENTIC_TOOL_GUIDANCE`) is great for React-component designs but
+ * caps total artifact size around 50-80 KB before the per-turn output
+ * budget gets tight. Canvas / Three.js / animation-heavy designs need
+ * 100-200 KB of code split across files. This pattern unlocks that.
+ */
+const VANILLA_TOOL_GUIDANCE = [
+  '## OVERRIDE: artifact-wrapper rules do not apply in this mode',
+  '',
+  'The base system prompt instructs you to emit the design inside an ',
+  '`<artifact>...</artifact>` tag. **Those rules are superseded.** Files are ',
+  'written via `str_replace_based_edit_tool` and extracted from the virtual ',
+  'filesystem by the host. Emitting file contents as assistant text duplicates ',
+  'the design, doubles token cost, and blows past the LLM context limit.',
+  '',
+  '## Output format — VANILLA multi-file (STRICT)',
+  '',
+  'You write a Claude-Design-style multi-file project. **Multi-file is the point** — if a single 35 KB `index.html` would do, the user would have used `/jsx`. Reach for separate files whenever they make the project clearer or unblock CDN libraries.',
+  '',
+  'Minimum file set:',
+  '',
+  '  index.html        — minimal HTML scaffold + <link>/<script src> refs',
+  '  styles.css        — all CSS, separated from HTML',
+  '  app.js            — main app logic / event handling / DOM mutations',
+  '',
+  '**When to split further (default: split early, not late):**',
+  '',
+  '  data.js           — static fixtures (products, posts, testimonials) named `window.X` so other files can read them. Always split when fixtures > ~30 lines.',
+  '  ui.js             — DOM render helpers / template functions / event wiring (everything that builds markup from data).',
+  '  <engine>.js       — domain-specific code: `scene.js` for Three.js, `physics.js` for sim, `audio.js` for Web Audio, `particles.js` for canvas effects.',
+  '  <feature>.js      — large interactive feature (chat panel, drawing tool, code editor) — anything > ~150 lines of self-contained logic.',
+  '',
+  '**Decomposition rule of thumb:** if `app.js` is heading past 400 lines, you should already have at least one extra `.js` file. Big single files are harder for the user to read AND eat your str_replace budget faster.',
+  '',
+  '**Cross-file linkage pattern (window-globals, no module system):**',
+  '  - `data.js` exposes `window.PRODUCTS = [...]; window.TESTIMONIALS = [...];`',
+  '  - `ui.js` reads `window.PRODUCTS`, defines `window.renderGrid = (root) => {...}`',
+  '  - `app.js` wires `document.addEventListener("DOMContentLoaded", () => window.renderGrid(...))`',
+  '  - **Script load order in `index.html`** matters: CDN libs → `data.js` → `<engine>.js` → `ui.js` → `app.js`. Anything that reads `window.X` must be loaded AFTER `X` is defined. Get this wrong and the preview throws "X is not defined".',
+  '',
+  '`index.html` template:',
+  '```html',
+  '<!doctype html>',
+  '<html lang="en">',
+  '<head>',
+  '  <meta charset="utf-8" />',
+  '  <meta name="viewport" content="width=device-width, initial-scale=1" />',
+  '  <title>Your design title</title>',
+  '  <link rel="preconnect" href="https://fonts.googleapis.com" />',
+  '  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />',
+  '  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />',
+  '  <link rel="stylesheet" href="styles.css" />',
+  '</head>',
+  '<body>',
+  '  <div id="app"></div>',
+  '  <!-- Optional CDN libraries — Three.js, D3, Chart.js, etc. -->',
+  '  <!-- <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script> -->',
+  '  <script src="data.js"></script>',
+  '  <script src="app.js"></script>',
+  '</body>',
+  '</html>',
+  '```',
+  '',
+  'The host inlines `<link href="local.css">` as `<style>` and `<script src="local.js">` as inline `<script>` (in source order) when rendering the iframe preview. CDN refs (https://...) pass through unchanged. So the agent works with normal file references; the runtime stitches them at preview time.',
+  '',
+  '### Required cadence',
+  '1. **First turn — plan with budget.** Call `set_todos` with **5–8 checklist items** formatted as `"<file or section> (~<turns>t)"` where `<turns>` is your honest per-item estimate. Total ≤ 25 turns. Always include a final `"Polish + done (~2t)"`. Examples: `"index.html scaffold (~1t)"`, `"styles.css base + tokens (~2t)"`, `"data.js fixtures (~1t)"`, `"app.js render + interactions (~3t)"`, `"Polish + done (~2t)"`.',
+  '2. **Second turn — scaffold.** `text_editor.create("index.html", ...)` with the template above (≤ 8 KB). Reference your planned sidecar files even though they don\'t exist yet. Then `set_todos` ticking the scaffold.',
+  '3. **CSS turn — `text_editor.create("styles.css", ...)`** with your full design tokens + base layout. Sidecar files accept up to **64 KB per create**, so you CAN write a complete stylesheet in one call. Tick the styles todo.',
+  '4. **JS turns — one or more `text_editor.create("<name>.js", ...)` calls** for each JS module. 64 KB per create cap; 32 KB per str_replace cap. Group by concern. Tick after each module lands.',
+  '5. **Polish turn — refinements via `str_replace`** on whichever files need them. Add ≥2 functional state changes (clicks, toggles), uniform hover/press/focus, real-feeling data. Tick polish.',
+  '6. **`done` immediately after polish.** The host runs static lint + a 3-second runtime load to surface console errors. Fix what comes back via `str_replace`, then call `done` again. Stop after 3 rounds.',
+  '7. **Final turn — summary.** 2–4 sentences of natural-language prose. Do NOT re-emit any file content; the host extracts everything from the virtual fs.',
+  '',
+  '### File output policy (STRICT)',
+  '- Use `str_replace_based_edit_tool` for ALL file content. Never inline source in your prose.',
+  '- Per-call caps (enforced by the tool):',
+  '    - `index.html` create ≤ 8 KB (scaffold only)',
+  '    - sidecar (`.css` / `.js` / `.json`) create ≤ 64 KB',
+  '    - `index.html` str_replace ≤ 12 KB / sidecar str_replace ≤ 32 KB',
+  '- Prefer small, specific `old_str` values per edit so each is unambiguous.',
+  '- Minimum 8 tool calls per design (scaffold + ≥2 file creates + ≥2 str_replace + set_todos + done); 12-25 is typical.',
+  '',
+  '### CDN libraries',
+  '',
+  'Vanilla pattern allows external CDN scripts via `<script src="https://...">`. Use this for Three.js, D3, Chart.js, GSAP, or any library that\'s painful to inline. The iframe sandbox permits cross-origin script loads. Recommended sources (alphabetical, all serve correct CORS):',
+  '  https://cdn.jsdelivr.net/npm/<package>@<version>/<file>',
+  '  https://unpkg.com/<package>@<version>/<file>',
+  '',
+  'Pin to a version (`@0.160.0`, `@7`, etc.) — never use `@latest` (cache-bust risk).',
+  '',
+  '### Token-budget discipline',
+  '- **Trust your context — DO NOT `view` to verify a write.** After a successful `create` or `str_replace`, you already know the post-state. The tool errors loudly when an edit fails; silence means it landed. Re-viewing "just to be safe" wastes ~600 cached tokens per call and adds an LLM round-trip of latency.',
+  '- View each file at most once for orientation. After that, use `view_range: [start, end]` for tight slices when you genuinely need to re-read.',
+  '- **`set_todos` cadence — 3-5 calls max.** Initial plan + 1-3 progress updates as major files / sections land. Each call sends the FULL list back; calling it after every single section is wasteful.',
+  '- **A11y baseline (FATAL — `done` will reject):** the `index.html` template MUST include `<html lang="en">` + `<title>…</title>` + a `<main>` landmark. Every `<button>` needs visible text or `aria-label`; every `<input>` needs an associated `<label>` or `aria-label`; every `<a href>` needs link text, `aria-label`, or an `<img alt="…">` child.',
+  '- **Cross-file refs (FATAL — `done` will reject):** every `<link href>`, `<script src>`, and `<img src>` in `index.html` must be either an `https://` CDN URL OR a file you have already created (or will create before calling `done`). Missing local references surface as `multifile.missing_ref` errors and block acceptance.',
+  '',
+  '### Component reference discipline (CRITICAL — preview crashes otherwise)',
+  '',
+  'Before every `done` call, audit your own files:',
+  "- For every function/global referenced in `app.js` (e.g. `renderTimeline()`, `window.CASE`), confirm it's actually defined somewhere your `<script>` tags load.",
+  '- Script load order matters: `data.js` should be referenced BEFORE `app.js` if `app.js` reads `window.CASE`.',
+  '- Three.js (and any CDN script) must be referenced BEFORE the script that consumes it.',
+  "- For class names referenced in HTML (e.g. `.btn-primary`), confirm they're defined in `styles.css`.",
+  '',
+  '### Self-check via `done`',
+  '',
+  'After your artifact is complete, call `done` to verify. The host runs:',
+  '  (a) Static syntax lint over `index.html` (unclosed tags, duplicate IDs, missing alt).',
+  '  (b) A real runtime load — your `index.html` is mounted in a hidden BrowserWindow for ~3s and any console errors come back.',
+  '',
+  'If `status === "has_errors"`, fix with `str_replace` and call `done` again. After 3 unfixed rounds the next `done` force-accepts; mention the unresolved errors in your final summary.',
+  '',
+  "### What's the same as JSX pattern",
+  '',
+  "Auto-continue chunking + budget steering still apply (you have ~5 min per chunk; budget reminders fire at 60% and 90%; aim to call `done` within the chunk you're in). Cancel + Wrap-up controls still work. The 1-3 tool-calls-per-turn cadence still helps pacing.",
+].join('\n');
+
 const IMAGE_ASSET_TOOL_GUIDANCE = [
   '## Bitmap asset generation',
   '',
@@ -685,13 +794,14 @@ export interface GenerateViaAgentDeps {
 }
 
 /**
- * Route a generate() request through pi-agent-core's Agent with zero tools.
+ * Route a generate() request through pi-agent-core's Agent with the full
+ * tool set wired in (text_editor, set_todos, list_files, read_design_system,
+ * read_url, generate_image_asset, declare_tweak_schema, done).
  *
- * Phase 1 invariant: produces the same artifact as generate() when called
- * with the same inputs. Events are emitted so Workstream C can subscribe to
- * a persistable stream, but the final GenerateOutput shape is identical.
- *
- * Not exposed through the IPC layer unless USE_AGENT_RUNTIME is truthy.
+ * Default IPC entry point as of the prompt-cache + agent-runtime work; the
+ * legacy `generate()` path is reachable via `USE_AGENT_RUNTIME=0`. The final
+ * `GenerateOutput` shape is identical between paths (parity asserted in
+ * `agent-parity.test.ts`).
  */
 export async function generateViaAgent(
   input: GenerateInput,
@@ -755,6 +865,11 @@ export async function generateViaAgent(
   const defaultTools: AgentTool<TSchema, unknown>[] = [];
   defaultTools.push(makeSetTodosTool() as unknown as AgentTool<TSchema, unknown>);
   defaultTools.push(makeReadUrlTool() as unknown as AgentTool<TSchema, unknown>);
+  // Design library — both `list_design_skills` + `view_*` lookup tools.
+  // No fs deps; available even when `deps.fs` is absent (read-only path).
+  defaultTools.push(makeListDesignSkillsTool() as unknown as AgentTool<TSchema, unknown>);
+  defaultTools.push(makeViewDesignSkillTool() as unknown as AgentTool<TSchema, unknown>);
+  defaultTools.push(makeViewFrameTool() as unknown as AgentTool<TSchema, unknown>);
   defaultTools.push(
     makeReadDesignSystemTool(() => input.designSystem ?? null) as unknown as AgentTool<
       TSchema,
@@ -768,7 +883,7 @@ export async function generateViaAgent(
       makeDeclareTweakSchemaTool(deps.fs) as unknown as AgentTool<TSchema, unknown>,
     );
     defaultTools.push(
-      makeDoneTool(deps.fs, deps.runtimeVerify) as unknown as AgentTool<TSchema, unknown>,
+      makeDoneTool(deps.fs, deps.runtimeVerify, log) as unknown as AgentTool<TSchema, unknown>,
     );
   }
   if (deps.generateImageAsset) {
@@ -781,9 +896,14 @@ export async function generateViaAgent(
   }
   const tools = deps.tools ?? defaultTools;
   const encourageToolUse = deps.encourageToolUse ?? tools.length > 0;
+  // Pattern selection: defaults to JSX-via-Babel-standalone (the
+  // historical and richer-tooling-supported path). `/vanilla` slash
+  // command in the chat input flips this to multi-source-file. The
+  // image-asset addendum applies to both patterns.
+  const baseGuidance = input.pattern === 'vanilla' ? VANILLA_TOOL_GUIDANCE : AGENTIC_TOOL_GUIDANCE;
   const activeGuidance = deps.generateImageAsset
-    ? `${AGENTIC_TOOL_GUIDANCE}\n\n${IMAGE_ASSET_TOOL_GUIDANCE}`
-    : AGENTIC_TOOL_GUIDANCE;
+    ? `${baseGuidance}\n\n${IMAGE_ASSET_TOOL_GUIDANCE}`
+    : baseGuidance;
   const augmentedSystemPrompt = encourageToolUse
     ? `${systemPrompt}\n\n${activeGuidance}`
     : systemPrompt;
@@ -866,6 +986,116 @@ export async function generateViaAgent(
     });
   }
 
+  // Per-run safety budget. Caps catastrophic loops without constraining a
+  // typical 10–15-tool-call design pass. When a cap is hit we record a
+  // `budgetReason` and call `agent.abort()`; the post-loop branch below
+  // converts that into AGENT_BUDGET_EXCEEDED instead of the generic abort
+  // error so the renderer can show the right copy.
+  // Budgets sized for chunked-checkpoint execution (the user's
+  // 2026-04-26 ask: "a new prompt whenever it finishes a task in its
+  // plan"). Each generate run is now expected to land 1-3 sections then
+  // gracefully checkpoint; the user types "continue" (or any follow-up)
+  // to resume — each follow-up gets its own fresh GENERATION_TIMEOUT.
+  // Wall_clock is GRACEFUL (returns the partial artifact + a "paused"
+  // hint, see the catch block below). tool_calls stays HARD because a
+  // runaway loop must fail loudly, not silently checkpoint.
+  const DEFAULT_MAX_TOOL_CALLS = 120;
+  // Per-chunk wall-clock budget scales with reasoning level. The 5-min
+  // default works fine for reasoning=off (one turn = ~10-30s, lots of
+  // tool calls per chunk). With reasoning enabled, each turn includes
+  // an adaptive thinking phase that can eat 30-60s before the model
+  // emits anything; a 5-min chunk leaves almost no room for actual
+  // tool work after thinking. Production trace 2026-04-27 mogvfm77
+  // showed reasoning=medium runs landing 0-1 tool calls per chunk
+  // before the timer fired. Bumping to 12 min when reasoning is set
+  // gives the model room to think AND act within a single chunk.
+  // Caller can still override via input.agentBudget.maxWallClockMs.
+  const DEFAULT_MAX_WALL_CLOCK_MS_NO_REASONING = 5 * 60 * 1000;
+  const DEFAULT_MAX_WALL_CLOCK_MS_WITH_REASONING = 12 * 60 * 1000;
+  // `ReasoningLevel` is one of 'minimal'|'low'|'medium'|'high'|'xhigh' —
+  // undefined means "off" / use model default. Any defined level (even
+  // 'minimal') puts the model in adaptive thinking mode and changes
+  // per-turn timing characteristics enough to warrant the bumped budget.
+  const reasoningOn = input.reasoningLevel !== undefined && input.reasoningLevel !== null;
+  const adaptiveDefault = reasoningOn
+    ? DEFAULT_MAX_WALL_CLOCK_MS_WITH_REASONING
+    : DEFAULT_MAX_WALL_CLOCK_MS_NO_REASONING;
+  const maxToolCalls = input.agentBudget?.maxToolCalls ?? DEFAULT_MAX_TOOL_CALLS;
+  const maxWallClockMs = input.agentBudget?.maxWallClockMs ?? adaptiveDefault;
+  let budgetReason: 'tool_calls' | 'wall_clock' | null = null;
+  let toolCallCount = 0;
+  // Defer wall_clock-triggered aborts to the next `turn_end` boundary
+  // (the safe point identified in pi-agent-core/dist/agent-loop.js:121,
+  // between turn_end and the next turn_start). Aborting mid-stream
+  // leaves a half-formed assistant message with an incomplete
+  // toolcall_delta — the next chunk's history sees a malformed tool
+  // call and either re-fires it (wasted work) or breaks. The trade-off
+  // is at most one extra in-flight LLM turn before the abort lands; in
+  // practice that's 5–30s of overshoot, paid once per chunk transition.
+  // tool_calls aborts stay immediate because they're a runaway-loop
+  // signal and waiting for turn_end could let the loop balloon further.
+  let pendingWallClockAbort = false;
+  // Single-session execution (post-2026-04-27 framework simplification):
+  // budget steering nudges that lived here previously were workarounds
+  // for the 5-min chunk constraint. With the entire run inside one
+  // outer timeout, mid-run synthetic "user" messages just confuse the
+  // conversation flow. Removed. The user's Wrap-up button still works
+  // via getPendingSteers — that's an intentional user override, not a
+  // pacing nudge.
+  agent.subscribe((event) => {
+    if (event.type === 'tool_execution_start' && budgetReason === null) {
+      toolCallCount += 1;
+      if (toolCallCount > maxToolCalls) {
+        budgetReason = 'tool_calls';
+        log.warn('[generate] step=budget_exceeded', {
+          ...ctx,
+          reason: 'tool_calls',
+          toolCallCount,
+          maxToolCalls,
+        });
+        agent.abort();
+      }
+      return;
+    }
+    if (event.type === 'turn_end') {
+      if (pendingWallClockAbort) {
+        pendingWallClockAbort = false;
+        agent.abort();
+        return;
+      }
+      // Drain user-injected steers (Wrap-up button) at the safe boundary.
+      if (input.getPendingSteers) {
+        const drainPromise = Promise.resolve(input.getPendingSteers()).then((msgs) => {
+          for (const msg of msgs) {
+            agent.steer({
+              role: 'user',
+              content: msg,
+              timestamp: Date.now(),
+            });
+          }
+        });
+        drainPromise.catch((err) => {
+          log.warn('[generate] step=user_steer.drain_failed', {
+            ...ctx,
+            errorClass: err instanceof Error ? err.constructor.name : typeof err,
+          });
+        });
+      }
+    }
+  });
+  const budgetTimer = setTimeout(() => {
+    if (budgetReason !== null) return;
+    budgetReason = 'wall_clock';
+    log.warn('[generate] step=budget_exceeded', {
+      ...ctx,
+      reason: 'wall_clock',
+      maxWallClockMs,
+    });
+    // Defer the actual abort to the next turn_end so the in-flight
+    // assistant message gets to settle cleanly.
+    pendingWallClockAbort = true;
+  }, maxWallClockMs);
+
   if (input.signal) {
     if (input.signal.aborted) {
       agent.abort();
@@ -889,6 +1119,11 @@ export async function generateViaAgent(
   const isFirstTurn = input.history.length === 0;
   const RETRY_BLOCKED = Symbol.for('open-codesign.retry.blocked');
   type RetryBlockedError = Error & { [RETRY_BLOCKED]?: true };
+  // Snapshot the pre-run message count so usage aggregation below sums only
+  // the assistant messages this run added (not historical turns from prior
+  // generate() calls). Safe across retries: the RETRY_BLOCKED guard inside
+  // sendOnce only allows retries when zero messages were appended.
+  const runStartIndex = agent.state.messages.length;
   const sendOnce = async (): Promise<void> => {
     const preLen = agent.state.messages.length;
     try {
@@ -930,19 +1165,65 @@ export async function generateViaAgent(
       await sendOnce();
     }
   } catch (err) {
-    log.error('[generate] step=send_request.fail', {
-      ...ctx,
-      ms: Date.now() - sendStart,
-      errorClass: err instanceof Error ? err.constructor.name : typeof err,
-    });
-    throw remapProviderError(err, input.model.provider, input.wire);
+    if (budgetReason === 'tool_calls') {
+      // tool_calls = runaway loop signal; keep failing loudly.
+      clearTimeout(budgetTimer);
+      throw new CodesignError(
+        `Agent run aborted by safety budget (tool_calls: ${toolCallCount}/${maxToolCalls} calls)`,
+        ERROR_CODES.AGENT_BUDGET_EXCEEDED,
+      );
+    }
+    if (budgetReason === 'wall_clock') {
+      // wall_clock = checkpoint signal; fall through to parse_response so
+      // the user sees the partial artifact + a "say continue" hint.
+      // Enriched payload feeds Step 5's auto-continue + post-launch
+      // tuning (chunk size, frequency analysis).
+      clearTimeout(budgetTimer);
+      const assistantMessagesAdded = agent.state.messages
+        .slice(runStartIndex)
+        .filter((m) => m.role === 'assistant').length;
+      log.warn('[generate] step=send_request.checkpoint', {
+        ...ctx,
+        ms: Date.now() - sendStart,
+        reason: 'wall_clock',
+        maxWallClockMs,
+        toolCallCount,
+        assistantMessagesAdded,
+        chunkIndex: input.agentBudget?.chunkIndex,
+      });
+    } else {
+      clearTimeout(budgetTimer);
+      log.error('[generate] step=send_request.fail', {
+        ...ctx,
+        ms: Date.now() - sendStart,
+        errorClass: err instanceof Error ? err.constructor.name : typeof err,
+      });
+      throw remapProviderError(err, input.model.provider, input.wire);
+    }
   }
+  clearTimeout(budgetTimer);
 
   const finalAssistant = findFinalAssistantMessage(agent.state.messages);
   if (!finalAssistant) {
     throw new CodesignError('Agent produced no assistant message', ERROR_CODES.PROVIDER_ERROR);
   }
-  if (finalAssistant.stopReason === 'error' || finalAssistant.stopReason === 'aborted') {
+  if (budgetReason === 'tool_calls' && finalAssistant.stopReason === 'aborted') {
+    throw new CodesignError(
+      `Agent run aborted by safety budget (tool_calls: ${toolCallCount}/${maxToolCalls} calls)`,
+      ERROR_CODES.AGENT_BUDGET_EXCEEDED,
+    );
+  }
+  // wall_clock + aborted is a checkpoint, not a failure — proceed to
+  // parse_response so the user gets the partial artifact and the
+  // "paused — say continue" hint appended below.
+  // Treat wall_clock-aborted as graceful (handled below); only fail on
+  // genuine errors or non-budget aborts (user cancel, signal).
+  const isWallClockCheckpoint =
+    budgetReason === 'wall_clock' && finalAssistant.stopReason === 'aborted';
+  if (
+    !isWallClockCheckpoint &&
+    (finalAssistant.stopReason === 'error' || finalAssistant.stopReason === 'aborted')
+  ) {
     // Prefer the original `getApiKey` throw (e.g. PROVIDER_AUTH_MISSING after
     // mid-run logout) over pi-agent-core's flattened plain-string failure,
     // so the renderer's error-code routing stays consistent with the path
@@ -1007,17 +1288,69 @@ export async function generateViaAgent(
     artifacts: collected.artifacts.length,
   });
 
-  const usage = finalAssistant.usage;
+  // Aggregate usage across every assistant message this run added — pi-ai
+  // emits one assistant message per LLM turn, each with its own usage. Using
+  // only the final message's usage (the previous behavior) under-reported
+  // multi-turn tool runs by 3-5×. `inputTokens` is the *total* (uncached +
+  // cacheRead + cacheWrite) so the cache-hit ratio (cachedInputTokens /
+  // inputTokens) the latency plan's verify step depends on is meaningful.
+  const aggregated = aggregateRunUsage(agent.state.messages.slice(runStartIndex));
+  // Wall-clock checkpoint: append a clear "paused, type continue" hint so
+  // the user knows this isn't a failure and the chat history threads the
+  // next prompt naturally onto the partial state.
+  const baseMessage = stripEmptyFences(collected.text);
+  const message = isWallClockCheckpoint
+    ? `${baseMessage}${baseMessage.length > 0 ? '\n\n' : ''}— Paused after ${Math.round(maxWallClockMs / 1000)}s of work to keep this turn responsive. The artifact above is what landed; type **continue** (or any follow-up) to pick up where I left off. —`
+    : baseMessage;
   const output: GenerateOutput = {
-    message: stripEmptyFences(collected.text),
+    message,
     artifacts: collected.artifacts,
-    inputTokens: usage?.input ?? 0,
-    outputTokens: usage?.output ?? 0,
-    costUsd: usage?.cost?.total ?? 0,
+    inputTokens: aggregated.inputTotal,
+    outputTokens: aggregated.output,
+    cachedInputTokens: aggregated.cacheRead,
+    cacheCreationInputTokens: aggregated.cacheWrite,
+    costUsd: aggregated.costUsd,
+    interrupted: isWallClockCheckpoint,
   };
   return skillResult.warnings.length > 0
     ? { ...output, warnings: [...(output.warnings ?? []), ...skillResult.warnings] }
     : output;
+}
+
+interface AggregatedUsage {
+  /** Total input tokens (uncached + cacheRead + cacheWrite). */
+  inputTotal: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  costUsd: number;
+}
+
+/** Sum the per-turn usage across every assistant message the agent added
+ *  during a single generate run. Non-assistant messages and missing usage
+ *  fields are skipped. */
+function aggregateRunUsage(runMessages: AgentMessage[]): AggregatedUsage {
+  const totals: AggregatedUsage = {
+    inputTotal: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    costUsd: 0,
+  };
+  for (const msg of runMessages) {
+    if (msg.role !== 'assistant') continue;
+    const usage = (msg as PiAssistantMessage).usage;
+    if (!usage) continue;
+    const uncached = usage.input ?? 0;
+    const cacheRead = usage.cacheRead ?? 0;
+    const cacheWrite = usage.cacheWrite ?? 0;
+    totals.inputTotal += uncached + cacheRead + cacheWrite;
+    totals.output += usage.output ?? 0;
+    totals.cacheRead += cacheRead;
+    totals.cacheWrite += cacheWrite;
+    totals.costUsd += usage.cost?.total ?? 0;
+  }
+  return totals;
 }
 
 function chatMessageToAgentMessage(

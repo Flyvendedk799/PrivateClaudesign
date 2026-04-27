@@ -25,6 +25,11 @@ import { create } from 'zustand';
 import type { StoreApi } from 'zustand';
 import type { CodesignApi, ExportFormat } from '../../preload/index';
 import { recordAction, snapshotTimeline } from './lib/action-timeline';
+import {
+  type ArtifactPattern,
+  PROMPT_COMMAND_HELP,
+  parsePromptCommand,
+} from './lib/prompt-commands';
 import { rendererLogger } from './lib/renderer-logger';
 
 declare global {
@@ -176,6 +181,12 @@ interface CodesignState {
   recentDesignIds: string[];
   isGenerating: boolean;
   activeGenerationId: string | null;
+  /** True when the in-flight generation is a follow-up against a design that
+   *  already has prior history (i.e. iteration, not first prompt). The chat
+   *  header + UserMessage row use this to show a "Refining existing design"
+   *  cue so the user knows the agent is aware of prior context. Cleared on
+   *  agent_end / error. */
+  currentRunIsRefinement: boolean;
   /** Design id that owns the in-flight generation. Lets the user switch to
    *  another design while a generation runs (it stays bound to its origin
    *  design via designIdAtStart) — UI only shows "generating" affordances on
@@ -187,6 +198,42 @@ interface CodesignState {
    *  waiting for the turn to settle. Cleared on turn_end (the persisted
    *  chat row takes over). */
   streamingAssistantText: { designId: string; text: string } | null;
+  /** Live chunk progress emitted by the auto-continue IPC loop. Drives the
+   *  ChatStatusHeader pill ("Chunk 2 of 5 · 1:34 elapsed"). Cleared on
+   *  agent_end (any path) or when isGenerating goes false. */
+  chunkProgress: {
+    designId: string;
+    generationId: string;
+    chunkIndex: number;
+    chunkCap: number;
+    chunkBudgetMs: number;
+    chunkStartedAt: number;
+    /** Set when chunk_end fires for this chunk. Drives the header's
+     *  "auto-resuming…" label between chunks. */
+    lastChunkInterrupted: boolean | null;
+  } | null;
+  /** Per-event liveness tracker for the chat status header. Updated on
+   *  every inbound agent:event:v1 by useAgentStream so the header can
+   *  show "Waiting for X…" with elapsed seconds instead of a frozen
+   *  "Thinking…" between events. Cleared on agent_end / error.
+   *
+   *  Fixes the "looks stale" UX problem during the 30-90s chunk
+   *  transition window (deferred-abort settle, DB history reload,
+   *  fresh AbortController + GENERATION_TIMEOUT, prompt synthesis,
+   *  first-token wait) where no events fire and the header would
+   *  otherwise freeze on the previous tool's verb. */
+  agentLiveness: {
+    /** Most recent event of any kind. Used as a "definitely alive" timestamp. */
+    lastEventAt: number;
+    /** Most recent text_delta — used to detect "Streaming…" state. */
+    lastTextDeltaAt: number | null;
+    /** Most recent turn_start — used to detect "Waiting for first token…". */
+    lastTurnStartAt: number | null;
+    /** True between chunk_start and the first turn_start of that chunk,
+     *  AND between chunk_end and the next chunk_start. Drives the
+     *  "Transitioning between chunks…" narrative. */
+    chunkTransitioning: boolean;
+  } | null;
   lastUsage: UsageSnapshot | null;
   errorMessage: string | null;
   lastError: string | null;
@@ -318,6 +365,11 @@ interface CodesignState {
    *  from useAgentStream's agent_end handler. */
   tryAutoPolish: (designId: string, locale: string) => void;
   cancelGeneration: () => void;
+  /** Push a "wrap up now" steer into the agent's pending queue. The
+   *  agent picks it up at the next turn_end and converges to `done`
+   *  immediately. UI surface: the "Wrap up" button next to the Stop
+   *  button in the prompt input. No-op if nothing's generating. */
+  requestWrapUp: () => Promise<void>;
   retryLastPrompt: () => Promise<void>;
   applyInlineComment: (comment: string) => Promise<void>;
   clearError: () => void;
@@ -881,6 +933,7 @@ function applyGenerateSuccess(
       recentDesignIds: pool.recent,
       isGenerating: false,
       activeGenerationId: null,
+      currentRunIsRefinement: false,
       generatingDesignId: null,
       generationStage: 'done' as GenerationStage,
       lastUsage: usage,
@@ -1039,6 +1092,7 @@ function applyGenerateError(
   finishIfCurrent(set, generationId, () => ({
     isGenerating: false,
     activeGenerationId: null,
+    currentRunIsRefinement: false,
     generatingDesignId: null,
     streamingAssistantText: null,
     errorMessage: msg,
@@ -1090,13 +1144,17 @@ function deriveGenerateHypothesis(
   const wire = pickUpstreamString(err, 'upstream_wire');
   const status = extractGenerateStatus(err);
   const message = err instanceof Error ? err.message : undefined;
+  const keyKindRaw = pickUpstreamString(err, 'key_kind');
+  const keyKind: 'oauth' | 'static' | undefined =
+    keyKindRaw === 'oauth' || keyKindRaw === 'static' ? keyKindRaw : undefined;
   const ctx = {
     provider,
     ...(baseUrl !== undefined && baseUrl !== null ? { baseUrl } : {}),
     ...(wire !== undefined ? { wire } : {}),
     ...(status !== undefined ? { status } : {}),
     ...(message !== undefined ? { message } : {}),
-  };
+    ...(keyKind !== undefined ? { keyKind } : {}),
+  } satisfies Parameters<typeof diagnoseGenerateFailure>[0];
   const hypotheses = diagnoseGenerateFailure(ctx);
   const primary = hypotheses[0];
   // Skip the bare "unknown" hypothesis — appending "Unknown error" to a
@@ -1308,9 +1366,12 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   recentDesignIds: [],
   isGenerating: false,
   activeGenerationId: null,
+  currentRunIsRefinement: false,
   generatingDesignId: null,
   generationStage: 'idle' as GenerationStage,
   streamingAssistantText: null,
+  chunkProgress: null,
+  agentLiveness: null,
   pendingToolCalls: [],
   lastUsage: null,
   errorMessage: null,
@@ -1534,8 +1595,54 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     // substitute a default trailer so buildPromptRequest still passes.
     const pendingEdits = get().comments.filter((c) => c.kind === 'edit' && c.status === 'pending');
     const trimmedInput = input.prompt.trim();
-    if (trimmedInput.length === 0 && pendingEdits.length === 0) return;
-    const effectivePrompt = trimmedInput.length === 0 ? 'Apply the pending changes.' : trimmedInput;
+
+    // Slash-command parser: `/jsx` / `/vanilla` set the artifact pattern,
+    // `/help` short-circuits with a help message and skips generation.
+    // Auto-polish + retry paths supply silent prompts; skip slash parsing
+    // for them so an internal "[auto-continue]" prompt can't accidentally
+    // start with `/something`.
+    const parsedCmd =
+      input.silent || trimmedInput.length === 0
+        ? { prompt: trimmedInput }
+        : parsePromptCommand(trimmedInput);
+    if (parsedCmd.showHelp) {
+      const designIdForHelp = get().currentDesignId;
+      if (designIdForHelp) {
+        void get().appendChatMessage({
+          designId: designIdForHelp,
+          kind: 'user',
+          payload: { text: trimmedInput },
+        });
+        void get().appendChatMessage({
+          designId: designIdForHelp,
+          kind: 'assistant_text',
+          payload: { text: PROMPT_COMMAND_HELP },
+        });
+      } else {
+        get().pushToast({
+          variant: 'info',
+          title: 'Slash commands',
+          description: 'Type /jsx, /vanilla, or /help.',
+        });
+      }
+      return;
+    }
+    const promptForRequest = parsedCmd.prompt;
+    const requestedPattern: ArtifactPattern | undefined = parsedCmd.pattern;
+    if (promptForRequest.length === 0 && pendingEdits.length === 0) return;
+    // Auto-detected pattern: surface a brief toast so the user understands
+    // why their default JSX got bumped to vanilla. Manual /vanilla skips
+    // this — they already know what they asked for.
+    if (parsedCmd.patternSource === 'auto' && requestedPattern === 'vanilla') {
+      get().pushToast({
+        variant: 'info',
+        title: 'Multi-file mode auto-selected',
+        description:
+          'Detected a complex brief (3D / shader / audio / physics). Building as multi-file vanilla. Override with /jsx if you want the single-file pattern instead.',
+      });
+    }
+    const effectivePrompt =
+      promptForRequest.length === 0 ? 'Apply the pending changes.' : promptForRequest;
 
     const request = buildPromptRequest(
       { ...input, prompt: effectivePrompt },
@@ -1572,6 +1679,9 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     const history =
       fullHistory.length > HISTORY_CAP ? fullHistory.slice(-HISTORY_CAP) : fullHistory;
     const isFirstPrompt = fullHistory.length === 0;
+    // Iteration cue — only set when there's already prior history AND the
+    // user typed a real prompt (skip silent auto-polish refinements).
+    set({ currentRunIsRefinement: !isFirstPrompt && !input.silent });
 
     // Append to the new chat_messages table so Sidebar v2 reflects activity
     // even before Workstream B starts emitting streaming tool events. Silent
@@ -1611,6 +1721,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           generationId,
           ...(designIdAtStart ? { designId: designIdAtStart } : {}),
           ...(get().previewHtml ? { previousHtml: get().previewHtml as string } : {}),
+          ...(requestedPattern ? { pattern: requestedPattern } : {}),
         },
         designIdAtStart,
       );
@@ -1677,6 +1788,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         finishIfCurrent(set, id, () => ({
           isGenerating: false,
           activeGenerationId: null,
+          currentRunIsRefinement: false,
           generatingDesignId: null,
           streamingAssistantText: null,
           generationStage: 'idle' as GenerationStage,
@@ -1698,6 +1810,36 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           }),
         });
       });
+  },
+
+  async requestWrapUp() {
+    const id = get().activeGenerationId;
+    if (!id) return;
+    const api = window.codesign;
+    if (!api?.requestWrapUp) return;
+    try {
+      const result = await api.requestWrapUp(id);
+      if (result.queued) {
+        get().pushToast({
+          variant: 'info',
+          title: 'Wrap-up queued',
+          description: 'Agent will converge to done at the next turn boundary.',
+        });
+      } else {
+        get().pushToast({
+          variant: 'info',
+          title: 'Nothing to wrap up',
+          description: 'No active generation to steer.',
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : tr('errors.unknown');
+      get().pushToast({
+        variant: 'error',
+        title: 'Wrap-up failed',
+        description: msg,
+      });
+    }
   },
 
   async retryLastPrompt() {
@@ -1736,6 +1878,25 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       });
     }
 
+    // Subscribe to streaming text deltas from the apply-comment IPC. Each
+    // delta is appended to streamingAssistantText so the chat sidebar shows
+    // an ephemeral bubble that grows as the model emits HTML — same UX as
+    // the agent path's text_delta handling. Unsubscribed in finally so we
+    // don't leak listeners on error.
+    let streamingBuffer = '';
+    const offApplyCommentEvent = window.codesign.chat.onApplyCommentEvent((event) => {
+      if (designIdAtStart === null) return;
+      if (event.kind === 'text_delta' && typeof event.delta === 'string') {
+        streamingBuffer += event.delta;
+        get().setStreamingAssistantText({ designId: designIdAtStart, text: streamingBuffer });
+      } else if (event.kind === 'done') {
+        // Final assistant_text row will replace the ephemeral bubble below
+        // when the await resolves. Clearing here is just defensive in case
+        // appendChatMessage races the listener removal.
+        get().setStreamingAssistantText(null);
+      }
+    });
+
     try {
       const result = await window.codesign.applyComment({
         html,
@@ -1763,6 +1924,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           previewHtmlByDesign: pool.cache,
           recentDesignIds: pool.recent,
           isGenerating: false,
+          currentRunIsRefinement: false,
           generatingDesignId: null,
           selectedElement: null,
           lastUsage: usage,
@@ -1785,6 +1947,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       const msg = err instanceof Error ? err.message : tr('errors.unknown');
       set(() => ({
         isGenerating: false,
+        currentRunIsRefinement: false,
         generatingDesignId: null,
         errorMessage: msg,
         lastError: msg,
@@ -1801,6 +1964,9 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         title: tr('notifications.inlineCommentFailed'),
         description: msg,
       });
+    } finally {
+      offApplyCommentEvent();
+      get().setStreamingAssistantText(null);
     }
   },
 
@@ -1822,10 +1988,15 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     try {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const ext = format === 'markdown' ? 'md' : format;
+      const designId = get().currentDesignId;
       const res = await window.codesign.export({
         format,
         htmlContent: html,
         defaultFilename: `codesign-${stamp}.${ext}`,
+        // Forward designId so main can pull sibling files (vanilla
+        // pattern's CSS/JS, assets/*) into the zip. Other formats
+        // ignore this field.
+        ...(designId ? { designId } : {}),
       });
       if (res.status === 'saved' && res.path) {
         set({ toastMessage: tr('notifications.exportedTo', { path: res.path }) });

@@ -18,12 +18,10 @@ export function buildAuthHeadersForWire(
   if (apiKey.length === 0) {
     // Keyless provider (e.g. IP-whitelisted proxy) — skip auth, keep extras.
     const base = wire === 'anthropic' ? { 'anthropic-version': '2023-06-01' } : {};
-    return withClaudeCodeIdentity(wire, baseUrl, { ...base, ...(extraHeaders ?? {}) });
+    return withClaudeCodeIdentity(wire, baseUrl, { ...base, ...(extraHeaders ?? {}) }, apiKey);
   }
-  // OAuth tokens (sk-ant-oat*) must be sent as Bearer, not x-api-key —
-  // Anthropic endpoints (and sub2api gateways that proxy them) reject
-  // OAuth tokens presented via x-api-key.
   const isOAuth = wire === 'anthropic' && looksLikeClaudeOAuthToken(apiKey);
+  const authKey = isOAuth ? 'ant-api-placeholder' : apiKey;
   const base =
     wire === 'anthropic'
       ? isOAuth
@@ -36,7 +34,12 @@ export function buildAuthHeadersForWire(
             'anthropic-version': '2023-06-01',
           }
       : { authorization: `Bearer ${apiKey}` };
-  return withClaudeCodeIdentity(wire, baseUrl, { ...base, ...(extraHeaders ?? {}) });
+  return withClaudeCodeIdentity(
+    wire,
+    baseUrl,
+    { ...base, ...(extraHeaders ?? {}) },
+    isOAuth ? 'sk-ant-oat-forced' : authKey,
+  );
 }
 
 export function buildAuthHeaders(
@@ -47,11 +50,17 @@ export function buildAuthHeaders(
   if (provider === 'anthropic') {
     if (apiKey.length === 0) {
       // Keyless anthropic proxy — skip auth, match buildAuthHeadersForWire.
-      return withClaudeCodeIdentity('anthropic', baseUrl, {
-        'anthropic-version': '2023-06-01',
-      });
+      return withClaudeCodeIdentity(
+        'anthropic',
+        baseUrl,
+        {
+          'anthropic-version': '2023-06-01',
+        },
+        apiKey,
+      );
     }
-    const base = looksLikeClaudeOAuthToken(apiKey)
+    const isOAuth = looksLikeClaudeOAuthToken(apiKey);
+    const base = isOAuth
       ? {
           authorization: `Bearer ${apiKey}`,
           'anthropic-version': '2023-06-01',
@@ -60,7 +69,12 @@ export function buildAuthHeaders(
           'x-api-key': apiKey,
           'anthropic-version': '2023-06-01',
         };
-    return withClaudeCodeIdentity('anthropic', baseUrl, base);
+    return withClaudeCodeIdentity(
+      'anthropic',
+      baseUrl,
+      base,
+      isOAuth ? 'sk-ant-oat-forced' : apiKey,
+    );
   }
   return apiKey.length === 0 ? {} : { authorization: `Bearer ${apiKey}` };
 }

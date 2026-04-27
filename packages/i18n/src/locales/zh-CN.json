@@ -359,6 +359,8 @@
         "modelSaveFailed": "保存模型选择失败",
         "reasoningSaved": "已保存推理深度",
         "reasoningSaveFailed": "保存推理深度失败",
+        "cacheRetentionSaved": "已保存缓存保留时长",
+        "cacheRetentionSaveFailed": "保存缓存保留时长失败",
         "connectionOk": "连接正常",
         "connectionFailed": "连接失败"
       },
@@ -382,6 +384,13 @@
         "medium": "中",
         "high": "高",
         "xhigh": "最高"
+      },
+      "cacheRetention": {
+        "label": "提示词缓存时长",
+        "default": "默认（5 分钟）",
+        "short": "5 分钟（短期）",
+        "long": "1 小时（仅 Anthropic 直连）",
+        "none": "禁用"
       }
     },
     "appearance": {
@@ -1113,6 +1122,8 @@
     "INPUT_EMPTY_HTML": "此操作需要已有的 HTML 内容。",
     "INPUT_UNSUPPORTED_MODE": "不支持该生成模式。",
     "GENERATION_TIMEOUT": "生成超时，请缩短 prompt 或在设置中增加超时时间。",
+    "MODEL_RETURNED_ONLY_THINKING": "模型只返回了推理过程，没有给出回答。请使用更明确的指令（例如「直接输出 artifact，无需前言」），或在设置中降低推理强度。",
+    "AGENT_BUDGET_EXCEEDED": "本次代理运行触发了安全预算（工具调用次数或耗时超限），已自动停止以避免成本失控。请缩小任务范围，或在设置中提高限制。",
     "CONFIG_READ_FAILED": "读取配置文件失败，请检查文件权限。",
     "CONFIG_PARSE_FAILED": "配置文件解析失败，可能已损坏。",
     "CONFIG_SCHEMA_INVALID": "配置文件格式不识别，请重新配置。",

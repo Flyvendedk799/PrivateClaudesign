@@ -15,7 +15,11 @@ import {
   generateTitle,
   generateViaAgent,
 } from '@open-codesign/core';
-import { detectProviderFromKey, generateImage } from '@open-codesign/providers';
+import {
+  detectProviderFromKey,
+  generateImage,
+  looksLikeClaudeOAuthToken,
+} from '@open-codesign/providers';
 import {
   ApplyCommentPayload,
   BRAND,
@@ -75,8 +79,10 @@ import { resolveActiveModel } from './provider-settings';
 import { cleanupStaleTmps } from './reported-fingerprints';
 import { resolveActiveApiKey, resolveApiKeyWithKeylessFallback } from './resolve-api-key';
 import { withRun } from './runContext';
+import { resolveUseAgentRuntime } from './runtime-flag';
 import {
   getDesign,
+  listChatMessages,
   normalizeDesignFilePath,
   pruneDiagnosticEvents,
   recordDiagnosticEvent,
@@ -102,6 +108,13 @@ let mainWindow: ElectronBrowserWindow | null = null;
 // of autoUpdater — a new check will re-emit if still applicable).
 let pendingUpdateAvailable: unknown = null;
 
+// pi-agent-core does NOT forward `cacheRetention` from AgentOptions through to
+// streamSimple, but pi-ai's anthropic adapter reads PI_CACHE_RETENTION from the
+// environment. Pinning this here ensures the agent path gets the same prompt-
+// cache treatment as the legacy `complete()` path (which sets cacheRetention
+// explicitly). 'short' matches pi-ai's own default — this is belt-and-braces.
+process.env['PI_CACHE_RETENTION'] ??= 'short';
+
 const defaultUserDataDir = app.getPath('userData');
 const storageLocations = initStorageSettings(defaultUserDataDir);
 if (storageLocations.dataDir !== undefined) {
@@ -111,21 +124,24 @@ if (storageLocations.dataDir !== undefined) {
 
 /**
  * Workstream B Phase 1 feature flag. When truthy, `codesign:*:generate` routes
- * through `generateViaAgent()` (pi-agent-core, zero tools). Default off — any
- * other value (including unset / empty) keeps the legacy `generate()` path.
+ * through `generateViaAgent()` (pi-agent-core + tool runtime — text_editor,
+ * set_todos, list_files, read_design_system, read_url, image-asset gen,
+ * declare-tweak-schema, done).
+ *
+ * **Default ON**: streaming + tool-using edits are now the primary path. The
+ * legacy single-turn `generate()` is kept as an opt-out escape hatch for at
+ * least one minor version after the flip:
+ *   - `USE_AGENT_RUNTIME=0` or `USE_AGENT_RUNTIME=false` → legacy path
+ *   - any other value (including unset) → agent path
+ *
+ * `applyComment` and `generateTitle` continue to use the legacy path
+ * regardless of this flag — they are small one-shot calls where the agent
+ * loop overhead would slow them down, not speed them up.
  *
  * Read once at module init: changing the env var mid-session requires an app
  * restart, which matches every other flag we expose today.
  */
-const USE_AGENT_RUNTIME = (() => {
-  const raw = process.env['USE_AGENT_RUNTIME'];
-  // Default ON: we want the tool-loop path by default now that text streaming
-  // and the text_editor + set_todos tools are wired. Explicitly opt out with
-  // `USE_AGENT_RUNTIME=0` or `=false` to fall back to the single-turn
-  // generate() path.
-  if (raw === '0' || raw === 'false') return false;
-  return true;
-})();
+const USE_AGENT_RUNTIME = resolveUseAgentRuntime(process.env['USE_AGENT_RUNTIME']);
 
 const IS_VITEST = process.env['VITEST'] === 'true';
 
@@ -214,6 +230,25 @@ function extractUpstreamHttpStatus(err: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * Token-shape detector for the OAuth-aware diagnose path. Returns true for:
+ *   - Anthropic Claude Code OAuth (`sk-ant-oat-*`) — rotated by `claude login`.
+ *   - JWT-shaped tokens (3 dot-separated base64url segments) — Codex
+ *     ChatGPT sessions issued by `codex login`.
+ * Both rotate via CLI rather than the app's Settings panel, so the
+ * 401/403 error message + suggested fix should differ from the static
+ * "open Settings to update key" copy.
+ */
+function isOAuthShapedToken(apiKey: string): boolean {
+  if (looksLikeClaudeOAuthToken(apiKey)) return true;
+  // JWT shape: header.payload.signature, all base64url. We don't verify
+  // the signature — just recognise the format. The Codex login flow is
+  // the only path producing these inside this app.
+  const segments = apiKey.split('.');
+  if (segments.length !== 3) return false;
+  return segments.every((seg) => seg.length > 0 && /^[A-Za-z0-9_-]+$/.test(seg));
+}
+
 function resolveActiveApiKeyFromState(providerId: string): Promise<string> {
   return resolveActiveApiKey(providerId, {
     getCodexAccessToken: () => getCodexTokenStore().getValidAccessToken(),
@@ -228,18 +263,106 @@ function resolveApiKeyForActive(providerId: string, allowKeyless: boolean): Prom
   });
 }
 
-function escapeRegExp(input: string): string {
-  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/**
+ * Server-side history compactor for the auto-continue chunk loop.
+ *
+ * Two strategies, picked by `mode`:
+ *
+ *   `'slim'` (default for reasoning=off): emit a tiny 2-3-message
+ *   digest — original user prompt + last assistant_text + a synthesized
+ *   set_todos progress block. Drops input tokens 5-10x and shortens
+ *   first-token latency at chunk transitions. Works because reasoning-off
+ *   models can re-orient cheaply from a small context.
+ *
+ *   `'full'` (forced when reasoning is on): replay every user + assistant
+ *   row up to a cap. Reasoning-on models lose chain-of-thought across
+ *   chunk boundaries (Anthropic doesn't expose internal thinking blocks
+ *   to subsequent API calls), so they MUST see prior assistant prose to
+ *   pick up where they left off. Production trace 2026-04-27 showed
+ *   reasoning=medium runs with the slim strategy re-planning every
+ *   chunk and landing 0-1 tool calls per chunk.
+ */
+const HISTORY_FULL_CAP = 12;
+
+function loadHistoryForAutoContinue(
+  db: BetterSqlite3.Database | null,
+  designId: string | null,
+  mode: 'slim' | 'full' = 'slim',
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  if (!db || !designId) return [];
+  try {
+    const rows = listChatMessages(db, designId);
+    if (mode === 'full') {
+      const all: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+      for (const row of rows) {
+        if (row.kind === 'user') {
+          const text = (row.payload as { text?: string } | null)?.text;
+          if (typeof text === 'string' && text.length > 0) {
+            all.push({ role: 'user', content: text });
+          }
+        } else if (row.kind === 'assistant_text') {
+          const text = (row.payload as { text?: string } | null)?.text;
+          if (typeof text === 'string' && text.length > 0) {
+            all.push({ role: 'assistant', content: text });
+          }
+        }
+      }
+      return all.length > HISTORY_FULL_CAP ? all.slice(-HISTORY_FULL_CAP) : all;
+    }
+    let firstUserPrompt: string | null = null;
+    let lastAssistantText: string | null = null;
+    let latestTodos: Array<{ text: string; checked: boolean }> | null = null;
+    let assistantTurnCount = 0;
+    for (const row of rows) {
+      if (row.kind === 'user' && firstUserPrompt === null) {
+        const text = (row.payload as { text?: string } | null)?.text;
+        if (typeof text === 'string' && text.length > 0) firstUserPrompt = text;
+      } else if (row.kind === 'assistant_text') {
+        const text = (row.payload as { text?: string } | null)?.text;
+        if (typeof text === 'string' && text.length > 0) {
+          lastAssistantText = text;
+          assistantTurnCount += 1;
+        }
+      } else if (row.kind === 'tool_call') {
+        const payload = row.payload as {
+          toolName?: string;
+          args?: { items?: Array<{ text: unknown; checked: unknown }> };
+        } | null;
+        if (payload?.toolName === 'set_todos' && Array.isArray(payload.args?.items)) {
+          const items: Array<{ text: string; checked: boolean }> = [];
+          for (const it of payload.args.items) {
+            if (typeof it?.text === 'string') {
+              items.push({ text: it.text, checked: it.checked === true });
+            }
+          }
+          if (items.length > 0) latestTodos = items;
+        }
+      }
+    }
+    const out: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+    if (firstUserPrompt) out.push({ role: 'user', content: firstUserPrompt });
+    if (lastAssistantText) out.push({ role: 'assistant', content: lastAssistantText });
+    if (latestTodos) {
+      const done = latestTodos.filter((it) => it.checked).map((it) => `  ✓ ${it.text}`);
+      const pending = latestTodos.filter((it) => !it.checked).map((it) => `  ○ ${it.text}`);
+      const summary = [
+        `[progress digest after ${assistantTurnCount} prior agent turn(s)]`,
+        ...(done.length > 0 ? ['', 'Completed sections:', ...done] : []),
+        ...(pending.length > 0 ? ['', 'Remaining sections:', ...pending] : []),
+      ].join('\n');
+      out.push({ role: 'assistant', content: summary });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
-export function resolveLocalAssetRefs(source: string, files: Map<string, string>): string {
-  let resolved = source;
-  for (const [path, content] of files.entries()) {
-    if (!path.startsWith('assets/') || !content.startsWith('data:')) continue;
-    resolved = resolved.replace(new RegExp(escapeRegExp(path), 'g'), content);
-  }
-  return resolved;
-}
+// Implementations live in `./sidecar-inliner.ts` (no Electron deps) so
+// unit tests can exercise them in isolation. Re-exported here so existing
+// imports of these names from `./index.ts` continue to work unchanged.
+import { inlineLocalSidecars, resolveLocalAssetRefs } from './sidecar-inliner';
+export { inlineLocalSidecars, resolveLocalAssetRefs };
 
 function extensionFromMimeType(mimeType: string): string {
   if (mimeType === 'image/jpeg') return 'jpg';
@@ -302,7 +425,16 @@ export function createRuntimeTextEditorFs({
 
   function emitFsUpdated(filePath: string, content: string): void {
     if (designId === null) return;
-    const resolved = filePath === 'index.html' ? resolveLocalAssetRefs(content, fsMap) : content;
+    // For index.html: inline sidecar CSS/JS (vanilla pattern), then
+    // resolve assets/* data: URLs. JSX-pattern HTML has no <link> or
+    // <script src> to local files so the inliner is a no-op for it.
+    // Order matters: inlining first so inlined <style>/<script> blocks
+    // ALSO get assets/ refs resolved (rare but possible — e.g. CSS
+    // url('assets/bg.png')).
+    const resolved =
+      filePath === 'index.html'
+        ? resolveLocalAssetRefs(inlineLocalSidecars(content, fsMap), fsMap)
+        : content;
     sendEvent({ ...baseCtx, type: 'fs_updated', path: filePath, content: resolved });
   }
 
@@ -633,13 +765,22 @@ function registerIpcHandlers(db: Database | null): void {
         if (event.type === 'tool_execution_end') {
           const startedAt = toolStartedAt.get(event.toolCallId) ?? Date.now();
           toolStartedAt.delete(event.toolCallId);
+          const durationMs = Date.now() - startedAt;
+          // Per-tool latency telemetry — emits one log line per tool call so
+          // post-hoc analysis (`grep agent.tool_duration`) can spot slow
+          // tools without requiring SQLite queries against chat_messages.
+          logIpc.info('agent.tool_duration', {
+            generationId: id,
+            tool: event.toolName,
+            ms: durationMs,
+          });
           sendEvent({
             ...baseCtx,
             type: 'tool_call_result',
             toolName: event.toolName,
             toolCallId: event.toolCallId,
             result: event.result,
-            durationMs: Date.now() - startedAt,
+            durationMs,
           });
           return;
         }
@@ -671,13 +812,33 @@ function registerIpcHandlers(db: Database | null): void {
       ...result,
       artifacts: result.artifacts.map((artifact) => ({
         ...artifact,
-        content: resolveLocalAssetRefs(artifact.content, fsMap),
+        // Final-result artifact path: same inline-then-resolve order as
+        // emitFsUpdated. JSX-pattern artifacts pass through unchanged
+        // because they have no local <link>/<script src>.
+        content: resolveLocalAssetRefs(inlineLocalSidecars(artifact.content, fsMap), fsMap),
       })),
     }));
   };
 
   /** In-flight requests: generationId → AbortController */
   const inFlight = new Map<string, AbortController>();
+
+  /** User-injected steering messages keyed by generationId. Drained by
+   *  the agent's turn_end subscriber via the `getPendingSteers` callback
+   *  passed into runGenerate. Lets the renderer push "Wrap up now" /
+   *  "Focus on X" overrides into the agent's next turn without an abort. */
+  const pendingUserSteers = new Map<string, string[]>();
+  const enqueueUserSteer = (generationId: string, message: string): void => {
+    const cur = pendingUserSteers.get(generationId) ?? [];
+    cur.push(message);
+    pendingUserSteers.set(generationId, cur);
+  };
+  const drainUserSteers = (generationId: string): string[] => {
+    const cur = pendingUserSteers.get(generationId);
+    if (!cur || cur.length === 0) return [];
+    pendingUserSteers.delete(generationId);
+    return cur;
+  };
 
   const armTimeout = (id: string, controller: AbortController) =>
     armGenerationTimeout(
@@ -866,39 +1027,244 @@ function registerIpcHandlers(db: Database | null): void {
 
       const t0 = Date.now();
       let clearTimeoutGuard: () => void = () => {};
+      // Single-session default. Production trace 2026-04-27 demonstrated
+      // that chunked execution + history-reload-between-chunks is the
+      // wrong abstraction for design generation: it forces re-planning,
+      // loses chain-of-thought (especially with reasoning on), and
+      // exits prematurely when the model goes quiet. Claude Code /
+      // Cursor / Aider all run a single agent session bounded by an
+      // outer timeout. We default to that shape now.
+      //
+      // The chunk-loop scaffolding stays in place (so we can opt back
+      // into chunking via a Settings toggle later if telemetry shows
+      // it's needed for ultra-long runs), but MAX_AUTO_CONTINUE=1 means
+      // exactly one runGenerate call fires per IPC request. The
+      // wall_clock budget for that single chunk is set to the user's
+      // GENERATION_TIMEOUT minus 30s headroom, so the agent runs until
+      // the user's outer pref — not the old hardcoded 5 min.
+      const MAX_AUTO_CONTINUE = 1;
+      const generationTimeoutSec = (await readPreferences()).generationTimeoutSec;
+      const SINGLE_SESSION_WALL_CLOCK_MS = Math.max(60_000, generationTimeoutSec * 1000 - 30_000);
+      const isCodex = active.model.provider === CHATGPT_CODEX_PROVIDER_ID;
+      let activeController = controller;
+      let chunkPrompt = payload.prompt;
+      let chunkHistory = payload.history;
+      let chunkPreviousHtml = payload.previousHtml ?? null;
+      let lastResult: Awaited<ReturnType<typeof runGenerate>> | null = null;
+      const totals = {
+        chunks: 0,
+        chunksInterrupted: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalCachedInputTokens: 0,
+        totalCacheCreationInputTokens: 0,
+        totalCostUsd: 0,
+      };
       try {
-        clearTimeoutGuard = await armTimeout(id, controller);
-        const isCodex = active.model.provider === CHATGPT_CODEX_PROVIDER_ID;
-        const result = await runGenerate(
-          {
-            prompt: payload.prompt,
-            history: payload.history,
-            model: active.model,
-            apiKey,
-            ...(isCodex
-              ? { getApiKey: () => resolveActiveApiKeyFromState(active.model.provider) }
-              : {}),
-            attachments: promptContext.attachments,
-            referenceUrl: promptContext.referenceUrl,
-            designSystem: promptContext.designSystem ?? null,
-            ...(baseUrl !== undefined ? { baseUrl } : {}),
-            wire: active.wire,
-            ...(active.httpHeaders !== undefined ? { httpHeaders: active.httpHeaders } : {}),
-            ...(allowKeyless ? { allowKeyless: true } : {}),
-            signal: controller.signal,
-            logger: coreLogger,
-          },
-          id,
-          payload.designId ?? null,
-          payload.previousHtml ?? null,
-        );
+        for (let chunk = 1; chunk <= MAX_AUTO_CONTINUE; chunk += 1) {
+          // Fresh controller per chunk so Cancel reliably aborts the
+          // current chunk only. Initial chunk uses the outer controller
+          // (already in inFlight); subsequent chunks swap in new ones.
+          if (chunk > 1) {
+            // Bail if the user already cancelled during the previous chunk.
+            if (activeController.signal.aborted) break;
+            activeController = new AbortController();
+            inFlight.set(id, activeController);
+          }
+          // Fresh GENERATION_TIMEOUT per chunk — that's the whole point
+          // of "a new prompt whenever it finishes a task in its plan".
+          clearTimeoutGuard();
+          clearTimeoutGuard = await armTimeout(id, activeController);
+
+          // Surface chunk progress to the renderer so the chat status
+          // header can show "Chunk N of M · X:YY remaining" without
+          // inferring from log lines.
+          const chunkBudgetMs = active.wallClockBudgetMs ?? SINGLE_SESSION_WALL_CLOCK_MS;
+          mainWindow?.webContents.send('agent:event:v1', {
+            type: 'chunk_start',
+            designId: payload.designId ?? '',
+            generationId: id,
+            chunkIndex: chunk,
+            chunkCap: MAX_AUTO_CONTINUE,
+            chunkBudgetMs,
+          });
+
+          const chunkResult = await runGenerate(
+            {
+              prompt: chunkPrompt,
+              history: chunkHistory,
+              model: active.model,
+              apiKey,
+              ...(isCodex
+                ? { getApiKey: () => resolveActiveApiKeyFromState(active.model.provider) }
+                : {}),
+              // Attachments + referenceUrl are first-prompt context only;
+              // re-sending on auto-continue would re-bill input tokens for
+              // unchanged content already in the system prompt.
+              attachments: chunk === 1 ? promptContext.attachments : [],
+              ...(chunk === 1 && promptContext.referenceUrl !== undefined
+                ? { referenceUrl: promptContext.referenceUrl }
+                : {}),
+              designSystem: promptContext.designSystem ?? null,
+              ...(baseUrl !== undefined ? { baseUrl } : {}),
+              wire: active.wire,
+              ...(active.httpHeaders !== undefined ? { httpHeaders: active.httpHeaders } : {}),
+              ...(allowKeyless ? { allowKeyless: true } : {}),
+              ...(active.reasoningLevel !== undefined
+                ? { reasoningLevel: active.reasoningLevel }
+                : {}),
+              ...(active.cacheRetention !== undefined
+                ? { cacheRetention: active.cacheRetention }
+                : {}),
+              signal: activeController.signal,
+              logger: coreLogger,
+              agentBudget: {
+                chunkIndex: chunk,
+                // Per-provider override beats the single-session default;
+                // the single-session default beats core's hardcoded 5-min.
+                maxWallClockMs: active.wallClockBudgetMs ?? SINGLE_SESSION_WALL_CLOCK_MS,
+              },
+              // Drain any user-pushed steers (e.g. Wrap-up button) that
+              // landed since this chunk's prior turn_end.
+              getPendingSteers: () => drainUserSteers(id),
+              // Slash-command-driven artifact pattern (renderer parses
+              // /jsx /vanilla and forwards via the IPC payload). Defaults
+              // to undefined → JSX guidance in agent.ts.
+              ...(payload.pattern !== undefined ? { pattern: payload.pattern } : {}),
+            },
+            id,
+            payload.designId ?? null,
+            chunkPreviousHtml,
+          );
+
+          totals.chunks += 1;
+          totals.totalInputTokens += chunkResult.inputTokens;
+          totals.totalOutputTokens += chunkResult.outputTokens;
+          totals.totalCachedInputTokens += chunkResult.cachedInputTokens;
+          totals.totalCacheCreationInputTokens += chunkResult.cacheCreationInputTokens;
+          totals.totalCostUsd += chunkResult.costUsd;
+          if (chunkResult.interrupted) totals.chunksInterrupted += 1;
+          lastResult = chunkResult;
+
+          // Notify renderer that this chunk just settled. Includes the
+          // interrupted flag so the status header can transition between
+          // "auto-resuming…" (interrupted, more chunks coming) and
+          // "completing" (clean finish or cap reached).
+          mainWindow?.webContents.send('agent:event:v1', {
+            type: 'chunk_end',
+            designId: payload.designId ?? '',
+            generationId: id,
+            chunkIndex: chunk,
+            chunkCap: MAX_AUTO_CONTINUE,
+            chunkInterrupted: chunkResult.interrupted,
+          });
+
+          // Cap reached → exit and let the cap-message branch below fire.
+          if (chunk >= MAX_AUTO_CONTINUE) break;
+          // Exit detection — three states:
+          //   1. interrupted = budget hit, definitely keep going
+          //   2. !interrupted + done called this run = clean finish, stop
+          //   3. !interrupted + NO done called yet = ABANDONED — model
+          //      stopped emitting tools without converging. Production
+          //      trace 2026-04-27 mogvfm77 hit this on chunk 4: agent
+          //      ran out of ideas mid-design and the loop wrongly read
+          //      the empty turn as "we're done". Force one more chunk
+          //      with a strong steer; if THAT chunk also abandons,
+          //      truly stop (fall through on the next iteration).
+          if (!chunkResult.interrupted) {
+            const doneCallCount =
+              db && payload.designId
+                ? listChatMessages(db, payload.designId).filter((row) => {
+                    if (row.kind !== 'tool_call') return false;
+                    const p = row.payload as { toolName?: string } | null;
+                    return p?.toolName === 'done';
+                  }).length
+                : 0;
+            if (doneCallCount > 0) break; // clean exit — agent really finished
+            // Abandonment: agent went quiet without calling done. Fire
+            // one more chunk with an explicit "you stopped without
+            // calling done — finish or call done now" steer. We fold
+            // the steer into chunkPrompt for the next iteration.
+            logIpc.warn('agent.abandoned_without_done', {
+              generationId: id,
+              chunk,
+              tip: 'forcing one more chunk with a wrap-up steer',
+            });
+            chunkPrompt = `[auto-continue chunk ${chunk + 1}/${MAX_AUTO_CONTINUE}] You stopped emitting tool calls but never called \`done\`. The artifact is incomplete. Either: (a) finish the remaining unticked todos as quickly as possible (1-3 small str_replace per turn, then call \`done\`), OR (b) if you genuinely think the artifact is finished, call \`done\` immediately so the run can exit cleanly. Do NOT just produce more prose — every turn must include at least one tool call.`;
+            chunkHistory = loadHistoryForAutoContinue(
+              db,
+              payload.designId ?? null,
+              active.reasoningLevel !== undefined ? 'full' : 'slim',
+            );
+            chunkPreviousHtml = chunkResult.artifacts[0]?.content ?? chunkPreviousHtml;
+            continue;
+          }
+
+          // Prepare the next chunk: synthesized continue prompt, history
+          // reloaded from DB (includes everything just appended during
+          // this chunk's runGenerate), seed previousHtml with the artifact
+          // we just produced so the next chunk's fresh fs starts from it.
+          chunkPrompt = `[auto-continue chunk ${chunk + 1}/${MAX_AUTO_CONTINUE}] Continue where you left off — pick the next plan items and finish them. Aim to finish the design within the remaining ${MAX_AUTO_CONTINUE - chunk} chunk(s).`;
+          // Reasoning-on agents need full history to maintain chain-of-
+          // thought across chunk boundaries (Anthropic doesn't expose
+          // internal thinking blocks to subsequent API calls). Reasoning-
+          // off agents get the slim summary for the cache + first-token
+          // win.
+          chunkHistory = loadHistoryForAutoContinue(
+            db,
+            payload.designId ?? null,
+            active.reasoningLevel !== undefined ? 'full' : 'slim',
+          );
+          chunkPreviousHtml = chunkResult.artifacts[0]?.content ?? chunkPreviousHtml;
+        }
+
+        if (!lastResult) {
+          throw new CodesignError('Auto-continue loop produced no result', 'PROVIDER_ERROR');
+        }
+
+        // Hit the cap with work still pending — rewrite the final message
+        // so the user knows manual resume is needed. Distinct copy from
+        // the per-chunk "Paused — auto-resuming" hint so the UI reads
+        // differently in the cap-reached case.
+        if (lastResult.interrupted && totals.chunks >= MAX_AUTO_CONTINUE) {
+          const baseMsg = lastResult.message;
+          lastResult = {
+            ...lastResult,
+            message: `${baseMsg}${baseMsg.length > 0 ? '\n\n' : ''}— Reached the ${MAX_AUTO_CONTINUE}-chunk auto-continue cap. The artifact above is what landed; type **keep going** (or any follow-up) to do more. —`,
+          };
+        }
+
         logIpc.info('generate.ok', {
           generationId: id,
           ms: Date.now() - t0,
-          artifacts: result.artifacts.length,
-          cost: result.costUsd,
+          artifacts: lastResult.artifacts.length,
+          cost: totals.totalCostUsd,
+          inputTokens: totals.totalInputTokens,
+          outputTokens: totals.totalOutputTokens,
+          cachedInputTokens: totals.totalCachedInputTokens,
+          cacheCreationInputTokens: totals.totalCacheCreationInputTokens,
         });
-        return result;
+        logIpc.info('generate.summary', {
+          generationId: id,
+          totalMs: Date.now() - t0,
+          totalChunks: totals.chunks,
+          chunksInterrupted: totals.chunksInterrupted,
+          capReached: lastResult.interrupted && totals.chunks >= MAX_AUTO_CONTINUE,
+          totalInputTokens: totals.totalInputTokens,
+          totalOutputTokens: totals.totalOutputTokens,
+          totalCachedInputTokens: totals.totalCachedInputTokens,
+          totalCostUsd: totals.totalCostUsd,
+        });
+        // Surface aggregate metrics on the returned result so the renderer
+        // shows total tokens (across all chunks), not just the last one.
+        return {
+          ...lastResult,
+          inputTokens: totals.totalInputTokens,
+          outputTokens: totals.totalOutputTokens,
+          cachedInputTokens: totals.totalCachedInputTokens,
+          cacheCreationInputTokens: totals.totalCacheCreationInputTokens,
+          costUsd: totals.totalCostUsd,
+        };
       } catch (err) {
         // Attach upstream metadata to the thrown err so the renderer's
         // diagnostic pipeline (store.ts::applyGenerateError →
@@ -920,6 +1286,12 @@ function registerIpcHandlers(db: Database | null): void {
           }
           if (errAsRec['upstream_wire'] === undefined && active.wire !== undefined) {
             errAsRec['upstream_wire'] = active.wire;
+          }
+          // Token-shape signal so the renderer's diagnose pipeline can pick
+          // an OAuth-specific 401/403 hypothesis ("run claude/codex login")
+          // instead of the generic "open Settings to update key" copy.
+          if (errAsRec['key_kind'] === undefined) {
+            errAsRec['key_kind'] = isOAuthShapedToken(apiKey) ? 'oauth' : 'static';
           }
         }
         // The SDK catches our AbortController and rethrows a generic
@@ -1023,6 +1395,12 @@ function registerIpcHandlers(db: Database | null): void {
             wire: active.wire,
             ...(active.httpHeaders !== undefined ? { httpHeaders: active.httpHeaders } : {}),
             ...(allowKeyless ? { allowKeyless: true } : {}),
+            ...(active.reasoningLevel !== undefined
+              ? { reasoningLevel: active.reasoningLevel }
+              : {}),
+            ...(active.cacheRetention !== undefined
+              ? { cacheRetention: active.cacheRetention }
+              : {}),
             signal: controller.signal,
           },
           id,
@@ -1034,6 +1412,10 @@ function registerIpcHandlers(db: Database | null): void {
           ms: Date.now() - t0,
           artifacts: result.artifacts.length,
           cost: result.costUsd,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          cachedInputTokens: result.cachedInputTokens,
+          cacheCreationInputTokens: result.cacheCreationInputTokens,
         });
         return result;
       } catch (err) {
@@ -1066,9 +1448,40 @@ function registerIpcHandlers(db: Database | null): void {
     cancelGenerationRequest(generationId, inFlight, logIpc);
   });
 
-  ipcMain.handle('codesign:apply-comment', async (_e, raw: unknown) => {
+  /**
+   * User-driven steer: pushes a synthesized override message into the
+   * agent's pendingUserSteers queue. The agent's turn_end subscriber
+   * drains it via the getPendingSteers callback (see chunk loop above)
+   * and surfaces it to the model as a user-role message via agent.steer().
+   *
+   * Currently used by the chat UI's "Wrap up now" button. Could be
+   * extended with arbitrary user prompts in the future ("focus on the
+   * pricing section", "stop adding new sections").
+   */
+  ipcMain.handle('codesign:v1:request-wrap-up', (_e, raw: unknown) => {
+    const obj = raw as { generationId?: unknown } | null;
+    const generationId = obj?.generationId;
+    if (typeof generationId !== 'string' || generationId.length === 0) {
+      throw new CodesignError('request-wrap-up expects { generationId: string }', 'IPC_BAD_INPUT');
+    }
+    if (!inFlight.has(generationId)) {
+      logIpc.warn('agent.user_steer.no_inflight', { generationId });
+      return { queued: false };
+    }
+    const message =
+      '[user override] STOP all further work. Call `done` IMMEDIATELY with whatever the artifact looks like right now. Do NOT add more sections, do NOT polish further, do NOT ask for permission. The user wants to ship NOW. If `done` returns has_errors, fix the bare minimum and call `done` again — but absolutely no scope expansion.';
+    enqueueUserSteer(generationId, message);
+    logIpc.info('agent.user_steer.enqueued', { generationId, kind: 'wrap_up' });
+    return { queued: true };
+  });
+
+  ipcMain.handle('codesign:apply-comment', async (event, raw: unknown) => {
     const payload = ApplyCommentPayload.parse(raw);
     const runId = crypto.randomUUID();
+    // Capture sender so we can stream text deltas back without re-resolving
+    // the BrowserWindow each delta. If the sender goes away (window closed
+    // mid-revise), `isDestroyed()` short-circuits so we don't crash on send.
+    const sender = event.sender;
     return withRun(runId, async () => {
       const cfg = getCachedConfig();
       if (cfg === null) {
@@ -1119,11 +1532,29 @@ function registerIpcHandlers(db: Database | null): void {
           wire: active.wire,
           ...(active.httpHeaders !== undefined ? { httpHeaders: active.httpHeaders } : {}),
           ...(allowKeyless ? { allowKeyless: true } : {}),
+          ...(active.reasoningLevel !== undefined ? { reasoningLevel: active.reasoningLevel } : {}),
+          ...(active.cacheRetention !== undefined ? { cacheRetention: active.cacheRetention } : {}),
+          // Forward each text delta to the renderer so the comment-revise UI
+          // can show partial output instead of waiting on the full buffer.
+          // Channel intentionally separate from the agent's `agent:event:v1`
+          // — apply-comment is a one-shot revise, not a tool-loop, so its
+          // event shape is simpler.
+          onTextDelta: (delta: string) => {
+            if (sender.isDestroyed()) return;
+            sender.send('apply-comment:event:v1', { runId, kind: 'text_delta', delta });
+          },
         });
+        if (!sender.isDestroyed()) {
+          sender.send('apply-comment:event:v1', { runId, kind: 'done' });
+        }
         logIpc.info('applyComment.ok', {
           ms: Date.now() - t0,
           artifacts: result.artifacts.length,
           cost: result.costUsd,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          cachedInputTokens: result.cachedInputTokens,
+          cacheCreationInputTokens: result.cacheCreationInputTokens,
         });
         return result;
       } catch (err) {
@@ -1347,7 +1778,10 @@ if (!IS_VITEST) {
       registerCodexOAuthIpc();
       registerPreferencesIpc();
       registerImageGenerationSettingsIpc();
-      registerExporterIpc(() => mainWindow);
+      registerExporterIpc(
+        () => mainWindow,
+        () => (dbResult.ok ? dbResult.db : null),
+      );
       registerDiagnosticsIpc(diagnosticsDb);
       setupAutoUpdater();
       registerAppMenu();

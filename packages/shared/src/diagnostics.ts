@@ -20,6 +20,10 @@ export interface DiagnosticFix {
   baseUrlTransform?: (current: string) => string;
   /** When present, open this URL in the browser instead of mutating baseUrl */
   externalUrl?: string;
+  /** Free-form values consumed by the i18n string interpolator (e.g. CLI
+   *  command name for the OAuth re-login hint). Renderer is responsible for
+   *  passing this to the i18n layer. */
+  context?: Record<string, string>;
 }
 
 export interface DiagnosticHypothesis {
@@ -168,6 +172,11 @@ export interface GenerateFailureContext {
   status?: number;
   /** Error message — inspected for heuristic hints (e.g. "page not found", "instructions"). */
   message?: string;
+  /** Token shape — `oauth` (sk-ant-oat / Codex JWT) vs `static` (long-lived API key).
+   *  When set, the 401/403 path returns a token-rotation hypothesis instead of the
+   *  generic "update key in Settings" copy, since OAuth tokens rotate via CLI
+   *  (`claude login` / `codex login`), not in the app's Settings panel. */
+  keyKind?: 'oauth' | 'static';
 }
 
 /**
@@ -212,6 +221,26 @@ function isCustomBaseUrl(baseUrl: string | undefined): boolean {
 export function diagnoseGenerateFailure(ctx: GenerateFailureContext): DiagnosticHypothesis[] {
   const message = (ctx.message ?? '').toLowerCase();
   const status = ctx.status;
+
+  // OAuth token rotation: `sk-ant-oat-*` (Anthropic Claude Code) and Codex
+  // session JWTs both rotate periodically via the CLI. The default 401/403
+  // hypothesis ("open Settings to update the key") is wrong for OAuth — the
+  // user must run `claude login` / `codex login` in their terminal, then
+  // restart the app to pick up the new token.
+  if ((status === 401 || status === 403) && ctx.keyKind === 'oauth') {
+    const reauthCommand = ctx.provider === 'openai' ? 'codex login' : 'claude login';
+    return [
+      {
+        cause: 'diagnostics.cause.oauthExpired',
+        suggestedFix: {
+          label: 'diagnostics.fix.reauthCli',
+          // Inline the command so the renderer can render it as code without
+          // needing a per-provider lookup table.
+          context: { command: reauthCommand },
+        },
+      },
+    ];
+  }
 
   // Third-party relay bug: openai-responses wire pointed at a custom gateway
   // that mishandles `response.*` SSE events, causing the stream to die with

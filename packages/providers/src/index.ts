@@ -26,8 +26,15 @@ import { normalizeGeminiModelId } from './gemini-compat';
  *
  * Only the named effort levels pi-ai actually understands. Sending this to a
  * non-reasoning model is a silent fallback, so callers must whitelist
- * known-capable models before passing a value (see `reasoningForModel`). */
-export type ReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh';
+ * known-capable models before passing a value (see `reasoningForModel`).
+ *
+ * Must stay in lockstep with `ReasoningLevelSchema` in `@open-codesign/shared`. */
+export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+
+/** Anthropic prompt-cache TTL knob, forwarded straight to pi-ai. `'short'`
+ * (default) = 5 min ephemeral cache; `'long'` = 1 h (only honored on official
+ * api.anthropic.com); `'none'` disables cache markers. */
+export type CacheRetention = 'short' | 'long' | 'none';
 
 export interface GenerateOptions {
   apiKey: string;
@@ -55,12 +62,31 @@ export interface GenerateOptions {
    * placeholder while auth is supplied by `httpHeaders` or by the gateway.
    */
   allowKeyless?: boolean;
+  /** Anthropic prompt-cache TTL. Defaults to `'short'` to match pi-ai's own
+   *  default; setting it explicitly here makes intent grep-able and pins the
+   *  value if pi-ai's default ever changes. */
+  cacheRetention?: CacheRetention;
+  /** Optional callback invoked with each text delta chunk as the model
+   *  streams its response. Internally `complete()` always uses pi-ai's
+   *  `streamSimple` so wall-time and final result are identical whether or
+   *  not this is set; the callback just opens a window into the stream so
+   *  callers (e.g. the apply-comment IPC handler) can forward partial
+   *  output to the renderer instead of waiting for the full buffer. Thinking
+   *  deltas are NOT forwarded — see the type-filter in `complete()`. */
+  onTextDelta?: (delta: string) => void;
 }
 
 export interface GenerateResult {
   content: string;
   inputTokens: number;
   outputTokens: number;
+  /** Tokens served from Anthropic's prompt cache on this turn. Non-zero means
+   *  caching is working — a large fraction of `inputTokens` on follow-up turns
+   *  is the goal. */
+  cachedInputTokens: number;
+  /** Tokens written to the cache on this turn (charged at 1.25x). Expected
+   *  non-zero on the first turn, near-zero on subsequent cache-hit turns. */
+  cacheCreationInputTokens: number;
   costUsd: number;
 }
 
@@ -290,7 +316,7 @@ export async function complete(
 
   const pi = (await import('@mariozechner/pi-ai')) as unknown as {
     getModel: (provider: string, modelId: string) => PiModel | undefined;
-    completeSimple: (
+    streamSimple: (
       model: PiModel,
       context: PiContext,
       opts: {
@@ -299,10 +325,14 @@ export async function complete(
         signal?: AbortSignal;
         maxTokens?: number;
         reasoning?: ReasoningLevel;
+        cacheRetention?: CacheRetention;
         headers?: Record<string, string>;
         onPayload?: (payload: unknown) => unknown;
       },
-    ) => Promise<PiAssistantMessage>;
+    ) => AsyncIterable<{
+      type: string;
+      delta?: string;
+    }> & { result: () => Promise<PiAssistantMessage> };
   };
 
   let piModel = pi.getModel(model.provider, effectiveModelId);
@@ -327,10 +357,12 @@ export async function complete(
     signal?: AbortSignal;
     maxTokens?: number;
     reasoning?: ReasoningLevel;
+    cacheRetention?: CacheRetention;
     headers?: Record<string, string>;
     onPayload?: (payload: unknown) => unknown;
   } = {
     apiKey,
+    cacheRetention: opts.cacheRetention ?? 'short',
   };
   if (opts.baseUrl !== undefined) piOpts.baseUrl = opts.baseUrl;
   if (opts.signal !== undefined) piOpts.signal = opts.signal;
@@ -360,20 +392,47 @@ export async function complete(
     };
   }
 
+  // OAuth tokens (sk-ant-oat*) must be sent as Bearer, not x-api-key —
+  // Anthropic endpoints (and sub2api gateways that proxy them) reject
+  // OAuth tokens presented via x-api-key.
+  if (model.provider === 'anthropic' && looksLikeClaudeOAuthToken(apiKey)) {
+    piOpts.headers = {
+      ...piOpts.headers,
+      authorization: `Bearer ${apiKey}`,
+      'anthropic-version': '2023-06-01',
+    };
+    // Send a placeholder as the primary apiKey so pi-ai's internal
+    // x-api-key header doesn't carry the OAuth token (which causes 401).
+    piOpts.apiKey = 'open-codesign-oauth-placeholder';
+  }
+
   // sub2api / claude2api gateways 403 requests without claude-cli identity
   // headers. pi-ai only injects those on OAuth tokens — paste a
   // sub2api-issued key and you hit the plain API-key branch. Force the
   // identity headers for custom anthropic endpoints so the WAF admits us.
   // User-supplied httpHeaders keep precedence.
   if (
-    shouldForceClaudeCodeIdentity(opts.wire, opts.baseUrl) &&
-    !looksLikeClaudeOAuthToken(apiKey)
+    shouldForceClaudeCodeIdentity(
+      opts.wire ?? (model.provider === 'anthropic' ? 'anthropic' : undefined),
+      opts.baseUrl,
+      apiKey,
+    )
   ) {
     piOpts.headers = { ...claudeCodeIdentityHeaders(), ...(piOpts.headers ?? {}) };
   }
 
   validateCodexImageInputs(opts);
-  const result = await pi.completeSimple(piModel, piContext, piOpts);
+  // Switched from completeSimple to streamSimple so callers can subscribe to
+  // text deltas via opts.onTextDelta (used by apply-comment IPC). Wall time
+  // and final shape are unchanged — pi-ai's streaming API just exposes the
+  // partial output. Thinking deltas are intentionally NOT forwarded.
+  const stream = pi.streamSimple(piModel, piContext, piOpts);
+  for await (const event of stream) {
+    if (event.type === 'text_delta' && typeof event.delta === 'string' && opts.onTextDelta) {
+      opts.onTextDelta(event.delta);
+    }
+  }
+  const result = await stream.result();
 
   if (result.stopReason === 'error') {
     throw new CodesignError(
@@ -382,15 +441,37 @@ export async function complete(
     );
   }
 
+  // Thinking/thought blocks are the model's internal reasoning — Anthropic
+  // returns them separately so apps can choose what to display. Concatenating
+  // them into `content` surfaces planning prose ("Still writing styles…") as
+  // if it were the assistant's reply when the model never emits a real text
+  // block. Keep only `text`.
   const text = result.content
     .filter((c) => c.type === 'text' && typeof c.text === 'string')
-    .map((c) => c.text ?? '')
+    .map((c) => c.text as string)
     .join('');
 
+  if (text.length === 0) {
+    throw new CodesignError(
+      'Model returned no text content (likely consumed its budget on reasoning). Use a more directive prompt or lower the reasoning level.',
+      ERROR_CODES.MODEL_RETURNED_ONLY_THINKING,
+    );
+  }
+
+  // inputTokens is the *total* (uncached + cacheRead + cacheWrite). Pi-ai's
+  // usage.input mirrors Anthropic's input_tokens (uncached only), so reading
+  // it raw understated input by 10-20× on cached follow-up turns and made
+  // "cachedInputTokens / inputTokens" — the cache-hit ratio the latency
+  // observability plan depends on — meaningless. Mirrored in agent.ts.
+  const uncached = result.usage?.input ?? 0;
+  const cacheRead = result.usage?.cacheRead ?? 0;
+  const cacheWrite = result.usage?.cacheWrite ?? 0;
   return {
     content: text,
-    inputTokens: result.usage?.input ?? 0,
+    inputTokens: uncached + cacheRead + cacheWrite,
     outputTokens: result.usage?.output ?? 0,
+    cachedInputTokens: cacheRead,
+    cacheCreationInputTokens: cacheWrite,
     costUsd: result.usage?.cost?.total ?? 0,
   };
 }

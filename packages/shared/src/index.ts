@@ -148,6 +148,11 @@ export const GeneratePayloadV1 = z.object({
    *  virtual FS as `index.html` so the text_editor tool can view/edit
    *  incrementally instead of always rewriting from scratch. */
   previousHtml: z.string().optional(),
+  /** Output pattern override from the renderer's slash-command parser.
+   *  `'jsx'` = single-file React/JSX (default behavior, value omitted by
+   *  most callers). `'vanilla'` = multi-source-file HTML+CSS+JS matching
+   *  Claude Design exports. Forwarded to GenerateInput.pattern. */
+  pattern: z.enum(['jsx', 'vanilla']).optional(),
 });
 export type GeneratePayloadV1 = z.infer<typeof GeneratePayloadV1>;
 
@@ -249,6 +254,7 @@ export {
   ProviderEntrySchema,
   ProviderModelDiscoveryModeSchema,
   ReasoningLevelSchema,
+  CacheRetentionSchema,
   SUPPORTED_ONBOARDING_PROVIDERS,
   SecretRef,
   STORED_DESIGN_SYSTEM_SCHEMA_VERSION,
@@ -278,6 +284,7 @@ export type {
   ProviderModelDiscoveryMode,
   ProviderShortlist,
   ReasoningLevel,
+  CacheRetention,
   SupportedOnboardingProvider,
   WireApi,
 } from './config';

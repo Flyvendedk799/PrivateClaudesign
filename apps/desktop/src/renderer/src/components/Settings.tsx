@@ -1,5 +1,10 @@
 import { setLocale as applyLocale, getCurrentLocale, useT } from '@open-codesign/i18n';
-import type { OnboardingState, ReasoningLevel, WireApi } from '@open-codesign/shared';
+import type {
+  CacheRetention,
+  OnboardingState,
+  ReasoningLevel,
+  WireApi,
+} from '@open-codesign/shared';
 import {
   PROVIDER_SHORTLIST as SHORTLIST,
   isSupportedOnboardingProvider,
@@ -403,6 +408,20 @@ function ProviderCard({
           onUpdated={onRowChanged}
         />
       )}
+      {!hasError && row.hasKey !== false && (
+        <CacheRetentionSelector
+          provider={row.provider}
+          value={row.cacheRetention}
+          onUpdated={onRowChanged}
+        />
+      )}
+      {!hasError && row.hasKey !== false && (
+        <WallClockBudgetSelector
+          provider={row.provider}
+          value={row.wallClockBudgetMs}
+          onUpdated={onRowChanged}
+        />
+      )}
     </div>
   );
 }
@@ -596,6 +615,159 @@ function ReasoningDepthSelector({
       <NativeSelect
         value={current}
         onChange={(v) => void handleChange(v as ReasoningOption)}
+        options={options}
+        disabled={saving}
+      />
+    </div>
+  );
+}
+
+type CacheOption = '' | 'short' | 'long' | 'none';
+
+function CacheRetentionSelector({
+  provider,
+  value,
+  onUpdated,
+}: {
+  provider: string;
+  value: CacheRetention | undefined;
+  onUpdated: (row: ProviderRow) => void;
+}) {
+  const t = useT();
+  const pushToast = useCodesignStore((s) => s.pushToast);
+  const reportableErrorToast = useCodesignStore((s) => s.reportableErrorToast);
+  const [saving, setSaving] = useState(false);
+  const [current, setCurrent] = useState<CacheOption>(value ?? '');
+  useEffect(() => {
+    setCurrent(value ?? '');
+  }, [value]);
+  const saveSeq = useRef(0);
+
+  async function handleChange(next: CacheOption) {
+    if (!window.codesign?.config?.updateProvider) return;
+    const prev = current;
+    const seq = ++saveSeq.current;
+    setCurrent(next);
+    setSaving(true);
+    try {
+      const payload = { id: provider, cacheRetention: next === '' ? null : next } as const;
+      await window.codesign.config.updateProvider(payload);
+      pushToast({ variant: 'success', title: t('settings.providers.toast.cacheRetentionSaved') });
+      if (window.codesign?.settings?.listProviders) {
+        const rows = await window.codesign.settings.listProviders();
+        const row = rows.find((r) => r.provider === provider);
+        if (row) onUpdated(row);
+      }
+    } catch (err) {
+      if (seq === saveSeq.current) setCurrent(prev);
+      reportableErrorToast({
+        code: 'PROVIDER_CACHE_RETENTION_SAVE_FAILED',
+        scope: 'settings',
+        title: t('settings.providers.toast.cacheRetentionSaveFailed'),
+        description: cleanIpcError(err) || t('settings.common.unknownError'),
+        ...(err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
+        context: { provider },
+      });
+    } finally {
+      if (seq === saveSeq.current) setSaving(false);
+    }
+  }
+
+  const options: Array<{ value: CacheOption; label: string }> = [
+    { value: '', label: t('settings.providers.cacheRetention.default') },
+    { value: 'short', label: t('settings.providers.cacheRetention.short') },
+    { value: 'long', label: t('settings.providers.cacheRetention.long') },
+    { value: 'none', label: t('settings.providers.cacheRetention.none') },
+  ];
+
+  return (
+    <div className="mt-[var(--space-2)] flex items-center gap-[var(--space-2)] text-[var(--text-xs)] text-[var(--color-text-muted)]">
+      <Sliders className="w-3 h-3 shrink-0" />
+      <span>{t('settings.providers.cacheRetention.label')}</span>
+      <NativeSelect
+        value={current}
+        onChange={(v) => void handleChange(v as CacheOption)}
+        options={options}
+        disabled={saving}
+      />
+    </div>
+  );
+}
+
+type WallClockOption = '' | '60' | '180' | '300' | '480' | '600';
+
+function WallClockBudgetSelector({
+  provider,
+  value,
+  onUpdated,
+}: {
+  provider: string;
+  /** Stored as milliseconds; UI displays/edits seconds. */
+  value: number | undefined;
+  onUpdated: (row: ProviderRow) => void;
+}) {
+  const t = useT();
+  const pushToast = useCodesignStore((s) => s.pushToast);
+  const reportableErrorToast = useCodesignStore((s) => s.reportableErrorToast);
+  const [saving, setSaving] = useState(false);
+  const initial: WallClockOption =
+    value === undefined ? '' : (String(Math.round(value / 1000)) as WallClockOption);
+  const [current, setCurrent] = useState<WallClockOption>(initial);
+  useEffect(() => {
+    setCurrent(value === undefined ? '' : (String(Math.round(value / 1000)) as WallClockOption));
+  }, [value]);
+  const saveSeq = useRef(0);
+
+  async function handleChange(next: WallClockOption) {
+    if (!window.codesign?.config?.updateProvider) return;
+    const prev = current;
+    const seq = ++saveSeq.current;
+    setCurrent(next);
+    setSaving(true);
+    try {
+      const ms = next === '' ? null : Number.parseInt(next, 10) * 1000;
+      const payload = { id: provider, wallClockBudgetMs: ms } as const;
+      await window.codesign.config.updateProvider(payload);
+      pushToast({
+        variant: 'success',
+        title: t('settings.providers.toast.wallClockBudgetSaved'),
+      });
+      if (window.codesign?.settings?.listProviders) {
+        const rows = await window.codesign.settings.listProviders();
+        const row = rows.find((r) => r.provider === provider);
+        if (row) onUpdated(row);
+      }
+    } catch (err) {
+      if (seq === saveSeq.current) setCurrent(prev);
+      reportableErrorToast({
+        code: 'PROVIDER_WALL_CLOCK_BUDGET_SAVE_FAILED',
+        scope: 'settings',
+        title: t('settings.providers.toast.wallClockBudgetSaveFailed'),
+        description: cleanIpcError(err) || t('settings.common.unknownError'),
+        ...(err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
+        context: { provider },
+      });
+    } finally {
+      if (seq === saveSeq.current) setSaving(false);
+    }
+  }
+
+  const options: Array<{ value: WallClockOption; label: string }> = [
+    { value: '', label: t('settings.providers.wallClockBudget.default') },
+    { value: '60', label: t('settings.providers.wallClockBudget.s60') },
+    { value: '180', label: t('settings.providers.wallClockBudget.s180') },
+    { value: '300', label: t('settings.providers.wallClockBudget.s300') },
+    { value: '480', label: t('settings.providers.wallClockBudget.s480') },
+    { value: '600', label: t('settings.providers.wallClockBudget.s600') },
+  ];
+
+  return (
+    <div className="mt-[var(--space-2)] flex items-center gap-[var(--space-2)] text-[var(--text-xs)] text-[var(--color-text-muted)]">
+      <Sliders className="w-3 h-3 shrink-0" />
+      <span>{t('settings.providers.wallClockBudget.label')}</span>
+      <NativeSelect
+        value={current}
+        onChange={(v) => void handleChange(v as WallClockOption)}
         options={options}
         disabled={saving}
       />

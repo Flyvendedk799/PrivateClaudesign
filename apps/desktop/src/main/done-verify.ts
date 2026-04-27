@@ -23,6 +23,14 @@ const VERIFY_TIMEOUT_MS = 3000;
 // for late console errors (e.g. errors thrown inside Babel-transpiled JSX
 // after the initial render). Short enough that the total is still <= 3s.
 const SETTLE_AFTER_LOAD_MS = 1200;
+// Responsive probe widths — match the most common breakpoint thresholds.
+// We measure scrollWidth at each width to catch horizontal overflow, the
+// #1 mobile-layout bug. Each probe adds ~250ms (resize + reflow + measure).
+const RESPONSIVE_PROBE_WIDTHS = [375, 768, 1280] as const;
+const RESPONSIVE_REFLOW_MS = 200;
+// scrollWidth - viewportWidth > this threshold counts as overflow. 16px
+// gives slop for scrollbars / sub-pixel rounding without false positives.
+const OVERFLOW_TOLERANCE_PX = 16;
 
 export function makeRuntimeVerifier(): DoneRuntimeVerifier {
   return async (artifactSource: string): Promise<DoneError[]> => {
@@ -137,6 +145,35 @@ export function makeRuntimeVerifier(): DoneRuntimeVerifier {
           finish();
         });
       });
+
+      // Responsive probes — only run if the page actually loaded.
+      // Probe each width once: resize → wait for reflow → measure scrollWidth.
+      // Skipped if the load failed (errors[] already has the failure).
+      const loadFailed = errors.some((e) => e.source === 'load');
+      if (!loadFailed) {
+        for (const width of RESPONSIVE_PROBE_WIDTHS) {
+          try {
+            win.setSize(width, 800);
+            await new Promise((r) => setTimeout(r, RESPONSIVE_REFLOW_MS));
+            const measure = (await win.webContents.executeJavaScript(
+              '({ scrollWidth: document.documentElement.scrollWidth, viewportWidth: window.innerWidth })',
+            )) as { scrollWidth: number; viewportWidth: number };
+            const overflowPx = measure.scrollWidth - measure.viewportWidth;
+            if (overflowPx > OVERFLOW_TOLERANCE_PX) {
+              pushError(
+                `Horizontal overflow at ${width}px: page is ${measure.scrollWidth}px wide, scrolls ${overflowPx}px sideways. Likely a fixed-width container or non-wrapping flex row.`,
+                'responsive.overflow',
+              );
+            }
+          } catch (err) {
+            // Probe failures are non-fatal — the artifact still rendered.
+            pushError(
+              `Responsive probe at ${width}px failed: ${err instanceof Error ? err.message : String(err)}`,
+              'responsive.probe_failed',
+            );
+          }
+        }
+      }
     } finally {
       try {
         if (!win.isDestroyed()) win.destroy();

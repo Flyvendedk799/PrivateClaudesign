@@ -1053,7 +1053,18 @@ function composeFull(mode: PromptComposeOptions['mode']): string[] {
   return sections;
 }
 
-// Layer 1 (always-on, ~12 KB) + Layer 2 (keyword-matched).
+// Layer 1 (always-on, trimmed for cache stability) + Layer 2 (keyword-matched)
+// + always-appended SAFETY tail.
+//
+// Trim rationale: SAFETY, ANTI_SLOP_DIGEST, and DEVICE_FRAMES_HINT used to live
+// here because "always include" felt safer. But (a) DEVICE_FRAMES_HINT is only
+// meaningful for mobile/device-frame prompts, (b) ANTI_SLOP_DIGEST pairs with
+// CRAFT_DIRECTIVES (the no-keyword fallback) — keyword paths get targeted
+// craft subsections that already encode anti-slop guidance, and (c) SAFETY is
+// non-negotiable but we now append it once at the end of the section list so
+// the always-on prefix is shorter (better prompt-cache stability) AND safety
+// rules sit close to the user message.
+//
 // Layer 3 — retry-on-quality-fail injection of full ANTI_SLOP + ARTIFACT_TYPES
 // is deferred. TODO(progressive-prompt-v2): wire this into the generate retry loop.
 const LAYER_1_BASE: readonly string[] = [
@@ -1063,9 +1074,6 @@ const LAYER_1_BASE: readonly string[] = [
   DESIGN_METHODOLOGY,
   PRE_FLIGHT,
   EDITMODE_PROTOCOL,
-  SAFETY,
-  ANTI_SLOP_DIGEST,
-  DEVICE_FRAMES_HINT,
 ];
 
 interface KeywordMatchPlan {
@@ -1083,6 +1091,10 @@ function planKeywordMatches(userPrompt: string): KeywordMatchPlan {
   }
   if (KEYWORDS_MOBILE.test(userPrompt)) {
     topLevel.push(IOS_STARTER_TEMPLATE);
+    // DEVICE_FRAMES_HINT only matters when the user is asking for an iPhone /
+    // iPad / Watch / Android-frame mock. Bind to the mobile keyword so it
+    // doesn't bloat the always-on prefix.
+    topLevel.push(DEVICE_FRAMES_HINT);
   }
   if (KEYWORDS_MARKETING.test(userPrompt)) {
     topLevel.push(MARKETING_FONT_HINT);
@@ -1118,11 +1130,18 @@ function composeCreateProgressive(userPrompt: string): string[] {
 
   if (noMatch) {
     sections.push(CRAFT_DIRECTIVES);
-    return sections;
+    // Pair the digest with the full craft block — keyword paths already get
+    // targeted craft subsections that encode the relevant anti-slop rules.
+    sections.push(ANTI_SLOP_DIGEST);
+  } else {
+    sections.push(...plan.topLevel);
+    const craftBlock = buildCraftBlock(plan.craftSubsectionNames);
+    if (craftBlock) sections.push(craftBlock);
   }
 
-  sections.push(...plan.topLevel);
-  const craftBlock = buildCraftBlock(plan.craftSubsectionNames);
-  if (craftBlock) sections.push(craftBlock);
+  // SAFETY is always last so it sits closest to the user message — prompt-
+  // injection defenses are most effective when they immediately precede the
+  // untrusted input.
+  sections.push(SAFETY);
   return sections;
 }

@@ -42,10 +42,24 @@ export async function exportHtml(
   return mod.exportHtml(htmlContent, destinationPath, opts);
 }
 
+/** Optional per-format extras passed through to the underlying exporter.
+ *  Only `zipAssets` is consumed today; other fields exist as forward
+ *  compatibility for future formats (e.g. PDF page-break hints). */
+export interface ExportArtifactOptions {
+  /** Sidecar files bundled alongside `index.html` when exporting to ZIP.
+   *  Used by the multi-source-file (vanilla) artifact pattern so the
+   *  exported zip mirrors what Claude Design produces (HTML + CSS + JS +
+   *  assets/). Ignored for non-ZIP formats. */
+  zipAssets?: import('./zip').ZipAsset[];
+  /** Override the README banner inside the ZIP. */
+  zipReadmeTitle?: string;
+}
+
 export async function exportArtifact(
   format: ExporterFormat,
   htmlContent: string,
   destinationPath: string,
+  opts: ExportArtifactOptions = {},
 ): Promise<ExportResult> {
   if (format === 'html') {
     return exportHtml(htmlContent, destinationPath);
@@ -60,7 +74,10 @@ export async function exportArtifact(
   }
   if (format === 'zip') {
     const mod = await import('./zip');
-    return mod.exportZip(htmlContent, destinationPath);
+    const zipOpts: import('./zip').ExportZipOptions = {};
+    if (opts.zipAssets && opts.zipAssets.length > 0) zipOpts.assets = opts.zipAssets;
+    if (opts.zipReadmeTitle !== undefined) zipOpts.readmeTitle = opts.zipReadmeTitle;
+    return mod.exportZip(htmlContent, destinationPath, zipOpts);
   }
   if (format === 'markdown') {
     const mod = await import('./markdown');

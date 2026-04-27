@@ -359,6 +359,10 @@
         "modelSaveFailed": "Failed to save model selection",
         "reasoningSaved": "Reasoning depth saved",
         "reasoningSaveFailed": "Failed to save reasoning depth",
+        "cacheRetentionSaved": "Cache retention saved",
+        "cacheRetentionSaveFailed": "Failed to save cache retention",
+        "wallClockBudgetSaved": "Per-chunk budget saved",
+        "wallClockBudgetSaveFailed": "Failed to save per-chunk budget",
         "connectionOk": "Connection OK",
         "connectionFailed": "Connection failed"
       },
@@ -382,6 +386,22 @@
         "medium": "Medium",
         "high": "High",
         "xhigh": "Extra high"
+      },
+      "cacheRetention": {
+        "label": "Prompt cache TTL",
+        "default": "Default (5 min)",
+        "short": "5 min (ephemeral)",
+        "long": "1 h (Anthropic-direct only)",
+        "none": "Disabled"
+      },
+      "wallClockBudget": {
+        "label": "Per-chunk budget",
+        "default": "Default (5 min)",
+        "s60": "1 min (fastest checkpoint)",
+        "s180": "3 min",
+        "s300": "5 min (default)",
+        "s480": "8 min",
+        "s600": "10 min (max)"
       }
     },
     "appearance": {
@@ -1117,6 +1137,8 @@
     "INPUT_EMPTY_HTML": "Existing HTML is required for this operation.",
     "INPUT_UNSUPPORTED_MODE": "This generation mode is not supported.",
     "GENERATION_TIMEOUT": "Generation timed out. Try a shorter prompt or increase the timeout in Settings.",
+    "MODEL_RETURNED_ONLY_THINKING": "The model returned reasoning but no answer. Try a more directive prompt (e.g. \"output the artifact directly, no preamble\") or lower the reasoning level in Settings.",
+    "AGENT_BUDGET_EXCEEDED": "The agent run hit its safety budget (too many tool calls or wall-clock seconds) and was stopped to avoid runaway cost. Try a smaller scope, or raise the limit in Settings.",
     "CONFIG_READ_FAILED": "Failed to read configuration file. Check file permissions.",
     "CONFIG_PARSE_FAILED": "Configuration file could not be parsed. It may be corrupt.",
     "CONFIG_SCHEMA_INVALID": "Configuration file has an unrecognised format. Please reconfigure.",

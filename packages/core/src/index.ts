@@ -1,5 +1,5 @@
 import { type ArtifactEvent, createArtifactParser } from '@open-codesign/artifacts';
-import type { GenerateResult, ReasoningLevel } from '@open-codesign/providers';
+import type { CacheRetention, GenerateResult, ReasoningLevel } from '@open-codesign/providers';
 import {
   type RetryReason,
   complete,
@@ -104,6 +104,13 @@ export interface GenerateInput {
    * via `reasoningForModel`.
    */
   reasoningLevel?: ReasoningLevel | undefined;
+  /**
+   * Per-call Anthropic prompt-cache TTL override. Sourced from
+   * `ProviderEntry.cacheRetention`. When absent, providers defaults to
+   * `'short'` (5 min). Only honored on official api.anthropic.com — gateways
+   * silently fall back.
+   */
+  cacheRetention?: CacheRetention | undefined;
   designSystem?: StoredDesignSystem | null | undefined;
   attachments?: AttachmentContext[] | undefined;
   referenceUrl?: ReferenceUrlContext | null | undefined;
@@ -116,7 +123,48 @@ export interface GenerateInput {
   mode?: Extract<PromptComposeOptions['mode'], 'create'> | undefined;
   signal?: AbortSignal | undefined;
   onRetry?: ((info: RetryReason) => void) | undefined;
+  /**
+   * Per-run safety budget for the agent runtime. Caps catastrophic loops
+   * (typical design = 10–15 tool calls; defaults give ~4–5× headroom).
+   * Single-shot runModel calls ignore this. When omitted, defaults are
+   * `{ maxToolCalls: 60, maxWallClockMs: 300_000 }`.
+   */
+  agentBudget?: AgentBudget | undefined;
+  /**
+   * Optional drain-callback invoked at every agent `turn_end` boundary to
+   * pick up user-injected steering messages (e.g. "Wrap up now"). Each
+   * returned string is sent to the agent via `agent.steer()` so the next
+   * turn sees it as a user message. The callback should return + clear
+   * the queue atomically; multiple calls per turn are not expected.
+   */
+  getPendingSteers?: (() => string[] | Promise<string[]>) | undefined;
+  /**
+   * Output pattern for the generated artifact. Drives which agentic-tool
+   * guidance section is appended to the system prompt:
+   *   - `'jsx'` (default): single `index.html` JSX-via-Babel-standalone
+   *     pattern. Inline React, the `frames/*` and `skills/*` library is
+   *     auto-loaded by the iframe, EDITMODE/TWEAK_DEFAULTS for the live
+   *     tweak panel.
+   *   - `'vanilla'`: multi-source-file pattern matching real Claude Design
+   *     exports — minimal `index.html` + sibling `styles.css` + one or
+   *     more `<name>.js` files referenced via `<link>` / `<script src>`.
+   *     CDN scripts (Three.js, etc.) allowed.
+   *
+   * Selected by the renderer's slash-command parser (`/jsx`, `/vanilla`)
+   * or, when omitted, defaults to `'jsx'` (current behavior).
+   */
+  pattern?: 'jsx' | 'vanilla' | undefined;
   logger?: CoreLogger | undefined;
+}
+
+/** Caps on agent runtime resource use. See GenerateInput.agentBudget. */
+export interface AgentBudget {
+  maxToolCalls?: number;
+  maxWallClockMs?: number;
+  /** Auto-continue iteration counter (1-indexed). Set by the IPC layer
+   *  per chunk so the checkpoint log can attribute checkpoints to a
+   *  specific chunk in the auto-continue sequence (Step 5). */
+  chunkIndex?: number;
 }
 
 export interface ApplyCommentInput {
@@ -131,11 +179,17 @@ export interface ApplyCommentInput {
   allowKeyless?: boolean | undefined;
   /** @see GenerateInput.reasoningLevel */
   reasoningLevel?: ReasoningLevel | undefined;
+  /** @see GenerateInput.cacheRetention */
+  cacheRetention?: CacheRetention | undefined;
   designSystem?: StoredDesignSystem | null | undefined;
   attachments?: AttachmentContext[] | undefined;
   referenceUrl?: ReferenceUrlContext | null | undefined;
   signal?: AbortSignal | undefined;
   onRetry?: ((info: RetryReason) => void) | undefined;
+  /** Per-text-delta callback. When provided, the IPC handler can stream
+   *  partial revise output to the renderer instead of waiting for the full
+   *  buffer. */
+  onTextDelta?: ((delta: string) => void) | undefined;
   logger?: CoreLogger | undefined;
 }
 
@@ -144,7 +198,20 @@ export interface GenerateOutput {
   artifacts: Artifact[];
   inputTokens: number;
   outputTokens: number;
+  /** Tokens served from Anthropic's prompt cache. Surface in logs to verify
+   *  caching is active across multi-turn flows. */
+  cachedInputTokens: number;
+  /** Tokens written to the cache on this turn (1.25x cost). */
+  cacheCreationInputTokens: number;
   costUsd: number;
+  /**
+   * True when the agent's wall_clock budget fired and the run gracefully
+   * checkpointed (returned the partial artifact + a "Paused" hint in
+   * `message`). Always false on the legacy non-agent path. The IPC layer
+   * uses this to drive auto-continue (fire another runGenerate with the
+   * updated history); the renderer uses it to render a status pill.
+   */
+  interrupted: boolean;
   /**
    * Non-fatal issues surfaced during this generate call (e.g. builtin skill
    * loader failed). Callers MUST forward these to the UI — this is the
@@ -166,8 +233,11 @@ interface ModelRunInput {
   httpHeaders?: Record<string, string> | undefined;
   allowKeyless?: boolean | undefined;
   reasoningLevel?: ReasoningLevel | undefined;
+  cacheRetention?: CacheRetention | undefined;
   signal?: AbortSignal | undefined;
   onRetry?: ((info: RetryReason) => void) | undefined;
+  /** @see ApplyCommentInput.onTextDelta */
+  onTextDelta?: ((delta: string) => void) | undefined;
   messages: ChatMessage[];
   userImages?: Array<{ data: string; mimeType: string }> | undefined;
   logger?: CoreLogger | undefined;
@@ -370,6 +440,11 @@ async function runModel(input: ModelRunInput): Promise<GenerateOutput> {
           ...(input.signal !== undefined ? { signal: input.signal } : {}),
           maxTokens: MAX_OUTPUT_TOKENS,
           ...(reasoning !== undefined ? { reasoning } : {}),
+          // Per-provider override (set in Settings → cache retention) wins
+          // over the 'short' default. pi-ai's default is also 'short', so
+          // pinning this explicitly survives a future pi-ai default change.
+          cacheRetention: input.cacheRetention ?? 'short',
+          ...(input.onTextDelta !== undefined ? { onTextDelta: input.onTextDelta } : {}),
         },
         {
           ...(input.onRetry !== undefined ? { onRetry: input.onRetry } : {}),
@@ -429,6 +504,7 @@ async function runModel(input: ModelRunInput): Promise<GenerateOutput> {
       ...ctx,
       ms: Date.now() - parseStart,
       artifacts: collected.artifacts.length,
+      rawText: result.content.slice(0, 500), // Log first 500 chars for debugging
     });
 
     return {
@@ -436,7 +512,14 @@ async function runModel(input: ModelRunInput): Promise<GenerateOutput> {
       artifacts: collected.artifacts,
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
+      // `?? 0` shields against older test mocks that don't populate the new
+      // cache fields. The provider always returns numbers; this is purely a
+      // test-fixture safety net.
+      cachedInputTokens: result.cachedInputTokens ?? 0,
+      cacheCreationInputTokens: result.cacheCreationInputTokens ?? 0,
       costUsd: result.costUsd,
+      // Legacy non-agent path has no chunking; never interrupted.
+      interrupted: false,
     };
   } catch (err) {
     log.error(`[${scope}] step=parse_response.fail`, {
@@ -550,7 +633,7 @@ async function collectAllSkillBlobs(
  * (~1/3 of context window, ~10k for Opus 4) to give Claude room for both
  * extended-thinking traces and a full HTML artifact.
  */
-const MAX_OUTPUT_TOKENS = 32000;
+const MAX_OUTPUT_TOKENS = 65536;
 
 /** Match Anthropic's Claude 4.x family, which supports extended thinking. */
 const CLAUDE_4_MODEL_RE = /claude-(?:opus|sonnet)-4/i;
@@ -591,8 +674,15 @@ export function reasoningForModel(
 
   switch (model.provider) {
     case 'anthropic':
-      if (!CLAUDE_4_MODEL_RE.test(model.modelId)) return undefined;
-      return looksLikeAnthropicProxy ? 'medium' : 'high';
+      // Claude 4 models (Sonnet 4.6+, Opus 4.6+) are adaptive — they decide
+      // when to think. Defaulting to undefined disables extended thinking
+      // entirely, which matches Claude Code's behavior and avoids paying for
+      // ~7,000 thinking tokens before any output token on follow-up turns.
+      // Users who want deeper reasoning set ProviderEntry.reasoningLevel
+      // explicitly via Settings; that override still wins via runModel:354.
+      // The runModel self-heal at lines 383-405 promotes back to 'medium' if
+      // a reasoning-mandatory upstream rejects an off request.
+      return undefined;
     case 'openai':
       return OPENAI_REASONING_MODEL_RE.test(model.modelId) ? 'high' : undefined;
     case 'openrouter':
@@ -602,10 +692,10 @@ export function reasoningForModel(
       // 'medium' is a safer landing zone for unknown reasoning back-ends.
       return OPENROUTER_REASONING_MODEL_RE.test(model.modelId) ? 'medium' : undefined;
     case 'claude-code-imported':
-      // Claude Code proxy endpoints gate reasoning tiers by plan — the
-      // consumer-tier endpoint only accepts "medium". Sending "high" (or
-      // letting pi-agent-core default up) yields a 400.
-      return CLAUDE_4_MODEL_RE.test(model.modelId) ? 'medium' : undefined;
+      // Same as 'anthropic' above. The proxy-tier 'medium' cap was a defense
+      // against pi-agent-core defaulting up to 'high'; with `undefined` we
+      // never trigger the 400.
+      return undefined;
     default:
       return undefined;
   }
@@ -676,6 +766,7 @@ export async function generate(input: GenerateInput): Promise<GenerateOutput> {
     httpHeaders: input.httpHeaders,
     allowKeyless: input.allowKeyless,
     reasoningLevel: input.reasoningLevel,
+    cacheRetention: input.cacheRetention,
     signal: input.signal,
     onRetry: input.onRetry,
     messages,
@@ -730,8 +821,10 @@ export async function applyComment(input: ApplyCommentInput): Promise<GenerateOu
     httpHeaders: input.httpHeaders,
     allowKeyless: input.allowKeyless,
     reasoningLevel: input.reasoningLevel,
+    cacheRetention: input.cacheRetention,
     signal: input.signal,
     onRetry: input.onRetry,
+    onTextDelta: input.onTextDelta,
     messages,
     userImages: imageInputsForWire(input.attachments, input.wire),
     logger: input.logger,
@@ -767,6 +860,32 @@ const TITLE_SYSTEM_PROMPT = [
   'Bad: "A presentation for a fintech startup", "Design a slide deck for...".',
 ].join('\n');
 
+/**
+ * Pick the cheapest reliable model for title generation. A title is 2–5
+ * words — Sonnet/Opus are massive overkill. Haiku 4.5 is ~5× cheaper and
+ * ~3× faster, and Claude OAuth (Pro/Max) grants access to it via the same
+ * `claude-cli` scope the agent already uses.
+ *
+ * Resolution order:
+ *  1. `OPEN_CODESIGN_TITLE_MODEL_ID` env override (advanced users / tests)
+ *  2. Anthropic family (provider = `anthropic` or `claude-code-imported`)
+ *     → `claude-haiku-4-5`
+ *  3. Anything else → fall back to the user's active model (we don't know
+ *     what cheap model their custom endpoint exposes).
+ *
+ * Exported for test coverage.
+ */
+export function resolveTitleModel(active: ModelRef): ModelRef {
+  const envOverride = process.env['OPEN_CODESIGN_TITLE_MODEL_ID'];
+  if (envOverride && envOverride.trim().length > 0) {
+    return { provider: active.provider, modelId: envOverride.trim() };
+  }
+  if (active.provider === 'anthropic' || active.provider === 'claude-code-imported') {
+    return { provider: active.provider, modelId: 'claude-haiku-4-5' };
+  }
+  return active;
+}
+
 function sanitizeTitle(raw: string): string {
   const cleaned = raw
     .replace(/```[a-zA-Z0-9]*\n?|```/g, '')
@@ -795,14 +914,17 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string> 
       content: `Summarize this design prompt as a short title:\n\n${trimmed}`,
     },
   ];
+  const titleModel = resolveTitleModel(input.model);
   const started = Date.now();
   log.info('[title] step=send_request', {
-    provider: input.model.provider,
-    modelId: input.model.modelId,
+    provider: titleModel.provider,
+    modelId: titleModel.modelId,
+    activeModelId: input.model.modelId,
+    routed: titleModel.modelId !== input.model.modelId,
   });
   try {
     const result = await completeWithRetry(
-      input.model,
+      titleModel,
       messages,
       {
         apiKey: input.apiKey,
@@ -815,7 +937,7 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string> 
       },
       {
         logger: log,
-        provider: input.model.provider,
+        provider: titleModel.provider,
         ...(input.wire !== undefined ? { wire: input.wire } : {}),
       },
     );
@@ -830,6 +952,6 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string> 
       ms: Date.now() - started,
       errorClass: err instanceof Error ? err.constructor.name : typeof err,
     });
-    throw remapProviderError(err, input.model.provider, input.wire);
+    throw remapProviderError(err, titleModel.provider, input.wire);
   }
 }

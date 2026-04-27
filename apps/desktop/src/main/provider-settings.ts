@@ -1,6 +1,7 @@
 import {
   BUILTIN_PROVIDERS,
   CHATGPT_CODEX_PROVIDER_ID,
+  type CacheRetention,
   CodesignError,
   type Config,
   ERROR_CODES,
@@ -30,6 +31,10 @@ export interface ProviderRow {
   defaultModel: string;
   hasKey: boolean;
   reasoningLevel?: ReasoningLevel;
+  cacheRetention?: CacheRetention;
+  /** Per-provider per-chunk wall-clock budget for the agent runtime, in
+   *  milliseconds. Mirrors `ProviderEntry.wallClockBudgetMs`. */
+  wallClockBudgetMs?: number;
   error?: 'decryption_failed' | string;
 }
 
@@ -152,6 +157,10 @@ export function toProviderRows(
       // absent secret is a legitimate state, not a "missing key" warning.
       hasKey: ref !== undefined || isKeylessProviderAllowed(provider, entry),
       ...(entry?.reasoningLevel !== undefined ? { reasoningLevel: entry.reasoningLevel } : {}),
+      ...(entry?.cacheRetention !== undefined ? { cacheRetention: entry.cacheRetention } : {}),
+      ...(entry?.wallClockBudgetMs !== undefined
+        ? { wallClockBudgetMs: entry.wallClockBudgetMs }
+        : {}),
       ...(rowError !== undefined ? { error: rowError } : {}),
     });
   }
@@ -208,6 +217,11 @@ export interface ActiveModelResolution {
   httpHeaders: Record<string, string> | undefined;
   queryParams: Record<string, string> | undefined;
   reasoningLevel: ReasoningLevel | undefined;
+  cacheRetention: CacheRetention | undefined;
+  /** Per-provider per-chunk wall-clock budget for the agent runtime, in
+   *  milliseconds. Plumbed into agentBudget.maxWallClockMs at the IPC
+   *  call site. */
+  wallClockBudgetMs: number | undefined;
   allowKeyless: boolean;
   /** True when the renderer-supplied hint provider didn't match the canonical active. */
   overridden: boolean;
@@ -241,6 +255,8 @@ export function resolveActiveModel(
     httpHeaders: entry.httpHeaders,
     queryParams: entry.queryParams,
     reasoningLevel: entry.reasoningLevel,
+    cacheRetention: entry.cacheRetention,
+    wallClockBudgetMs: entry.wallClockBudgetMs,
     allowKeyless,
     overridden,
   };

@@ -14,6 +14,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { useMemo } from 'react';
+import { summarizeToolCall } from '../../lib/tool-narrative';
 
 export interface WorkingCardProps {
   calls: ChatToolCallPayload[];
@@ -62,6 +63,10 @@ interface ToolRow {
   status: 'running' | 'done' | 'error';
   todos?: TodoItem[];
   editCount?: number;
+  /** Story-mode label from `summarizeToolCall`. When present, the renderer
+   *  shows this instead of the raw `label`; `label` is kept as the title
+   *  attribute for hover-to-see-the-tool-name behaviour. */
+  narrative?: string;
 }
 
 function extractTodos(call: ChatToolCallPayload): TodoItem[] {
@@ -155,6 +160,7 @@ export function buildRows(calls: ChatToolCallPayload[]): ToolRow[] {
         detail: null,
         status: call.status,
         todos: items.length > 0 ? items : (existing?.todos ?? items),
+        narrative: summarizeToolCall(call),
       };
       if (existingIdx >= 0) {
         rows[existingIdx] = row;
@@ -176,6 +182,9 @@ export function buildRows(calls: ChatToolCallPayload[]): ToolRow[] {
         last.editCount = (last.editCount ?? 1) + 1;
         last.label = 'edit';
         last.Icon = FileEdit;
+        // Use the most recent call's narrative so the row reflects the latest
+        // action ("Wired interactivity" trumps an earlier "Added hero").
+        last.narrative = summarizeToolCall(call);
         if (call.status === 'running') last.status = 'running';
         else if (call.status === 'error') last.status = 'error';
         else if (last.status !== 'running' && last.status !== 'error') last.status = 'done';
@@ -189,6 +198,7 @@ export function buildRows(calls: ChatToolCallPayload[]): ToolRow[] {
       label,
       detail,
       status: call.status,
+      narrative: summarizeToolCall(call),
     });
     if (isFileEdit) lastEditIdx = rows.length - 1;
   }
@@ -258,15 +268,26 @@ function TodoListView({ todos }: { todos: TodoItem[] }) {
 
 function ToolRowView({ row }: { row: ToolRow }) {
   const { Icon } = row;
+  // Story-mode label when the narrative helper produced one; otherwise fall
+  // back to the raw tool name. The detail (file path, etc.) appends only
+  // when the narrative didn't already incorporate it.
+  const showDetail =
+    row.detail !== null && (row.narrative === undefined || !row.narrative.includes(row.detail));
   const detailText =
-    row.detail && row.editCount && row.editCount > 1
+    showDetail && row.detail && row.editCount && row.editCount > 1
       ? `${row.detail} (${row.editCount} edits)`
-      : row.detail;
+      : showDetail
+        ? row.detail
+        : null;
+  // Hover tooltip surfaces the raw tool name + path so power users can still
+  // see what's actually happening. Format: "raw_tool_name · /path".
+  const tooltip = [row.label, row.detail].filter(Boolean).join(' · ');
+  const primary = row.narrative ?? row.label;
 
   return (
     <div
       className="flex items-center gap-[6px] text-[12.5px] py-[1px]"
-      title={detailText ?? row.label}
+      title={tooltip || row.label}
     >
       {row.status === 'running' ? (
         <span className="relative inline-flex w-[14px] h-[14px] items-center justify-center shrink-0">
@@ -278,11 +299,9 @@ function ToolRowView({ row }: { row: ToolRow }) {
       ) : (
         <Icon className="w-[14px] h-[14px] shrink-0 text-[var(--color-text-muted)]" aria-hidden />
       )}
-      <span className="font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-secondary)]">
-        {row.label}
-      </span>
+      <span className="text-[var(--color-text-primary)]">{primary}</span>
       {detailText ? (
-        <span className="font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-primary)] truncate">
+        <span className="font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-muted)] truncate">
           {detailText}
         </span>
       ) : null}

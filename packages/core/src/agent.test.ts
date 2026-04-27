@@ -516,7 +516,27 @@ describe('generateViaAgent() — Phase 1 pass-through', () => {
     });
     const sys = agentCalls[0]?.options.initialState?.systemPrompt as string;
     expect(sys).toContain('str_replace_based_edit_tool');
-    expect(sys).toContain('Do NOT emit `<artifact>`');
+    // The slimmed AGENTIC_TOOL_GUIDANCE (2026-04-27) replaced the old
+    // 'Do NOT emit `<artifact>`' phrasing with the tighter 'NEVER inline
+    // source in prose'. Both intents are equivalent for the test.
+    expect(sys).toContain('NEVER inline source in prose');
+  });
+
+  it('pins follow-up turns to str_replace (no text_editor.create on existing files)', async () => {
+    scriptedAgent = { assistantText: RESPONSE_WITH_ARTIFACT };
+    await generateViaAgent({
+      prompt: 'tweak the hero copy',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    const sys = agentCalls[0]?.options.initialState?.systemPrompt as string;
+    // Slimmed phrasing: "Follow-up turns" header is gone, replaced with
+    // a single bullet. The intent ("don't recreate, use str_replace")
+    // is now expressed as "use `str_replace`, NEVER `create`".
+    expect(sys).toMatch(/Follow-up turns when `index\.html` already exists/);
+    expect(sys).toContain('NEVER `create`');
+    expect(sys).toContain('start over');
   });
 
   it('adds explicit bitmap trigger guidance when image asset tool is enabled', async () => {
@@ -667,6 +687,47 @@ describe('generateViaAgent() — first-turn retry', () => {
     // Single attempt: replaying a partial multi-turn session would corrupt
     // tool state, so the second+ turn must surface transient errors directly.
     expect(agentCalls[0]?.prompts.length).toBe(1);
+  });
+});
+
+describe('generateViaAgent() — per-run safety budget', () => {
+  it('aborts and throws AGENT_BUDGET_EXCEEDED when tool-call budget is exceeded', async () => {
+    scriptedAgent = {
+      assistantText: '',
+      stopReason: 'aborted',
+      events: [
+        { type: 'tool_execution_start', toolCallId: 't1', toolName: 'text_editor', args: {} },
+        { type: 'tool_execution_start', toolCallId: 't2', toolName: 'text_editor', args: {} },
+      ],
+    };
+    await expect(
+      generateViaAgent({
+        prompt: 'design a dashboard',
+        history: [],
+        model: MODEL,
+        apiKey: 'sk-test',
+        agentBudget: { maxToolCalls: 1 },
+      }),
+    ).rejects.toMatchObject({ code: ERROR_CODES.AGENT_BUDGET_EXCEEDED });
+    expect(agentCalls[0]?.aborted).toBe(true);
+  });
+
+  it('does NOT abort when tool-call count stays within budget', async () => {
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      events: [
+        { type: 'tool_execution_start', toolCallId: 't1', toolName: 'text_editor', args: {} },
+      ],
+    };
+    const result = await generateViaAgent({
+      prompt: 'design a dashboard',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+      agentBudget: { maxToolCalls: 5 },
+    });
+    expect(result.artifacts).toHaveLength(1);
+    expect(agentCalls[0]?.aborted).toBe(false);
   });
 });
 

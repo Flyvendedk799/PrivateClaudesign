@@ -7,6 +7,7 @@ import { useCodesignStore } from '../store';
 import { ModelSwitcher } from './ModelSwitcher';
 import { AddMenu } from './chat/AddMenu';
 import { ChatMessageList } from './chat/ChatMessageList';
+import { ChatStatusHeader } from './chat/ChatStatusHeader';
 import { CommentChipBar } from './chat/CommentChipBar';
 import { EmptyState } from './chat/EmptyState';
 import { PromptInput, type PromptInputHandle } from './chat/PromptInput';
@@ -81,6 +82,7 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
     (s) => s.isGenerating && s.generatingDesignId === s.currentDesignId,
   );
   const cancelGeneration = useCodesignStore((s) => s.cancelGeneration);
+  const requestWrapUp = useCodesignStore((s) => s.requestWrapUp);
   const inputFiles = useCodesignStore((s) => s.inputFiles);
   const referenceUrl = useCodesignStore((s) => s.referenceUrl);
   const setReferenceUrl = useCodesignStore((s) => s.setReferenceUrl);
@@ -137,6 +139,7 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
       <>
         {/* Chat scroll area */}
         <div className="flex-1 overflow-y-auto px-[var(--space-4)] py-[var(--space-4)]">
+          <ChatStatusHeader />
           <ChatMessageList
             messages={chatMessages}
             loading={!chatLoaded}
@@ -160,6 +163,7 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
             setPrompt={setPrompt}
             onSubmit={onSubmit}
             onCancel={cancelGeneration}
+            onWrapUp={() => void requestWrapUp()}
             isGenerating={isGenerating}
             contextSummary={
               contextItems.length > 0 ? (

@@ -39,6 +39,8 @@ export const ERROR_CODES = {
   INPUT_EMPTY_HTML: 'INPUT_EMPTY_HTML',
   INPUT_UNSUPPORTED_MODE: 'INPUT_UNSUPPORTED_MODE',
   GENERATION_TIMEOUT: 'GENERATION_TIMEOUT',
+  MODEL_RETURNED_ONLY_THINKING: 'MODEL_RETURNED_ONLY_THINKING',
+  AGENT_BUDGET_EXCEEDED: 'AGENT_BUDGET_EXCEEDED',
 
   // Config
   CONFIG_READ_FAILED: 'CONFIG_READ_FAILED',
@@ -222,6 +224,18 @@ export const ERROR_CODE_DESCRIPTIONS: Record<CodesignErrorCode, ErrorCodeDescrip
   GENERATION_TIMEOUT: {
     userFacing: 'Generation timed out. Try a shorter prompt or increase the timeout in Settings.',
     userFacingKey: 'err.GENERATION_TIMEOUT',
+    category: 'generation',
+  },
+  MODEL_RETURNED_ONLY_THINKING: {
+    userFacing:
+      'The model returned reasoning but no answer. Try a more directive prompt (e.g. "output the artifact directly, no preamble") or lower the reasoning level in Settings.',
+    userFacingKey: 'err.MODEL_RETURNED_ONLY_THINKING',
+    category: 'generation',
+  },
+  AGENT_BUDGET_EXCEEDED: {
+    userFacing:
+      'The agent run hit its safety budget (too many tool calls or wall-clock seconds) and was stopped to avoid runaway cost. Try a smaller scope, or raise the limit in Settings.',
+    userFacingKey: 'err.AGENT_BUDGET_EXCEEDED',
     category: 'generation',
   },
 

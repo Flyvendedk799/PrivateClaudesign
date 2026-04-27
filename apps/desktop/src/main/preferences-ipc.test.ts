@@ -50,7 +50,7 @@ describe('readPersisted()', () => {
     const result = await readPersisted();
     expect(result).toEqual({
       updateChannel: 'stable',
-      generationTimeoutSec: 1200,
+      generationTimeoutSec: 2700,
       checkForUpdatesOnStartup: true,
       dismissedUpdateVersion: '',
       diagnosticsLastReadTs: 0,
@@ -86,12 +86,12 @@ describe('readPersisted()', () => {
     expect((err as CodesignError).code).toBe('PREFERENCES_READ_FAILED');
   });
 
-  it('migrates schemaVersion 1 with legacy 120s timeout to the 1200s default', async () => {
+  it('migrates schemaVersion 1 with legacy 120s timeout to the 2700s default', async () => {
     readFileMock.mockResolvedValueOnce(
       JSON.stringify({ schemaVersion: 1, updateChannel: 'stable', generationTimeoutSec: 120 }),
     );
     const result = await readPersisted();
-    expect(result.generationTimeoutSec).toBe(1200);
+    expect(result.generationTimeoutSec).toBe(2700);
   });
 
   it('preserves user-chosen non-legacy timeout across the v1 → v2 migration', async () => {
@@ -102,12 +102,12 @@ describe('readPersisted()', () => {
     expect(result.generationTimeoutSec).toBe(300);
   });
 
-  it('migrates schemaVersion 2 with the old 600s default to 1200s', async () => {
+  it('migrates schemaVersion 2 with the old 600s default to 2700s', async () => {
     readFileMock.mockResolvedValueOnce(
       JSON.stringify({ schemaVersion: 2, updateChannel: 'stable', generationTimeoutSec: 600 }),
     );
     const result = await readPersisted();
-    expect(result.generationTimeoutSec).toBe(1200);
+    expect(result.generationTimeoutSec).toBe(2700);
   });
 
   it('respects an explicit 600s when schema is already v3 (user chose it post-migration)', async () => {
@@ -123,7 +123,7 @@ describe('readPersisted()', () => {
       JSON.stringify({
         schemaVersion: 4,
         updateChannel: 'stable',
-        generationTimeoutSec: 1200,
+        generationTimeoutSec: 2700,
         checkForUpdatesOnStartup: true,
         dismissedUpdateVersion: '',
       }),
@@ -140,7 +140,7 @@ describe('readPersisted()', () => {
       JSON.stringify({
         schemaVersion: 4,
         updateChannel: 'stable',
-        generationTimeoutSec: 1200,
+        generationTimeoutSec: 2700,
         checkForUpdatesOnStartup: true,
         dismissedUpdateVersion: '',
         diagnosticsLastReadTs: 12345,
@@ -164,7 +164,7 @@ describe('readPersisted()', () => {
     let onDisk = JSON.stringify({
       schemaVersion: 4,
       updateChannel: 'stable',
-      generationTimeoutSec: 1200,
+      generationTimeoutSec: 2700,
       checkForUpdatesOnStartup: true,
       dismissedUpdateVersion: '',
     });
@@ -183,7 +183,7 @@ describe('readPersisted()', () => {
       JSON.stringify({
         schemaVersion: 4,
         updateChannel: 'stable',
-        generationTimeoutSec: 1200,
+        generationTimeoutSec: 2700,
         checkForUpdatesOnStartup: true,
         dismissedUpdateVersion: '',
       }),
@@ -198,7 +198,7 @@ describe('readPersisted()', () => {
       schemaVersion: number;
       diagnosticsLastReadTs: number;
     };
-    expect(written.schemaVersion).toBe(5);
+    expect(written.schemaVersion).toBe(6);
     expect(written.diagnosticsLastReadTs).toBe(result.diagnosticsLastReadTs);
     expect(written.diagnosticsLastReadTs).toBeGreaterThanOrEqual(before);
     expect(written.diagnosticsLastReadTs).toBeLessThanOrEqual(after);
@@ -221,7 +221,7 @@ describe('preferences v4 schema fields', () => {
 
   it('reads checkForUpdatesOnStartup and dismissedUpdateVersion with v4 defaults when absent', async () => {
     readFileMock.mockResolvedValueOnce(
-      JSON.stringify({ schemaVersion: 3, updateChannel: 'stable', generationTimeoutSec: 1200 }),
+      JSON.stringify({ schemaVersion: 3, updateChannel: 'stable', generationTimeoutSec: 2700 }),
     );
     const prefs = await readPersisted();
     expect(prefs.checkForUpdatesOnStartup).toBe(true);
@@ -234,7 +234,7 @@ describe('preferences v4 schema fields', () => {
       JSON.stringify({
         schemaVersion: 4,
         updateChannel: 'stable',
-        generationTimeoutSec: 1200,
+        generationTimeoutSec: 2700,
         checkForUpdatesOnStartup: true,
         dismissedUpdateVersion: '',
       }),

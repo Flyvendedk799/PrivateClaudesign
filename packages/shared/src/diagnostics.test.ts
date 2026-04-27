@@ -172,6 +172,29 @@ describe('diagnoseGenerateFailure', () => {
     expect(result[0]?.cause).toBe('diagnostics.cause.keyInvalid');
   });
 
+  it('maps 401 with oauth keyKind to oauthExpired with claude login command', () => {
+    const result = diagnoseGenerateFailure({
+      ...ctx,
+      provider: 'anthropic',
+      status: 401,
+      keyKind: 'oauth',
+    });
+    expect(result[0]?.cause).toBe('diagnostics.cause.oauthExpired');
+    expect(result[0]?.suggestedFix?.label).toBe('diagnostics.fix.reauthCli');
+    expect(result[0]?.suggestedFix?.context?.['command']).toBe('claude login');
+  });
+
+  it('maps 403 with oauth keyKind on openai to codex login command', () => {
+    const result = diagnoseGenerateFailure({
+      ...ctx,
+      provider: 'openai',
+      status: 403,
+      keyKind: 'oauth',
+    });
+    expect(result[0]?.cause).toBe('diagnostics.cause.oauthExpired');
+    expect(result[0]?.suggestedFix?.context?.['command']).toBe('codex login');
+  });
+
   it('maps 500 with "not implemented" body to gatewayIncompatible', () => {
     const result = diagnoseGenerateFailure({
       ...ctx,

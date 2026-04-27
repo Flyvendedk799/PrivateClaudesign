@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { type ValidateResult, pingProvider } from '@open-codesign/providers';
 import {
   BUILTIN_PROVIDERS,
+  type CacheRetention,
+  CacheRetentionSchema,
   type ClaudeCodeDetectionMeta,
   CodesignError,
   type CodexDetectionMeta,
@@ -671,6 +673,14 @@ interface UpdateProviderInput {
   queryParams?: Record<string, string>;
   wire?: WireApi;
   reasoningLevel?: ReasoningLevel | null;
+  /** Tri-state mirror of reasoningLevel: undefined = untouched, null = clear,
+   *  string = set. Persisted on the ProviderEntry so the IPC handler can
+   *  forward it to providers.complete() per request. */
+  cacheRetention?: CacheRetention | null;
+  /** Tri-state per-chunk wall-clock budget (ms) for the agent runtime:
+   *  undefined = untouched, null = clear (use core default), positive
+   *  number = set. Range enforced 60000–600000. */
+  wallClockBudgetMs?: number | null;
   /** When present AND non-empty, re-encrypt and replace the stored secret.
    *  Empty string means "clear stored secret" for providers that became
    *  keyless (e.g. switched to local Ollama). `undefined` means "leave alone". */
@@ -726,6 +736,28 @@ function parseUpdateProviderPayload(raw: unknown): UpdateProviderInput {
     const parsed = ReasoningLevelSchema.safeParse(r['reasoningLevel']);
     if (parsed.success) out.reasoningLevel = parsed.data;
   }
+  if (r['cacheRetention'] === null) {
+    out.cacheRetention = null;
+  } else if (typeof r['cacheRetention'] === 'string') {
+    const parsed = CacheRetentionSchema.safeParse(r['cacheRetention']);
+    if (parsed.success) out.cacheRetention = parsed.data;
+  }
+  if (r['wallClockBudgetMs'] === null) {
+    out.wallClockBudgetMs = null;
+  } else if (typeof r['wallClockBudgetMs'] === 'number') {
+    // Range matches packages/shared/src/config.ts ProviderEntrySchema —
+    // values outside it are rejected (better than silently clamping so
+    // the user sees the error and adjusts).
+    const v = r['wallClockBudgetMs'] as number;
+    if (Number.isInteger(v) && v >= 60_000 && v <= 600_000) {
+      out.wallClockBudgetMs = v;
+    } else {
+      throw new CodesignError(
+        `wallClockBudgetMs must be an integer between 60000 and 600000 ms (got ${v})`,
+        ERROR_CODES.IPC_BAD_INPUT,
+      );
+    }
+  }
   if (typeof r['apiKey'] === 'string') out.apiKey = r['apiKey'];
   return out;
 }
@@ -761,6 +793,18 @@ async function runUpdateProvider(input: UpdateProviderInput): Promise<Onboarding
     updated.reasoningLevel = undefined;
   } else if (input.reasoningLevel !== undefined) {
     updated.reasoningLevel = input.reasoningLevel;
+  }
+  // Same tri-state pattern for cacheRetention.
+  if (input.cacheRetention === null) {
+    updated.cacheRetention = undefined;
+  } else if (input.cacheRetention !== undefined) {
+    updated.cacheRetention = input.cacheRetention;
+  }
+  // Same tri-state pattern for wallClockBudgetMs.
+  if (input.wallClockBudgetMs === null) {
+    updated.wallClockBudgetMs = undefined;
+  } else if (input.wallClockBudgetMs !== undefined) {
+    updated.wallClockBudgetMs = input.wallClockBudgetMs;
   }
   // Secret rotation: only touch secrets when the caller explicitly supplied
   // an apiKey field. Empty string clears the secret (keyless providers);

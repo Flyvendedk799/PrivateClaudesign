@@ -39,7 +39,7 @@ function endpoint(provider: SupportedOnboardingProvider, baseUrl?: string): Prov
           const auth = looksLikeClaudeOAuthToken(apiKey)
             ? { authorization: `Bearer ${apiKey}`, 'anthropic-version': '2023-06-01' }
             : { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' };
-          return withClaudeCodeIdentity('anthropic', baseUrl, auth);
+          return withClaudeCodeIdentity('anthropic', baseUrl, auth, apiKey);
         },
       };
     }

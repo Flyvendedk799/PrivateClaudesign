@@ -1,6 +1,6 @@
 import { useT } from '@open-codesign/i18n';
 import { Tooltip } from '@open-codesign/ui';
-import { ArrowUp, Square } from 'lucide-react';
+import { ArrowUp, Flag, Square } from 'lucide-react';
 import {
   type FormEvent,
   type KeyboardEvent,
@@ -38,6 +38,12 @@ export interface PromptInputProps {
   setPrompt: (value: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
+  /** Optional "Wrap up now" handler — when provided AND isGenerating,
+   *  renders a flag-style button next to the Stop button that pushes a
+   *  user-override steering message into the agent's queue, asking it
+   *  to converge to `done` immediately without further section/polish
+   *  expansion. Distinct from cancel: doesn't drop in-progress work. */
+  onWrapUp?: () => void;
   isGenerating: boolean;
   /** Optional content rendered above the textarea, inside the composer card. */
   contextSummary?: ReactNode;
@@ -59,7 +65,7 @@ export interface PromptInputHandle {
  *   Shift+Enter     — newline
  */
 export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(function PromptInput(
-  { prompt, setPrompt, onSubmit, onCancel, isGenerating, contextSummary, leadingAction },
+  { prompt, setPrompt, onSubmit, onCancel, onWrapUp, isGenerating, contextSummary, leadingAction },
   ref,
 ) {
   const t = useT();
@@ -163,8 +169,23 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
           <div className="absolute bottom-[8px] left-[8px]">{leadingAction}</div>
         ) : null}
 
-        {/* Send / Stop button — bottom right, modern circular */}
-        <div className="absolute bottom-[8px] right-[8px]">
+        {/* Send / Stop / Wrap-up — bottom right cluster */}
+        <div className="absolute bottom-[8px] right-[8px] flex items-center gap-[6px]">
+          {isGenerating && onWrapUp ? (
+            <Tooltip
+              label="Wrap up now — agent converges to `done` at the next safe boundary, no in-progress work lost"
+              side="top"
+            >
+              <button
+                type="button"
+                onClick={onWrapUp}
+                aria-label="Wrap up now"
+                className="inline-flex items-center justify-center w-[28px] h-[28px] rounded-full bg-[var(--color-surface)] border border-[var(--color-border-muted)] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:border-[var(--color-accent)] active:scale-[0.92] transition-all duration-150"
+              >
+                <Flag className="w-[12px] h-[12px]" strokeWidth={2} />
+              </button>
+            </Tooltip>
+          ) : null}
           {isGenerating ? (
             <button
               type="button"

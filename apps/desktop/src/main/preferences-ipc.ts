@@ -17,7 +17,7 @@ import { getLogger } from './logger';
 
 const logger = getLogger('preferences-ipc');
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 // v1 → v2: raise the abandoned 120s timeout default (which aborted real
 // agentic runs mid-loop) to 600s. Values that happen to equal the old
 // default are treated as unmigrated defaults, not user intent.
@@ -25,6 +25,15 @@ const V1_DEFAULT_TIMEOUT_SEC = 120;
 // v2 -> v3: 600s still clips slower long-form multi-turn runs, so the default
 // moves to 1200s.
 const V2_DEFAULT_TIMEOUT_SEC = 600;
+// v5 -> v6: now that we've switched to single-session execution
+// (apps/desktop/src/main/index.ts MAX_AUTO_CONTINUE=1), the entire
+// design generation runs inside one outer timeout. 1200s clipped real
+// reasoning-on multi-section designs mid-flight (production trace
+// 2026-04-27 mogvfm77 needed ~25 min to land 2 str_replaces with
+// reasoning='medium'). Default to 2700s (45 min) — generous enough for
+// big briefs with reasoning, still finite. Users on fast endpoints can
+// lower it in Settings → Advanced.
+const V5_DEFAULT_TIMEOUT_SEC = 1200;
 
 function prefsFile(): string {
   return join(configDir(), 'preferences.json');
@@ -49,11 +58,12 @@ interface PreferencesFile extends Preferences {
 
 const DEFAULTS: Preferences = {
   updateChannel: 'stable',
-  // Agentic runs do multiple LLM turns + tool executions + file writes, so
-  // 120s was too tight and 600s still clips slower long-form runs. Default to
-  // 1200s (20 min); users on fast endpoints can lower this
-  // in Settings → Advanced.
-  generationTimeoutSec: 1200,
+  // Single-session default (post-2026-04-27 framework simplification):
+  // the whole design generation runs inside ONE outer timeout — no more
+  // chunked re-planning. 2700s = 45 min is generous enough for big
+  // reasoning-on briefs without being unbounded. Lower in Settings →
+  // Advanced for fast endpoints.
+  generationTimeoutSec: 2700,
   checkForUpdatesOnStartup: true,
   dismissedUpdateVersion: '',
   diagnosticsLastReadTs: 0,
@@ -73,7 +83,9 @@ function parsePersistedFile(parsed: Partial<PreferencesFile>): Preferences {
       ? DEFAULTS.generationTimeoutSec
       : persistedSchema < 3 && rawTimeout === V2_DEFAULT_TIMEOUT_SEC
         ? DEFAULTS.generationTimeoutSec
-        : rawTimeout;
+        : persistedSchema < 6 && rawTimeout === V5_DEFAULT_TIMEOUT_SEC
+          ? DEFAULTS.generationTimeoutSec
+          : rawTimeout;
   return {
     updateChannel:
       parsed.updateChannel === 'stable' || parsed.updateChannel === 'beta'

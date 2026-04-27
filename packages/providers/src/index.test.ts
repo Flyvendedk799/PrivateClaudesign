@@ -2,11 +2,31 @@ import type { ChatMessage, ModelRef } from '@open-codesign/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const getModelMock = vi.fn();
+// Historical name — kept so existing test bodies that call
+// `completeSimpleMock.mockImplementationOnce(async (model, context, opts) => …)`
+// still drive the request shape. We expose this as `streamSimple` (the new
+// pi-ai entry point) via the wrapper below.
 const completeSimpleMock = vi.fn();
+// Optional override that lets tests asserting on `onTextDelta` produce real
+// stream events. When unset (the common case), streamSimple yields no deltas
+// and tests behave exactly like the old completeSimple-mock world.
+let streamEventOverride: AsyncIterable<{ type: string; delta?: string }> | undefined;
 
 vi.mock('@mariozechner/pi-ai', () => ({
   getModel: (...args: unknown[]) => getModelMock(...args),
-  completeSimple: (...args: unknown[]) => completeSimpleMock(...args),
+  streamSimple: (...args: unknown[]) => {
+    const messagePromise = completeSimpleMock(...args);
+    const events = streamEventOverride;
+    return {
+      [Symbol.asyncIterator]() {
+        if (events) return events[Symbol.asyncIterator]();
+        return {
+          next: async () => ({ done: true, value: undefined }) as IteratorResult<never>,
+        };
+      },
+      result: () => messagePromise,
+    };
+  },
 }));
 
 import { complete, inferReasoning } from './index';
@@ -16,6 +36,7 @@ const MODEL: ModelRef = { provider: 'openai', modelId: 'gpt-4o' };
 afterEach(() => {
   getModelMock.mockReset();
   completeSimpleMock.mockReset();
+  streamEventOverride = undefined;
 });
 
 describe('complete', () => {
@@ -101,8 +122,135 @@ describe('complete', () => {
       content: '我可以帮你生成设计稿。',
       inputTokens: 12,
       outputTokens: 34,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
       costUsd: 0.01,
     });
+  });
+
+  it('surfaces Anthropic cache usage (cacheRead/cacheWrite) on the result', async () => {
+    getModelMock.mockReturnValue({
+      id: 'claude-sonnet-4-6',
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+    });
+    completeSimpleMock.mockImplementationOnce(async (_model, _context, opts) => {
+      // Default cacheRetention should be wired through to pi-ai opts.
+      expect(opts.cacheRetention).toBe('short');
+      return {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'cached!' }],
+        api: 'anthropic-messages',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: {
+          input: 9000,
+          output: 200,
+          cacheRead: 8500,
+          cacheWrite: 0,
+          totalTokens: 17700,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'stop',
+        timestamp: Date.now(),
+      };
+    });
+
+    const result = await complete(
+      { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
+      [{ role: 'user', content: 'follow up' }],
+      { apiKey: 'sk-ant-test' },
+    );
+
+    expect(result).toMatchObject({
+      content: 'cached!',
+      // inputTokens is total: uncached(9000) + cacheRead(8500) + cacheWrite(0)
+      inputTokens: 17500,
+      outputTokens: 200,
+      cachedInputTokens: 8500,
+      cacheCreationInputTokens: 0,
+    });
+  });
+
+  it('forwards an explicit cacheRetention override into pi-ai opts', async () => {
+    getModelMock.mockReturnValue({
+      id: 'claude-sonnet-4-6',
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+    });
+    completeSimpleMock.mockImplementationOnce(async (_model, _context, opts) => {
+      expect(opts.cacheRetention).toBe('long');
+      return {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        api: 'anthropic-messages',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'stop',
+        timestamp: Date.now(),
+      };
+    });
+
+    await complete(
+      { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
+      [{ role: 'user', content: 'hi' }],
+      { apiKey: 'sk-ant-test', cacheRetention: 'long' },
+    );
+  });
+
+  it('invokes onTextDelta for each text delta and ignores thinking deltas', async () => {
+    getModelMock.mockReturnValue({
+      id: 'claude-sonnet-4-6',
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+    });
+    // Synthesize a stream that yields a thinking delta, then two text deltas,
+    // then ends. The test asserts onTextDelta is called twice (text only).
+    streamEventOverride = (async function* () {
+      yield { type: 'thinking_delta', delta: 'hmm planning…' };
+      yield { type: 'text_delta', delta: 'Hello, ' };
+      yield { type: 'text_delta', delta: 'world!' };
+    })();
+    completeSimpleMock.mockImplementationOnce(async () => ({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Hello, world!' }],
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 15,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    }));
+
+    const deltas: string[] = [];
+    const result = await complete(
+      { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
+      [{ role: 'user', content: 'hi' }],
+      {
+        apiKey: 'sk-ant-test',
+        onTextDelta: (delta) => {
+          deltas.push(delta);
+        },
+      },
+    );
+
+    expect(deltas).toEqual(['Hello, ', 'world!']);
+    expect(result.content).toBe('Hello, world!');
   });
 
   it('synthesizes a pass-through Model when openrouter id is missing from registry', async () => {
@@ -374,6 +522,81 @@ describe('complete', () => {
     );
 
     expect(getModelMock).toHaveBeenCalledWith('custom-gemini', 'gemini-2-pro');
+  });
+
+  it('excludes thinking/thought blocks from content (only text is user-visible)', async () => {
+    getModelMock.mockReturnValue({
+      id: 'claude-sonnet-4-6',
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+    });
+    completeSimpleMock.mockImplementationOnce(async () => ({
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'Let me plan the layout — first the hero, then…' },
+        { type: 'thought', thought: 'Actually, start with nav.' },
+        { type: 'text', text: '<artifact>real answer</artifact>' },
+      ],
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      usage: {
+        input: 10,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 30,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    }));
+
+    const result = await complete(
+      { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
+      [{ role: 'user', content: 'build me a landing page' }],
+      { apiKey: 'sk-ant-test' },
+    );
+
+    expect(result.content).toBe('<artifact>real answer</artifact>');
+  });
+
+  it('throws MODEL_RETURNED_ONLY_THINKING when the response contains no text block', async () => {
+    getModelMock.mockReturnValue({
+      id: 'claude-sonnet-4-6',
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+    });
+    completeSimpleMock.mockImplementationOnce(async () => ({
+      role: 'assistant',
+      content: [
+        {
+          type: 'thinking',
+          thinking: 'Still writing styles… Still writing styles… Building the card layout…',
+        },
+      ],
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      usage: {
+        input: 100,
+        output: 8000,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 8100,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    }));
+
+    await expect(
+      complete(
+        { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
+        [{ role: 'user', content: 'complete the landing page' }],
+        { apiKey: 'sk-ant-test' },
+      ),
+    ).rejects.toMatchObject({ code: 'MODEL_RETURNED_ONLY_THINKING' });
   });
 });
 

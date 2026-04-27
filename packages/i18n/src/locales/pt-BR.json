@@ -324,6 +324,8 @@
         "modelSaveFailed": "Falha ao salvar a seleção de modelo",
         "reasoningSaved": "Profundidade de raciocínio salva",
         "reasoningSaveFailed": "Falha ao salvar a profundidade de raciocínio",
+        "cacheRetentionSaved": "Retenção de cache salva",
+        "cacheRetentionSaveFailed": "Falha ao salvar a retenção de cache",
         "connectionOk": "Conexão OK",
         "connectionFailed": "Falha na conexão",
         "saveFailed": "Falha ao salvar o provedor"
@@ -336,6 +338,13 @@
         "medium": "Média",
         "high": "Alta",
         "xhigh": "Muito alta"
+      },
+      "cacheRetention": {
+        "label": "TTL do cache de prompt",
+        "default": "Padrão (5 min)",
+        "short": "5 min (efêmero)",
+        "long": "1 h (apenas Anthropic direto)",
+        "none": "Desativado"
       },
       "addKey": "Adicionar chave",
       "missingKey": "Chave ausente",
@@ -1068,6 +1077,8 @@
     "INPUT_EMPTY_HTML": "Um HTML existente é obrigatório para esta operação.",
     "INPUT_UNSUPPORTED_MODE": "Este modo de geração não é suportado.",
     "GENERATION_TIMEOUT": "A geração excedeu o tempo limite. Tente um prompt mais curto ou aumente o tempo em Configurações.",
+    "MODEL_RETURNED_ONLY_THINKING": "O modelo retornou apenas raciocínio, sem resposta. Tente um prompt mais diretivo (por exemplo, \"emita o artefato diretamente, sem preâmbulo\") ou reduza o nível de raciocínio em Configurações.",
+    "AGENT_BUDGET_EXCEEDED": "A execução do agente atingiu o orçamento de segurança (chamadas de ferramentas ou tempo total excedidos) e foi interrompida para evitar custos descontrolados. Reduza o escopo da tarefa ou aumente o limite em Configurações.",
     "CONFIG_READ_FAILED": "Falha ao ler o arquivo de configuração. Verifique as permissões.",
     "CONFIG_PARSE_FAILED": "O arquivo de configuração não pôde ser lido. Pode estar corrompido.",
     "CONFIG_SCHEMA_INVALID": "O arquivo de configuração tem um formato não reconhecido. Reconfigure.",

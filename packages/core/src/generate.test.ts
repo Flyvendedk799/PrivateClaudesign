@@ -34,7 +34,7 @@ vi.mock('./skills/loader.js', async () => {
   };
 });
 
-import { applyComment, generate } from './index';
+import { applyComment, generate, reasoningForModel, resolveTitleModel } from './index';
 
 const MODEL: ModelRef = { provider: 'anthropic', modelId: 'claude-sonnet-4-6' };
 
@@ -106,7 +106,7 @@ describe('generate()', () => {
     expect(result.costUsd).toBeCloseTo(0.0001);
   });
 
-  it('requests 32k output tokens and high reasoning for Claude 4 models', async () => {
+  it('requests 64k output tokens and omits reasoning for Claude 4 models by default', async () => {
     completeMock.mockResolvedValueOnce({
       content: RESPONSE,
       inputTokens: 0,
@@ -125,8 +125,11 @@ describe('generate()', () => {
       maxTokens?: number;
       reasoning?: string;
     };
-    expect(opts.maxTokens).toBe(32000);
-    expect(opts.reasoning).toBe('high');
+    expect(opts.maxTokens).toBe(65536);
+    // Claude 4 is adaptive; no reasoning level by default. Users opt in via
+    // ProviderEntry.reasoningLevel; the runModel self-heal promotes back to
+    // 'medium' if the upstream demands it.
+    expect(opts.reasoning).toBeUndefined();
   });
 
   it('omits reasoning for non-reasoning models, still raises maxTokens', async () => {
@@ -148,7 +151,7 @@ describe('generate()', () => {
       maxTokens?: number;
       reasoning?: string;
     };
-    expect(opts.maxTokens).toBe(32000);
+    expect(opts.maxTokens).toBe(65536);
     expect(opts.reasoning).toBeUndefined();
   });
 
@@ -404,7 +407,7 @@ describe('generate()', () => {
     expect(result.artifacts).toHaveLength(1);
   });
 
-  it('passes reasoning=high for Anthropic claude-opus-4-7 (first-party provider)', async () => {
+  it('omits reasoning for Anthropic claude-opus-4-7 by default (adaptive thinking)', async () => {
     completeMock.mockResolvedValueOnce({
       content: RESPONSE,
       inputTokens: 0,
@@ -420,7 +423,8 @@ describe('generate()', () => {
     });
 
     const opts = completeMock.mock.calls[0]?.[2] as { reasoning?: string };
-    expect(opts.reasoning).toBe('high');
+    // Adaptive-thinking model: defaults to off, user opts in via Settings.
+    expect(opts.reasoning).toBeUndefined();
   });
 
   it('passes reasoning=high for OpenAI o3-mini (first-party provider)', async () => {
@@ -1331,10 +1335,14 @@ describe('composeSystemPrompt()', () => {
     expect(prompt).toContain('frames/watch.html');
   });
 
-  it('progressive create mode includes device-frames hint in Layer 1 even without keyword match', () => {
+  it('progressive create mode includes device-frames hint when prompt mentions mobile', () => {
+    // DEVICE_FRAMES_HINT moved out of the always-on layer in the prompt-trim
+    // pass — it now binds to the mobile keyword alongside IOS_STARTER_TEMPLATE.
+    // Editorial typography prompts no longer pull it in (verified separately
+    // in the "device frames hint is included only when…" test below).
     const prompt = composeSystemPrompt({
       mode: 'create',
-      userPrompt: 'a brutalist editorial homepage about typography',
+      userPrompt: 'iOS app onboarding flow',
     });
     expect(prompt).toContain('Device frames (optional starter templates)');
     expect(prompt).toContain('frames/iphone.html');
@@ -1436,9 +1444,39 @@ describe('composeSystemPrompt() — progressive disclosure', () => {
       expect(p, `identity missing for "${userPrompt}"`).toContain('open-codesign');
       expect(p, `workflow missing for "${userPrompt}"`).toContain('Design workflow');
       expect(p, `output rules missing for "${userPrompt}"`).toContain('Output rules');
+      // SAFETY is always appended last so prompt-injection defense sits next
+      // to the user message.
       expect(p, `safety missing for "${userPrompt}"`).toContain('Safety and scope');
-      expect(p, `anti-slop digest missing for "${userPrompt}"`).toContain('Anti-slop digest');
     }
+  });
+
+  it('anti-slop digest is included only on the no-keyword fallback path', () => {
+    const dashboard = composeSystemPrompt({ mode: 'create', userPrompt: '做个数据看板' });
+    const mobile = composeSystemPrompt({ mode: 'create', userPrompt: 'iOS 移动端 onboarding' });
+    const noMatch = composeSystemPrompt({ mode: 'create', userPrompt: '随便做点东西' });
+
+    // Keyword paths get targeted craft subsections that already encode
+    // anti-slop guidance; no need to also include the digest.
+    expect(dashboard).not.toContain('Anti-slop digest');
+    expect(mobile).not.toContain('Anti-slop digest');
+    // The no-keyword fallback pairs the digest with full CRAFT_DIRECTIVES.
+    expect(noMatch).toContain('Anti-slop digest');
+  });
+
+  it('device frames hint is included only when the prompt mentions mobile/iOS', () => {
+    const mobile = composeSystemPrompt({
+      mode: 'create',
+      userPrompt: 'iOS 移动端 onboarding',
+    });
+    const dashboard = composeSystemPrompt({ mode: 'create', userPrompt: '做个数据看板' });
+    const marketing = composeSystemPrompt({
+      mode: 'create',
+      userPrompt: 'indie marketing landing page',
+    });
+
+    expect(mobile).toContain('Device frames (optional starter templates)');
+    expect(dashboard).not.toContain('Device frames (optional starter templates)');
+    expect(marketing).not.toContain('Device frames (optional starter templates)');
   });
 
   it('dashboard prompt: includes chart rendering, excludes iOS starter', () => {
@@ -1529,6 +1567,55 @@ describe('composeSystemPrompt() — progressive disclosure', () => {
     });
     expect(p).not.toContain('Logos and brand marks');
   });
+
+  // Cache-stable prefix invariant. pi-ai's automatic Anthropic prompt caching
+  // hashes the system prompt and serves cached input tokens whenever the next
+  // call's system prompt starts with a byte-identical prefix. If a future
+  // refactor accidentally moves a keyword-routed section above LAYER_1_BASE
+  // (or makes any always-on section depend on userPrompt), the prefix would
+  // diverge per-prompt and follow-up turns would silently lose the cache hit.
+  // Lock that invariant in here.
+  it('cache-stable prefix: LAYER_1_BASE is byte-identical across keyword routes', () => {
+    const dashboard = composeSystemPrompt({ mode: 'create', userPrompt: '做个数据看板' });
+    const mobile = composeSystemPrompt({ mode: 'create', userPrompt: 'iOS 移动端 onboarding' });
+    const marketing = composeSystemPrompt({
+      mode: 'create',
+      userPrompt: 'indie marketing landing page',
+    });
+    const noMatch = composeSystemPrompt({ mode: 'create', userPrompt: '随便做点东西' });
+
+    const lcp = (a: string, b: string): number => {
+      const n = Math.min(a.length, b.length);
+      let i = 0;
+      while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+      return i;
+    };
+
+    // The "cache-stable prefix" is the substring shared by EVERY route — i.e.
+    // the min of all pairwise LCPs. That's the region pi-ai's auto cache_control
+    // can reuse across follow-up turns no matter which keywords the user hits.
+    // It must cover the whole LAYER_1_BASE concat. LAYER_1_BASE is internal so
+    // we can't assert its exact length, but we can assert (a) the prefix is
+    // substantial — at least 4 KB, well above the post-trim baseline — and
+    // (b) every route's first 4 KB is byte-identical (this catches accidental
+    // section reordering that would diverge before LAYER_1_BASE ends).
+    const stable = Math.min(
+      lcp(dashboard, mobile),
+      lcp(dashboard, marketing),
+      lcp(dashboard, noMatch),
+      lcp(mobile, marketing),
+      lcp(mobile, noMatch),
+      lcp(marketing, noMatch),
+    );
+    expect(
+      stable,
+      `cache-stable prefix shrunk to ${stable} chars — a section likely got demoted out of LAYER_1_BASE`,
+    ).toBeGreaterThan(4_000);
+    const FLOOR = 4_000;
+    expect(dashboard.slice(0, FLOOR)).toBe(mobile.slice(0, FLOOR));
+    expect(dashboard.slice(0, FLOOR)).toBe(marketing.slice(0, FLOOR));
+    expect(dashboard.slice(0, FLOOR)).toBe(noMatch.slice(0, FLOOR));
+  });
 });
 
 describe('prompt section .txt vs TS drift', () => {
@@ -1543,4 +1630,98 @@ describe('prompt section .txt vs TS drift', () => {
       expect((tsConstant as string).trim()).toBe(txtContent.trim());
     });
   }
+});
+
+describe('reasoningForModel', () => {
+  it('returns undefined for Claude 4 under anthropic provider (adaptive default)', () => {
+    expect(
+      reasoningForModel(
+        { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
+        'https://api.anthropic.com',
+      ),
+    ).toBeUndefined();
+    expect(
+      reasoningForModel(
+        { provider: 'anthropic', modelId: 'claude-opus-4-7' },
+        'https://api.anthropic.com',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('returns undefined for Claude 4 under claude-code-imported provider', () => {
+    expect(
+      reasoningForModel(
+        { provider: 'claude-code-imported', modelId: 'claude-sonnet-4-6' },
+        'https://api.anthropic.com',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('still returns high for OpenAI o3-mini (reasoning-mandatory family)', () => {
+    expect(reasoningForModel({ provider: 'openai', modelId: 'o3-mini' }, undefined)).toBe('high');
+  });
+
+  it('still returns medium for OpenRouter :thinking endpoints', () => {
+    expect(
+      reasoningForModel(
+        { provider: 'openrouter', modelId: 'qwen/qwen3-coder:thinking' },
+        undefined,
+      ),
+    ).toBe('medium');
+  });
+});
+
+describe('resolveTitleModel', () => {
+  const ORIG_ENV = process.env['OPEN_CODESIGN_TITLE_MODEL_ID'];
+  afterEach(() => {
+    // Node coerces `process.env[k] = undefined` to the literal string
+    // "undefined", so we must actually unset the key when ORIG_ENV is unset.
+    // Reflect.deleteProperty sidesteps the noDelete lint on the `delete`
+    // operator while doing the same thing.
+    if (ORIG_ENV === undefined) {
+      Reflect.deleteProperty(process.env, 'OPEN_CODESIGN_TITLE_MODEL_ID');
+    } else {
+      process.env['OPEN_CODESIGN_TITLE_MODEL_ID'] = ORIG_ENV;
+    }
+  });
+
+  it('routes anthropic Sonnet → claude-haiku-4-5 (cheap subtask)', () => {
+    expect(resolveTitleModel({ provider: 'anthropic', modelId: 'claude-sonnet-4-6' })).toEqual({
+      provider: 'anthropic',
+      modelId: 'claude-haiku-4-5',
+    });
+  });
+
+  it('routes claude-code-imported Opus → claude-haiku-4-5 (same OAuth scope)', () => {
+    expect(
+      resolveTitleModel({ provider: 'claude-code-imported', modelId: 'claude-opus-4-7' }),
+    ).toEqual({ provider: 'claude-code-imported', modelId: 'claude-haiku-4-5' });
+  });
+
+  it('falls back to active model for unknown providers (no assumption about cheap tier)', () => {
+    expect(resolveTitleModel({ provider: 'openai', modelId: 'gpt-5' })).toEqual({
+      provider: 'openai',
+      modelId: 'gpt-5',
+    });
+    expect(resolveTitleModel({ provider: 'openrouter', modelId: 'meta/llama' })).toEqual({
+      provider: 'openrouter',
+      modelId: 'meta/llama',
+    });
+  });
+
+  it('honors OPEN_CODESIGN_TITLE_MODEL_ID env override (preserves provider)', () => {
+    process.env['OPEN_CODESIGN_TITLE_MODEL_ID'] = 'claude-haiku-3-5';
+    expect(resolveTitleModel({ provider: 'anthropic', modelId: 'claude-sonnet-4-6' })).toEqual({
+      provider: 'anthropic',
+      modelId: 'claude-haiku-3-5',
+    });
+  });
+
+  it('ignores blank env override (treats as unset)', () => {
+    process.env['OPEN_CODESIGN_TITLE_MODEL_ID'] = '   ';
+    expect(resolveTitleModel({ provider: 'anthropic', modelId: 'claude-sonnet-4-6' })).toEqual({
+      provider: 'anthropic',
+      modelId: 'claude-haiku-4-5',
+    });
+  });
 });

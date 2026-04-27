@@ -59,6 +59,118 @@ function ok(text: string, details: TextEditorDetails): AgentToolResult<TextEdito
   };
 }
 
+/**
+ * Per-call size guards — enforce the AGENTIC_TOOL_GUIDANCE cadence ("skeleton
+ * via create, then per-section str_replace") that Sonnet 4.6 routinely
+ * ignores by jamming the entire artifact into a single tool call. The
+ * 2026-04-26 production trace had a single str_replace whose tool-input
+ * consumed all 32k output tokens, truncating the response mid-JSX.
+ *
+ * Caps are file-extension-aware. The original 8 KB / 12 KB cap is correct
+ * for `index.html` (the JSX-pattern artifact MUST be a skeleton + section
+ * fills). But Claude-Design-style multi-file designs ship 100+ KB of CSS
+ * and 100+ KB of JS in dedicated files (Neurolayer.zip's mindspace.js is
+ * 127 KB) — the same caps would block any meaningful vanilla-pattern work.
+ * Sidecar files (.css, .js, .json) get a much more generous ceiling.
+ *
+ * Thresholds remain generous for legit one-shot writes; only the "write
+ * everything in one tool call" anti-pattern trips them.
+ */
+const MAX_CREATE_BYTES_INDEX = 8192;
+const MAX_STR_REPLACE_NEW_BYTES_INDEX = 12288;
+const MAX_CREATE_BYTES_SIDECAR = 65536;
+const MAX_STR_REPLACE_NEW_BYTES_SIDECAR = 32768;
+
+/** Sidecar files (CSS / JS / JSON) get the relaxed cap. The `index.html`
+ *  and any other `.html` file stays on the tighter cap so the JSX-pattern
+ *  skeleton-then-fills cadence is still enforced. */
+function isSidecarFile(path: string): boolean {
+  const lower = path.toLowerCase();
+  return (
+    lower.endsWith('.css') ||
+    lower.endsWith('.js') ||
+    lower.endsWith('.mjs') ||
+    lower.endsWith('.json')
+  );
+}
+
+function maxCreateBytesFor(path: string): number {
+  return isSidecarFile(path) ? MAX_CREATE_BYTES_SIDECAR : MAX_CREATE_BYTES_INDEX;
+}
+
+function maxStrReplaceBytesFor(path: string): number {
+  return isSidecarFile(path) ? MAX_STR_REPLACE_NEW_BYTES_SIDECAR : MAX_STR_REPLACE_NEW_BYTES_INDEX;
+}
+
+function throwOversizedCreate(path: string, byteLen: number, cap: number): never {
+  const isSidecar = isSidecarFile(path);
+  const guidance = isSidecar
+    ? 'Sidecar files (.css, .js, .json) accept up to 65 KB per create. Even so, prefer splitting genuinely large modules across two creates (e.g. data + engine).'
+    : 'create is a SKELETON tool for `index.html` — write the doctype + html shell + (for vanilla pattern) `<link>` and `<script src>` refs, then add section content via `str_replace`. Cramming the whole artifact into one call burns the per-turn output budget and truncates the response.';
+  throw new Error(
+    `text_editor.create("${path}", ...) was called with file_text=${byteLen} bytes, which exceeds the ${cap}-byte cap for this file type. ${guidance}`,
+  );
+}
+
+function throwOversizedStrReplace(path: string, byteLen: number, cap: number): never {
+  const isSidecar = isSidecarFile(path);
+  const guidance = isSidecar
+    ? `Sidecar files (.css, .js, .json) accept up to ${MAX_STR_REPLACE_NEW_BYTES_SIDECAR} bytes per str_replace. Split larger edits into two or three calls in the same turn — keep each tightly scoped.`
+    : `${MAX_STR_REPLACE_NEW_BYTES_INDEX} bytes is a generous per-edit ceiling for index.html. Split this into 2-3 smaller \`str_replace\` calls across separate turns, one section at a time.`;
+  throw new Error(
+    `text_editor.str_replace on "${path}" was called with new_str=${byteLen} bytes, which exceeds the ${cap}-byte cap for this file type. A typical section is 1-3 KB. ${guidance}`,
+  );
+}
+
+/**
+ * str_replace miss recovery — finds the lines in the live file where the FIRST
+ * non-empty line of `old_str` actually appears, and surfaces them so the agent
+ * can re-issue a focused `view_range` instead of blindly retrying. Production
+ * traces showed agents wasting 3-5 round-trips guessing at drifted snippets;
+ * one well-targeted view typically fixes it on the next call.
+ *
+ * Thrown — pi-agent-core's contract is "Throw on failure instead of encoding
+ * errors in `content`": the message becomes the tool-result the model sees,
+ * with isError=true wired by the runtime.
+ */
+function throwStrReplaceMiss(path: string, oldStr: string, fileContent: string): never {
+  const firstLine = (oldStr.split('\n').find((ln) => ln.trim().length > 0) ?? '').trim();
+  const lines = fileContent.split('\n');
+  const candidateLines: number[] = [];
+  if (firstLine.length > 0) {
+    for (let i = 0; i < lines.length; i += 1) {
+      if (lines[i]?.includes(firstLine)) candidateLines.push(i + 1);
+      if (candidateLines.length >= 5) break;
+    }
+  }
+  const firstLineSnippet = `${firstLine.slice(0, 60)}${firstLine.length > 60 ? '…' : ''}`;
+  const head =
+    candidateLines.length > 0
+      ? `old_str not found in ${path}. The first non-empty line of your old_str ("${firstLineSnippet}") appears at line(s): ${candidateLines.join(', ')}.`
+      : `old_str not found in ${path}. The first non-empty line of your old_str ("${firstLineSnippet}") does not appear anywhere in the current file.`;
+  const guidance =
+    candidateLines.length > 0
+      ? `Next step: re-issue \`view\` with \`view_range: [${Math.max(1, (candidateLines[0] ?? 1) - 3)}, ${Math.min(lines.length, (candidateLines[0] ?? 1) + 20)}]\` to see the actual current text, then retry str_replace with the exact snippet you read back. Do NOT blindly retry with another guessed old_str — the file content has drifted from your memory and another guess will fail the same way.`
+      : 'Next step: re-issue `view` with a small `view_range` covering the section you wanted to edit, then retry str_replace with the exact snippet you read back. Do NOT guess at another old_str — the file content has drifted from your memory.';
+  throw new Error(`${head}\n\n${guidance}`);
+}
+
+function throwStrReplaceAmbiguous(oldStr: string, fileContent: string, originalMsg: string): never {
+  const firstLine = (oldStr.split('\n').find((ln) => ln.trim().length > 0) ?? '').trim();
+  const lines = fileContent.split('\n');
+  const matchLines: number[] = [];
+  if (firstLine.length > 0) {
+    for (let i = 0; i < lines.length; i += 1) {
+      if (lines[i]?.includes(firstLine)) matchLines.push(i + 1);
+      if (matchLines.length >= 8) break;
+    }
+  }
+  const head = `${originalMsg}${matchLines.length > 0 ? ` First-line matches at: ${matchLines.join(', ')}.` : ''}`;
+  const guidance =
+    'Next step: extend `old_str` with more surrounding context (1-3 extra lines above or below) so the snippet is unique, then retry. Do NOT shorten old_str — that makes ambiguity worse.';
+  throw new Error(`${head}\n\n${guidance}`);
+}
+
 export function makeTextEditorTool(
   fs: TextEditorFsCallbacks,
 ): AgentTool<typeof TextEditorParams, TextEditorDetails> {
@@ -139,6 +251,9 @@ export function makeTextEditorTool(
         }
         case 'create': {
           const text = params.file_text ?? '';
+          const byteLen = Buffer.byteLength(text, 'utf8');
+          const createCap = maxCreateBytesFor(path);
+          if (byteLen > createCap) throwOversizedCreate(path, byteLen, createCap);
           const result = await fs.create(path, text);
           return ok(`Created ${result.path}`, { command: 'create', path, result });
         }
@@ -146,8 +261,25 @@ export function makeTextEditorTool(
           const oldStr = params.old_str ?? '';
           const newStr = params.new_str ?? '';
           if (oldStr.length === 0) throw new Error('str_replace requires non-empty old_str');
-          const result = await fs.strReplace(path, oldStr, newStr);
-          return ok(`Edited ${result.path}`, { command: 'str_replace', path, result });
+          const newBytes = Buffer.byteLength(newStr, 'utf8');
+          const replaceCap = maxStrReplaceBytesFor(path);
+          if (newBytes > replaceCap) {
+            throwOversizedStrReplace(path, newBytes, replaceCap);
+          }
+          try {
+            const result = await fs.strReplace(path, oldStr, newStr);
+            return ok(`Edited ${result.path}`, { command: 'str_replace', path, result });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const file = fs.view(path);
+            if (file !== null && /old_str not found/i.test(msg)) {
+              throwStrReplaceMiss(path, oldStr, file.content);
+            }
+            if (file !== null && /ambiguous|matched \d+ times/i.test(msg)) {
+              throwStrReplaceAmbiguous(oldStr, file.content, msg);
+            }
+            throw err;
+          }
         }
         case 'insert': {
           const line = params.insert_line ?? 0;

@@ -85,6 +85,68 @@ export function useAgentStream(): void {
       slot.timer = setTimeout(flushFs, Math.max(FS_THROTTLE_MS - since, 0));
     };
 
+    /** Merge a patch into the agentLiveness slice (always bumps
+     *  lastEventAt). If the slice is null, initializes it with sensible
+     *  defaults. Centralizes the per-event "still alive" bookkeeping so
+     *  the chat status header can render a non-stale narrative. */
+    const tickLiveness = (
+      patch: Partial<{
+        lastTextDeltaAt: number;
+        lastTurnStartAt: number;
+        chunkTransitioning: boolean;
+      }> = {},
+    ) => {
+      const now = Date.now();
+      const cur = useCodesignStore.getState().agentLiveness;
+      useCodesignStore.setState({
+        agentLiveness: {
+          lastEventAt: now,
+          lastTextDeltaAt: patch.lastTextDeltaAt ?? cur?.lastTextDeltaAt ?? null,
+          lastTurnStartAt: patch.lastTurnStartAt ?? cur?.lastTurnStartAt ?? null,
+          chunkTransitioning: patch.chunkTransitioning ?? cur?.chunkTransitioning ?? false,
+        },
+      });
+    };
+
+    const handleChunkStart = (event: AgentStreamEvent) => {
+      if (typeof event.chunkIndex !== 'number' || typeof event.chunkBudgetMs !== 'number') {
+        return;
+      }
+      useCodesignStore.setState({
+        chunkProgress: {
+          designId: event.designId,
+          generationId: event.generationId,
+          chunkIndex: event.chunkIndex,
+          chunkCap: event.chunkCap ?? event.chunkIndex,
+          chunkBudgetMs: event.chunkBudgetMs,
+          chunkStartedAt: Date.now(),
+          lastChunkInterrupted: null,
+        },
+      });
+      // Stay in transition until the chunk's first turn_start fires —
+      // that's when the model has actually begun a turn (not just when
+      // the IPC handler signaled the chunk is about to be sent).
+      tickLiveness({ chunkTransitioning: true });
+    };
+
+    const handleChunkEnd = (event: AgentStreamEvent) => {
+      const cp = useCodesignStore.getState().chunkProgress;
+      // Only patch if the event matches our current run; ignore stragglers
+      // from a prior cancelled run that were in flight when we started a new one.
+      if (!cp || cp.generationId !== event.generationId) return;
+      useCodesignStore.setState({
+        chunkProgress: {
+          ...cp,
+          lastChunkInterrupted: event.chunkInterrupted ?? null,
+        },
+      });
+      // Between chunk_end and the next chunk_start the IPC layer is
+      // settling deferred-abort + re-arming the timeout + reloading
+      // history from DB — no events fire for 30-90s. Keep the header
+      // narrating "transitioning" so it doesn't read as stale.
+      tickLiveness({ chunkTransitioning: true });
+    };
+
     const handleTurnStart = (event: AgentStreamEvent) => {
       // TODO: replace with rendererLogger once renderer-logger lands
       console.debug('[agent] turn_start', {
@@ -104,6 +166,10 @@ export function useAgentStream(): void {
         pendingTools: sameRun ? previous.pendingTools : [],
       };
       setStreamingAssistantText({ designId: event.designId, text: '' });
+      // The model has begun a turn — explicitly clear the chunk-transition
+      // flag so the header switches from "Transitioning…" to "Waiting for
+      // first token…".
+      tickLiveness({ lastTurnStartAt: Date.now(), chunkTransitioning: false });
     };
 
     const handleTextDelta = (event: AgentStreamEvent) => {
@@ -113,6 +179,7 @@ export function useAgentStream(): void {
         designId: inFlight.current.designId,
         text: inFlight.current.textBuffer,
       });
+      tickLiveness({ lastTextDeltaAt: Date.now() });
     };
 
     const drainPendingTools = (current: InFlightTurn, finalStatus: 'done' | 'error'): void => {
@@ -186,6 +253,7 @@ export function useAgentStream(): void {
           resolved: false,
         });
       }
+      tickLiveness();
     };
 
     const handleToolCallResult = (event: AgentStreamEvent) => {
@@ -215,6 +283,7 @@ export function useAgentStream(): void {
           ...(durationMs !== undefined ? { durationMs } : {}),
         });
       });
+      tickLiveness();
     };
 
     const handleFsUpdated = (event: AgentStreamEvent) => {
@@ -255,6 +324,8 @@ export function useAgentStream(): void {
           generatingDesignId: null,
           generationStage: 'error',
           streamingAssistantText: null,
+          chunkProgress: null,
+          agentLiveness: null,
         });
       }
     };
@@ -290,6 +361,8 @@ export function useAgentStream(): void {
           generatingDesignId: null,
           generationStage: 'done',
           streamingAssistantText: null,
+          chunkProgress: null,
+          agentLiveness: null,
         });
       }
       // Fire the auto-polish follow-up exactly once per design. Delay so the
@@ -313,6 +386,12 @@ export function useAgentStream(): void {
 
     const off = window.codesign.chat.onAgentEvent((event: AgentStreamEvent) => {
       switch (event.type) {
+        case 'chunk_start':
+          handleChunkStart(event);
+          return;
+        case 'chunk_end':
+          handleChunkEnd(event);
+          return;
         case 'turn_start':
           handleTurnStart(event);
           return;

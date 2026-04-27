@@ -56,8 +56,12 @@ export function isOfficialAnthropicBaseUrl(baseUrl: string | undefined): boolean
 export function shouldForceClaudeCodeIdentity(
   wire: WireApi | undefined,
   baseUrl: string | undefined,
+  apiKey?: string,
 ): boolean {
-  return wire === 'anthropic' && !isOfficialAnthropicBaseUrl(baseUrl);
+  if (wire !== 'anthropic') return false;
+  const isCustom = !isOfficialAnthropicBaseUrl(baseUrl);
+  const isOAuth = apiKey !== undefined && looksLikeClaudeOAuthToken(apiKey);
+  return isCustom || isOAuth;
 }
 
 /** The CC identity header bag. Lowercase keys so they collide
@@ -85,8 +89,9 @@ export function withClaudeCodeIdentity(
   wire: WireApi | undefined,
   baseUrl: string | undefined,
   extraHeaders: Record<string, string> | undefined,
+  apiKey?: string,
 ): Record<string, string> {
-  if (!shouldForceClaudeCodeIdentity(wire, baseUrl)) {
+  if (!shouldForceClaudeCodeIdentity(wire, baseUrl, apiKey)) {
     return { ...(extraHeaders ?? {}) };
   }
   return { ...claudeCodeIdentityHeaders(), ...(extraHeaders ?? {}) };
