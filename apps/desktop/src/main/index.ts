@@ -50,6 +50,7 @@ import { registerDiagnosticsIpc } from './diagnostics-ipc';
 import { makeRuntimeVerifier } from './done-verify';
 import { BrowserWindow, app, clipboard, dialog, ipcMain, shell } from './electron-runtime';
 import { registerExporterIpc } from './exporter-ipc';
+import { findInFlightDuplicate, generateDedupKey, hashContentKey } from './generate-dedup';
 import {
   armGenerationTimeout,
   cancelGenerationRequest,
@@ -823,6 +824,11 @@ function registerIpcHandlers(db: Database | null): void {
   /** In-flight requests: generationId → AbortController */
   const inFlight = new Map<string, AbortController>();
 
+  /** Promise-level dedup so an accidental double-IPC of the same generation
+   *  collapses to one provider call. See generate-dedup.ts for the strategy. */
+  const inFlightGenerations = new Map<string, Promise<unknown>>();
+  const inFlightContentToId = new Map<string, string>();
+
   /** User-injected steering messages keyed by generationId. Drained by
    *  the agent's turn_end subscriber via the `getPendingSteers` callback
    *  passed into runGenerate. Lets the renderer push "Wrap up now" /
@@ -927,13 +933,29 @@ function registerIpcHandlers(db: Database | null): void {
   ipcMain.handle('codesign:v1:generate', async (_e, raw: unknown) => {
     const payload = GeneratePayloadV1.parse(raw);
     const id = payload.generationId;
+    const contentKey = generateDedupKey(payload);
+    // Dedup: collapse identical concurrent requests so a double-click can't
+    // burn two provider calls or interleave two snapshot writes.
+    const existing = findInFlightDuplicate({
+      generationId: id,
+      contentKey,
+      inFlightById: inFlightGenerations,
+      inFlightContentToId,
+    });
+    if (existing !== undefined) {
+      logIpc.info('generate.dedup', {
+        generationId: id,
+        contentKeyHash: hashContentKey(contentKey),
+      });
+      return existing;
+    }
     // `withRun` binds `id` as the AsyncLocalStorage runId so every log line
     // emitted through `getLogger()` inside this handler (and every awaited
     // call it transitively makes, including `armTimeout`'s setTimeout) carries
     // the same runId. See `runContext.ts`. The manual `generationId: id`
     // fields kept below are the pre-ALS convention and are retained
     // non-destructively; future PRs may drop them once tooling reads runId.
-    return withRun(id, async () => {
+    const promise = withRun(id, async () => {
       const controller = new AbortController();
       inFlight.set(id, controller);
       const coreLogger = coreLoggerFor(id);
@@ -1317,6 +1339,19 @@ function registerIpcHandlers(db: Database | null): void {
         inFlight.delete(id);
       }
     });
+    // withRun returns Promise<T> | T; for async fn we always get a Promise but
+    // the type widens, so wrap so `.finally` is available unconditionally.
+    const wrapped = Promise.resolve(promise);
+    inFlightGenerations.set(id, wrapped);
+    inFlightContentToId.set(contentKey, id);
+    wrapped.finally(() => {
+      // Settle order: per-id then per-content. The content map is best-effort —
+      // an unrelated generation that happens to reuse the contentKey would only
+      // collapse if the original is still in-flight.
+      if (inFlightGenerations.get(id) === wrapped) inFlightGenerations.delete(id);
+      if (inFlightContentToId.get(contentKey) === id) inFlightContentToId.delete(contentKey);
+    });
+    return wrapped;
   });
 
   // Legacy shim — kept for one minor release while older renderer builds still
