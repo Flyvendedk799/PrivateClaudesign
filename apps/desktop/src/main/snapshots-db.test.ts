@@ -19,6 +19,7 @@ import {
   listDesigns,
   listSnapshots,
   renameDesign,
+  setDesignPromptAssistMetadata,
   setDesignThumbnail,
   softDeleteDesign,
   updateChatToolCallStatus,
@@ -697,6 +698,56 @@ describe('tool_status_normalize_2026_04_20 migration', () => {
     expect((list[0]?.payload as { status: string }).status).toBe('done');
     const recentRow = list.find((m) => m.seq === recent.seq);
     expect((recentRow?.payload as { status: string }).status).toBe('running');
+  });
+});
+
+describe('setDesignPromptAssistMetadata (backlog-1 #9)', () => {
+  it('persists metadata and round-trips it via getDesign', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    setDesignPromptAssistMetadata(db, d.id, {
+      schemaVersion: 1,
+      audience: 'pm',
+      device: 'mobile',
+      depth: 'quick',
+    });
+    const after = getDesign(db, d.id);
+    expect(after?.promptAssistMetadata).toMatchObject({
+      audience: 'pm',
+      device: 'mobile',
+      depth: 'quick',
+    });
+  });
+
+  it('null clears the column so the dialog re-prompts', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    setDesignPromptAssistMetadata(db, d.id, { schemaVersion: 1, audience: 'pm' });
+    setDesignPromptAssistMetadata(db, d.id, null);
+    expect(getDesign(db, d.id)?.promptAssistMetadata).toBeNull();
+  });
+
+  it('returns null when the design id does not exist', () => {
+    const db = makeDb();
+    expect(setDesignPromptAssistMetadata(db, 'no-such-id', null)).toBeNull();
+  });
+
+  it('rejects malformed metadata (e.g. unknown device enum value)', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    expect(() =>
+      setDesignPromptAssistMetadata(db, d.id, {
+        schemaVersion: 1,
+        // @ts-expect-error: deliberately bad value to test runtime guard
+        device: 'watch',
+      }),
+    ).toThrow();
+  });
+
+  it('rows on a fresh design have promptAssistMetadata=null by default', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    expect(getDesign(db, d.id)?.promptAssistMetadata).toBeNull();
   });
 });
 

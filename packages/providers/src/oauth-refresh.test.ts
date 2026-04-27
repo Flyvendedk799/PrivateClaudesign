@@ -81,7 +81,7 @@ describe('refreshClaudeCodeToken', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const callArgs = fetchMock.mock.calls[0];
     if (!callArgs) throw new Error('no fetch call');
-    const [url, init] = callArgs as [string, RequestInit | undefined];
+    const [url, init] = callArgs as unknown as [string, RequestInit | undefined];
     expect(url).toBe(ENDPOINT);
     expect(init?.method).toBe('POST');
     const body = JSON.parse(init?.body as string) as Record<string, unknown>;

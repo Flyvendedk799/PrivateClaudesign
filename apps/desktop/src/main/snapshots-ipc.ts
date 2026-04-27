@@ -9,8 +9,13 @@
  * initSnapshotsDb().
  */
 
-import type { Design, DesignSnapshot, SnapshotCreateInput } from '@open-codesign/shared';
-import { CodesignError } from '@open-codesign/shared';
+import type {
+  Design,
+  DesignSnapshot,
+  PromptAssistMetadata,
+  SnapshotCreateInput,
+} from '@open-codesign/shared';
+import { CodesignError, PromptAssistMetadataV1 } from '@open-codesign/shared';
 import type BetterSqlite3 from 'better-sqlite3';
 import type { BrowserWindow } from 'electron';
 import { bindWorkspace, checkWorkspaceFolderExists, openWorkspaceFolder } from './design-workspace';
@@ -26,6 +31,7 @@ import {
   listDesigns,
   listSnapshots,
   renameDesign,
+  setDesignPromptAssistMetadata,
   setDesignThumbnail,
   softDeleteDesign,
 } from './snapshots-db';
@@ -298,6 +304,41 @@ export function registerSnapshotsIpc(db: Database): void {
     }
     const updated = runDb('set-thumbnail', () =>
       setDesignThumbnail(db, r['id'] as string, value as string | null),
+    );
+    if (updated === null) {
+      throw new CodesignError('Design not found', 'IPC_NOT_FOUND');
+    }
+    return updated;
+  });
+
+  ipcMain.handle('snapshots:v1:set-prompt-assist', (_e: unknown, raw: unknown): Design => {
+    if (typeof raw !== 'object' || raw === null) {
+      throw new CodesignError(
+        'snapshots:v1:set-prompt-assist expects { id, metadata }',
+        'IPC_BAD_INPUT',
+      );
+    }
+    const r = raw as Record<string, unknown>;
+    requireSchemaV1(r, 'snapshots:v1:set-prompt-assist');
+    if (typeof r['id'] !== 'string' || r['id'].trim().length === 0) {
+      throw new CodesignError('id must be a non-empty string', 'IPC_BAD_INPUT');
+    }
+    let metadata: PromptAssistMetadata | null;
+    if (r['metadata'] === null) {
+      metadata = null;
+    } else {
+      try {
+        metadata = PromptAssistMetadataV1.parse(r['metadata']);
+      } catch (err) {
+        throw new CodesignError(
+          `metadata failed schema validation: ${err instanceof Error ? err.message : String(err)}`,
+          'IPC_BAD_INPUT',
+          { cause: err },
+        );
+      }
+    }
+    const updated = runDb('set-prompt-assist', () =>
+      setDesignPromptAssistMetadata(db, r['id'] as string, metadata),
     );
     if (updated === null) {
       throw new CodesignError('Design not found', 'IPC_NOT_FOUND');

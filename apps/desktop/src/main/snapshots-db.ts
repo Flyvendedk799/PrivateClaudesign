@@ -29,6 +29,8 @@ import {
   type DiagnosticEventInput,
   type DiagnosticEventRow,
   type DiagnosticLevel,
+  type PromptAssistMetadata,
+  PromptAssistMetadataV1,
   SchemaMismatchError,
   type SnapshotCreateInput,
 } from '@open-codesign/shared';
@@ -214,6 +216,12 @@ function applyAdditiveMigrations(db: Database): void {
   if (!designCols.includes('workspace_path')) {
     db.exec('ALTER TABLE designs ADD COLUMN workspace_path TEXT');
   }
+  // Prompt-assist (backlog-1 #9): per-design constraints captured by the
+  // short-prompt interstitial. Nullable; existing rows backfill to NULL
+  // (the dialog re-prompts on the next short submission).
+  if (!designCols.includes('prompt_assist_metadata')) {
+    db.exec('ALTER TABLE designs ADD COLUMN prompt_assist_metadata TEXT');
+  }
 
   // Comments v2 — add scope ('element'|'global') and parent_outer_html for
   // richer prompt enrichment. Both are additive; old rows backfill to
@@ -372,6 +380,10 @@ interface DesignRow {
   thumbnail_text: string | null;
   deleted_at: string | null;
   workspace_path: string | null;
+  /** JSON-serialized PromptAssistMetadataV1, or null when the user
+   *  skipped/never saw the assist dialog. May be undefined on rows
+   *  written before the additive migration backfilled the column. */
+  prompt_assist_metadata: string | null | undefined;
 }
 
 interface SnapshotRow {
@@ -400,6 +412,18 @@ interface MessageRow {
 // ---------------------------------------------------------------------------
 
 function rowToDesign(row: DesignRow): Design {
+  let promptAssistMetadata: Design['promptAssistMetadata'] = null;
+  if (typeof row.prompt_assist_metadata === 'string' && row.prompt_assist_metadata.length > 0) {
+    try {
+      const parsed = PromptAssistMetadataV1.parse(JSON.parse(row.prompt_assist_metadata));
+      promptAssistMetadata = parsed;
+    } catch {
+      // Forward-compat / malformed JSON: drop the metadata silently rather
+      // than failing the whole design read. The UI re-prompts on the next
+      // short-prompt submission if needed.
+      promptAssistMetadata = null;
+    }
+  }
   return {
     schemaVersion: 1,
     id: row.id,
@@ -409,6 +433,7 @@ function rowToDesign(row: DesignRow): Design {
     thumbnailText: row.thumbnail_text ?? null,
     deletedAt: row.deleted_at ?? null,
     workspacePath: row.workspace_path ?? null,
+    promptAssistMetadata,
   };
 }
 
@@ -508,6 +533,26 @@ export function clearDesignWorkspace(db: Database, id: string): Design | null {
   const result = db
     .prepare('UPDATE designs SET workspace_path = NULL, updated_at = ? WHERE id = ?')
     .run(now, id);
+  if (result.changes === 0) return null;
+  return getDesign(db, id);
+}
+
+/** Persist (or clear) the prompt-assist constraints captured by the
+ *  short-prompt interstitial. `null` clears the column so the dialog
+ *  re-prompts on the next short submission. */
+export function setDesignPromptAssistMetadata(
+  db: Database,
+  id: string,
+  metadata: PromptAssistMetadata | null,
+): Design | null {
+  const now = new Date().toISOString();
+  // Validate before serializing so a malformed payload from a buggy renderer
+  // doesn't poison the row. Throws ZodError; the IPC layer surfaces it as
+  // IPC_BAD_INPUT.
+  const json = metadata === null ? null : JSON.stringify(PromptAssistMetadataV1.parse(metadata));
+  const result = db
+    .prepare('UPDATE designs SET prompt_assist_metadata = ?, updated_at = ? WHERE id = ?')
+    .run(json, now, id);
   if (result.changes === 0) return null;
   return getDesign(db, id);
 }

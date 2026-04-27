@@ -960,6 +960,51 @@ export interface PromptComposeOptions {
   userPrompt?: string | undefined;
   /** Additional skill blobs to append (future extension point). */
   skills?: string[] | undefined;
+  /** Per-design constraints captured by the prompt-assist interstitial
+   *  (backlog-1 #9). When present they're rendered as a structured XML
+   *  block at the end of the system prompt so the model treats them as
+   *  taste/scope guidance, not free-text the user typed. Refinement turns
+   *  pass the same metadata so the agent stays on-brief across iterations. */
+  promptAssist?: PromptAssistMetadataLike | undefined;
+}
+
+/** Local mirror of PromptAssistMetadataV1 — duplicated here so this
+ *  module stays free of zod/runtime imports (it ships into the renderer
+ *  via the system prompt and pays the cost on every generation). */
+export interface PromptAssistMetadataLike {
+  audience?: string | undefined;
+  device?: 'desktop' | 'tablet' | 'mobile' | undefined;
+  depth?: 'quick' | 'standard' | 'deep' | undefined;
+  primaryAction?: string | undefined;
+  vibe?: string | undefined;
+  a11y?: 'baseline' | 'enhanced' | undefined;
+}
+
+/** Render the prompt-assist picks as a structured constraints block.
+ *  Returns null when no field has been provided, so callers can drop the
+ *  section entirely instead of emitting an empty wrapper. Exported so
+ *  tests can target it directly. */
+export function formatPromptAssistConstraints(
+  meta: PromptAssistMetadataLike | undefined,
+): string | null {
+  if (meta === undefined) return null;
+  const lines: string[] = [];
+  if (meta.audience) lines.push(`<audience>${meta.audience}</audience>`);
+  if (meta.device) lines.push(`<device>${meta.device}</device>`);
+  if (meta.depth) lines.push(`<depth>${meta.depth}</depth>`);
+  if (meta.primaryAction) lines.push(`<primary-action>${meta.primaryAction}</primary-action>`);
+  if (meta.vibe) lines.push(`<vibe>${meta.vibe}</vibe>`);
+  if (meta.a11y) lines.push(`<a11y-target>${meta.a11y}</a11y-target>`);
+  if (lines.length === 0) return null;
+  return [
+    '# Design constraints',
+    '',
+    'These came from the user via the prompt-assist interstitial. Treat them as load-bearing scope/taste guidance, not free-text suggestions. If a constraint conflicts with the prompt itself, surface the conflict in your 2-sentence summary.',
+    '',
+    '<design-constraints>',
+    ...lines,
+    '</design-constraints>',
+  ].join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,6 +1066,9 @@ export function composeSystemPrompt(opts: PromptComposeOptions): string {
     ].join('\n');
     sections.push(`${header}\n\n---\n\n${opts.skills.join('\n\n---\n\n')}`);
   }
+
+  const constraints = formatPromptAssistConstraints(opts.promptAssist);
+  if (constraints !== null) sections.push(constraints);
 
   return sections.join('\n\n---\n\n');
 }

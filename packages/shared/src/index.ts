@@ -351,6 +351,7 @@ export {
   DesignMessageV1,
   DesignSnapshotV1,
   DesignV1,
+  PromptAssistMetadataV1,
 } from './snapshot';
 export type {
   ChatAppendInput,
@@ -368,6 +369,7 @@ export type {
   DesignFile,
   DesignMessage,
   DesignSnapshot,
+  PromptAssistMetadata,
   SnapshotCreateInput,
 } from './snapshot';
 
