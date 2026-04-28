@@ -1049,6 +1049,19 @@
       "whenToUsePlaceholder": "Use when designing a mobile bottom-tab navigation.",
       "source": "JSX / HTML body",
       "save": "Save"
+    },
+    "extractor": {
+      "cta": "From current design",
+      "needsDesignTitle": "Open a design first",
+      "needsDesignBody": "Skill extraction reads a region from the current design's snapshot. Open a design and try again.",
+      "overlayLabel": "Drag a rectangle over the design region you want to extract",
+      "hint": "Drag a rectangle to capture · Esc to cancel",
+      "title": "Describe the region",
+      "placeholder": "e.g. \"a reusable mobile tab bar\"",
+      "promptRequired": "A short description is required.",
+      "extract": "Extract",
+      "extracting": "Extracting…",
+      "savedTitle": "Saved skill: {{name}}"
     }
   },
   "hub": {

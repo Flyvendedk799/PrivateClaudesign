@@ -1,7 +1,8 @@
 import { useT } from '@open-codesign/i18n';
 import type { UserSkill } from '@open-codesign/shared';
-import { Plus, Trash2, X } from 'lucide-react';
+import { Crop, Plus, Trash2, X } from 'lucide-react';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { useCodesignStore } from '../../store';
 
 /**
  * Skills hub tab — backlog-2 #7. Lists user-authored skills the agent
@@ -16,6 +17,11 @@ export function SkillsTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const beginSkillExtract = useCodesignStore((s) => s.beginSkillExtract);
+  const pushToast = useCodesignStore((s) => s.pushToast);
+  const hasOpenDesign = useCodesignStore(
+    (s) => s.currentDesignId !== null && s.currentSnapshotId !== null,
+  );
 
   const reload = useCallback(async () => {
     if (!window.codesign?.skills) {
@@ -63,14 +69,37 @@ export function SkillsTab() {
             {t('skills.body')}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setCreating(true)}
-          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-[var(--radius-md)] bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[var(--text-sm)] font-medium hover:opacity-90 transition-opacity"
-        >
-          <Plus className="w-4 h-4" aria-hidden="true" />
-          {t('skills.new')}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              const ok = beginSkillExtract();
+              if (!ok) {
+                pushToast({
+                  variant: 'error',
+                  title: t('skills.extractor.needsDesignTitle'),
+                  description: t('skills.extractor.needsDesignBody'),
+                });
+              }
+            }}
+            disabled={!hasOpenDesign}
+            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--text-sm)] text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50 disabled:hover:bg-[var(--color-surface)] transition-colors"
+            title={
+              hasOpenDesign ? t('skills.extractor.cta') : t('skills.extractor.needsDesignBody')
+            }
+          >
+            <Crop className="w-4 h-4" aria-hidden="true" />
+            {t('skills.extractor.cta')}
+          </button>
+          <button
+            type="button"
+            onClick={() => setCreating(true)}
+            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-[var(--radius-md)] bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[var(--text-sm)] font-medium hover:opacity-90 transition-opacity"
+          >
+            <Plus className="w-4 h-4" aria-hidden="true" />
+            {t('skills.new')}
+          </button>
+        </div>
       </header>
 
       {error ? <p className="text-[var(--text-sm)] text-[var(--color-error)]">{error}</p> : null}

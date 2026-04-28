@@ -9,6 +9,7 @@ import { RebindWorkspaceDialog } from './components/RebindWorkspaceDialog';
 import { RenameDesignDialog } from './components/RenameDesignDialog';
 import { Settings } from './components/Settings';
 import { Sidebar } from './components/Sidebar';
+import { SkillExtractorOverlay } from './components/SkillExtractorOverlay';
 import { ToastViewport } from './components/Toast';
 import { TopBar } from './components/TopBar';
 import { UpdateBanner } from './components/UpdateBanner';
@@ -260,6 +261,7 @@ export function App() {
       <DeleteDesignDialog />
       <RebindWorkspaceDialog />
       <NewDesignDialog />
+      <SkillExtractorOverlay />
       <ToastViewport />
       <CommentsPanel />
       <ReportEventDialog localId={activeReportLocalId} onClose={closeReportDialog} />

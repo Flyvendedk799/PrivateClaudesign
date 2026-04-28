@@ -1034,6 +1034,19 @@
       "whenToUsePlaceholder": "用于设计移动端底部 Tab 导航。",
       "source": "JSX / HTML 主体",
       "save": "保存"
+    },
+    "extractor": {
+      "cta": "从当前设计提取",
+      "needsDesignTitle": "请先打开一个设计",
+      "needsDesignBody": "提取技能需要从当前设计的快照中读取区域。请先打开一个设计再试。",
+      "overlayLabel": "在设计上拖动矩形以选择要提取的区域",
+      "hint": "拖动矩形以选择 · Esc 取消",
+      "title": "描述这块区域",
+      "placeholder": "例如「可复用的移动端 Tab 栏」",
+      "promptRequired": "请填写一句简短描述。",
+      "extract": "提取",
+      "extracting": "提取中…",
+      "savedTitle": "已保存：{{name}}"
     }
   },
   "hub": {

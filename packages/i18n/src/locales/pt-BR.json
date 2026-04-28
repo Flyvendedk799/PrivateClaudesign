@@ -992,6 +992,19 @@
       "whenToUsePlaceholder": "Use ao desenhar uma tab bar inferior mobile.",
       "source": "Corpo JSX / HTML",
       "save": "Salvar"
+    },
+    "extractor": {
+      "cta": "Do design atual",
+      "needsDesignTitle": "Abra um design primeiro",
+      "needsDesignBody": "A extração de skill lê uma região do snapshot do design atual. Abra um design e tente novamente.",
+      "overlayLabel": "Arraste um retângulo sobre a região do design que deseja extrair",
+      "hint": "Arraste um retângulo para capturar · Esc para cancelar",
+      "title": "Descreva a região",
+      "placeholder": "ex.: \"uma tab bar mobile reutilizável\"",
+      "promptRequired": "Uma descrição curta é obrigatória.",
+      "extract": "Extrair",
+      "extracting": "Extraindo…",
+      "savedTitle": "Skill salva: {{name}}"
     }
   },
   "hub": {

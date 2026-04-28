@@ -120,7 +120,7 @@ export type Theme = 'light' | 'dark';
 export type AppView = 'hub' | 'workspace' | 'settings';
 export type SettingsTab = 'models' | 'appearance' | 'storage' | 'diagnostics' | 'advanced';
 export type HubTab = 'recent' | 'your' | 'examples' | 'designSystems' | 'skills';
-export type InteractionMode = 'default' | 'comment';
+export type InteractionMode = 'default' | 'comment' | 'skill-extract';
 
 export type PreviewViewport = 'desktop' | 'tablet' | 'mobile';
 
@@ -388,6 +388,22 @@ interface CodesignState {
   clearCanvasElement: () => void;
   setPreviewZoom: (zoom: number) => void;
   setInteractionMode: (mode: InteractionMode) => void;
+
+  /** Skill-extract draft state — set when the user has dragged a region
+   *  but hasn't yet submitted the description. Drives the prompt-input
+   *  dialog inside the overlay. See backlog-2 #7 region capture. */
+  skillExtractDraft: { rect: CommentRect; designId: string; snapshotId: string } | null;
+  /** Switch the workspace into region-capture mode. Returns false when
+   *  no design is currently open or no snapshot exists; the caller can
+   *  surface a toast in that case. */
+  beginSkillExtract: () => boolean;
+  /** Stash a freshly drawn rectangle while the user types the description. */
+  setSkillExtractRect: (rect: CommentRect) => void;
+  /** Submit the captured region + description to the extractor IPC.
+   *  Returns the new skill on success; throws on failure (caller toasts). */
+  submitSkillExtract: (userPrompt: string) => Promise<import('@open-codesign/shared').UserSkill>;
+  /** Drop the in-progress capture and exit skill-extract mode. */
+  cancelSkillExtract: () => void;
 
   setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
@@ -1440,6 +1456,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   selectedElement: null,
   previewZoom: 100,
   interactionMode: 'default' as InteractionMode,
+  skillExtractDraft: null,
 
   chatMessages: [],
   chatLoaded: false,
@@ -2021,10 +2038,58 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
 
   setInteractionMode(mode) {
     if (mode === 'default') {
-      set({ interactionMode: mode, selectedElement: null, commentBubble: null });
+      set({
+        interactionMode: mode,
+        selectedElement: null,
+        commentBubble: null,
+        skillExtractDraft: null,
+      });
     } else {
       set({ interactionMode: mode });
     }
+  },
+
+  beginSkillExtract() {
+    const state = get();
+    const designId = state.currentDesignId;
+    const snapshotId = state.currentSnapshotId;
+    if (designId === null || snapshotId === null) return false;
+    set({
+      view: 'workspace',
+      interactionMode: 'skill-extract',
+      skillExtractDraft: null,
+    });
+    return true;
+  },
+
+  setSkillExtractRect(rect) {
+    const state = get();
+    const designId = state.currentDesignId;
+    const snapshotId = state.currentSnapshotId;
+    if (designId === null || snapshotId === null) return;
+    set({ skillExtractDraft: { rect, designId, snapshotId } });
+  },
+
+  async submitSkillExtract(userPrompt) {
+    const draft = get().skillExtractDraft;
+    if (draft === null) {
+      throw new Error('No skill-extract draft pending');
+    }
+    if (!window.codesign?.skills) {
+      throw new Error('Skills IPC unavailable');
+    }
+    const skill = await window.codesign.skills.extractFromDesign({
+      designId: draft.designId,
+      snapshotId: draft.snapshotId,
+      rect: draft.rect,
+      userPrompt,
+    });
+    set({ interactionMode: 'default', skillExtractDraft: null });
+    return skill;
+  },
+
+  cancelSkillExtract() {
+    set({ interactionMode: 'default', skillExtractDraft: null });
   },
 
   setTheme(theme) {
