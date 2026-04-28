@@ -260,3 +260,73 @@ describe('text-editor per-call size guards', () => {
     expect((res.content[0] as { text: string }).text).toMatch(/Edited index\.html/);
   });
 });
+
+describe('text-editor view by symbol (backlog-2 #2)', () => {
+  const sampleSrc = [
+    'const TWEAK_DEFAULTS = {};',
+    '',
+    'function LessonScreen() {',
+    '  return <div>lesson</div>;',
+    '}',
+    '',
+    'function App() {',
+    '  return <LessonScreen />;',
+    '}',
+  ].join('\n');
+
+  it('returns the body of the named symbol with a header', async () => {
+    const fs = makeFs({ 'index.html': sampleSrc });
+    const tool = makeTextEditorTool(fs);
+    const res = await tool.execute('id-sym', {
+      command: 'view',
+      path: 'index.html',
+      symbol: 'LessonScreen',
+    });
+    const text = (res.content[0] as { text: string }).text;
+    expect(text).toMatch(/index\.html · symbol LessonScreen · lines 3-5/);
+    expect(text).toMatch(/return <div>lesson<\/div>/);
+  });
+
+  it('throws with a candidate list when the symbol is unknown', async () => {
+    const fs = makeFs({ 'index.html': sampleSrc });
+    const tool = makeTextEditorTool(fs);
+    const msg = await runAndCatch(() =>
+      tool.execute('id-sym-miss', {
+        command: 'view',
+        path: 'index.html',
+        symbol: 'NotThere',
+      }),
+    );
+    expect(msg).toMatch(/symbol "NotThere" not found/);
+    expect(msg).toMatch(/LessonScreen/);
+    expect(msg).toMatch(/App/);
+  });
+
+  it('rejects an empty symbol string', async () => {
+    const fs = makeFs({ 'index.html': sampleSrc });
+    const tool = makeTextEditorTool(fs);
+    const msg = await runAndCatch(() =>
+      tool.execute('id-sym-empty', {
+        command: 'view',
+        path: 'index.html',
+        symbol: '   ',
+      }),
+    );
+    expect(msg).toMatch(/non-empty identifier/);
+  });
+
+  it('throws with line numbers on ambiguous symbols', async () => {
+    const dupe = ['function Dup() {}', 'function Dup() {}'].join('\n');
+    const fs = makeFs({ 'index.html': dupe });
+    const tool = makeTextEditorTool(fs);
+    const msg = await runAndCatch(() =>
+      tool.execute('id-sym-dupe', {
+        command: 'view',
+        path: 'index.html',
+        symbol: 'Dup',
+      }),
+    );
+    expect(msg).toMatch(/declared 2 times/);
+    expect(msg).toMatch(/line\(s\): 1, 2/);
+  });
+});

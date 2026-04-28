@@ -12,6 +12,7 @@
 
 import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
 import { Type } from '@sinclair/typebox';
+import { extractJsxSymbol, offsetsToLines, rangeToLineSpan } from './symbol-extractor.js';
 
 export interface TextEditorFsCallbacks {
   view(path: string): { content: string; numLines: number } | null;
@@ -44,6 +45,12 @@ const TextEditorParams = Type.Object({
    *  as a fixed-length number array (min/max = 2) because `Type.Tuple` emits
    *  legacy `items: [...]` which Anthropic's draft 2020-12 validator rejects. */
   view_range: Type.Optional(Type.Array(Type.Number(), { minItems: 2, maxItems: 2 })),
+  /** Optional JSX/JS top-level symbol name (e.g. `LessonScreen`, `App`,
+   *  `TabBar`). When set, `view` returns the source range of that
+   *  declaration's body instead of a line range — robust against edits
+   *  that shift line numbers. Mutually exclusive with `view_range`. Only
+   *  valid with `command: 'view'`. (backlog-2 #2) */
+  symbol: Type.Optional(Type.String()),
 });
 
 export interface TextEditorDetails {
@@ -218,7 +225,9 @@ export function makeTextEditorTool(
       'view returns file content or directory listing. ' +
       'IMPORTANT: pass `view_range: [startLine, endLine]` (1-indexed, inclusive; either bound may be -1 for EOF) ' +
       'to read only a slice of the file — strongly preferred over full-file views after the file has grown past ~100 lines. ' +
-      'Without view_range, repeated `view` of the same path within a single run returns only a short summary to protect context.',
+      'Alternatively pass `symbol: "<JsxName>"` to read the body of a top-level function or const declaration by name ' +
+      '(e.g. `symbol: "LessonScreen"`). Robust against edits that shift line numbers; mutually exclusive with view_range. ' +
+      'Without view_range or symbol, repeated `view` of the same path within a single run returns only a short summary to protect context.',
     parameters: TextEditorParams,
     async execute(_toolCallId, params): Promise<AgentToolResult<TextEditorDetails>> {
       const path = params.path;
@@ -226,6 +235,48 @@ export function makeTextEditorTool(
         case 'view': {
           const file = fs.view(path);
           if (file !== null) {
+            // Symbol view — find a top-level function/const declaration by
+            // name and return its body. Mutually exclusive with view_range;
+            // when both are supplied, symbol wins (it's the more precise
+            // intent). See backlog-2 #2.
+            if (params.symbol !== undefined) {
+              const symbol = params.symbol.trim();
+              if (symbol.length === 0) {
+                throw new Error('symbol must be a non-empty identifier');
+              }
+              const found = extractJsxSymbol(file.content, symbol);
+              if (found.kind === 'missing') {
+                const suggestion =
+                  found.candidates.length > 0
+                    ? `Available top-level symbols: ${found.candidates.join(', ')}.`
+                    : 'No top-level function or const declarations found.';
+                throw new Error(
+                  `symbol "${symbol}" not found in ${path}. ${suggestion} You can also pass view_range: [startLine, endLine] to read by line number instead.`,
+                );
+              }
+              if (found.kind === 'ambiguous') {
+                const lines = offsetsToLines(file.content, found.offsets);
+                throw new Error(
+                  `symbol "${symbol}" is declared ${found.offsets.length} times in ${path} (line(s): ${lines.join(', ')}). Use view_range to disambiguate, or rename one of the declarations.`,
+                );
+              }
+              const span = rangeToLineSpan(file.content, found.range);
+              const slice = file.content
+                .slice(found.range.start, found.range.end)
+                .split('\n')
+                .map((ln, idx) => `${String(span.startLine + idx).padStart(4, ' ')}  ${ln}`)
+                .join('\n');
+              const header = `${path} · symbol ${symbol} · lines ${span.startLine}-${span.endLine} of ${file.numLines}\n`;
+              return ok(header + slice, {
+                command: 'view',
+                path,
+                result: {
+                  numLines: file.numLines,
+                  symbol,
+                  symbolRange: [span.startLine, span.endLine],
+                },
+              });
+            }
             // Range view — narrow, always fresh, never capped. Agent should
             // prefer this after the first orientation read.
             if (params.view_range) {
