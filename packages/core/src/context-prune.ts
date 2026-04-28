@@ -61,6 +61,19 @@ const AGGRESSIVE_BLOCK_LIMIT = 2 * 1024;
  */
 const RECENT_WINDOW = 3;
 
+/**
+ * Per-active-file window — backlog-2 #3. The most-recent text_editor
+ * `path` is identified as the active file; the last N toolResult blocks
+ * for that file stay un-pruned even when the global aggressive mode
+ * fires. Without this, the agent's late-run `view index.html` calls
+ * pay tokens to re-establish state that was just thrown away.
+ */
+const ACTIVE_FILE_WINDOW = 6;
+
+/** Tool name emitted by `makeTextEditorTool`. Must match the literal in
+ *  `text-editor.ts` so `findActiveFile` recognises edits. */
+const TEXT_EDITOR_TOOL_NAME = 'str_replace_based_edit_tool';
+
 function estimateBytes(messages: AgentMessage[]): number {
   let total = 0;
   for (const m of messages) {
@@ -145,6 +158,66 @@ function compactToolResult(m: AgentMessage, limit: number | null): AgentMessage 
 }
 
 /**
+ * Walk messages from newest to oldest. Returns the `path` argument of
+ * the most-recent `str_replace_based_edit_tool` call, or null when no
+ * text_editor call has happened yet. Used by the active-file window
+ * (backlog-2 #3) — the file the agent is currently editing.
+ */
+export function findActiveFile(messages: AgentMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m?.role !== 'assistant') continue;
+    const original = m as unknown as { content?: Array<Record<string, unknown>> };
+    if (!Array.isArray(original.content)) continue;
+    for (const block of original.content) {
+      if (block?.['type'] !== 'toolCall') continue;
+      if (block['name'] !== TEXT_EDITOR_TOOL_NAME) continue;
+      const input = block['input'];
+      if (typeof input !== 'object' || input === null) continue;
+      const path = (input as Record<string, unknown>)['path'];
+      if (typeof path === 'string' && path.length > 0) return path;
+    }
+  }
+  return null;
+}
+
+/**
+ * Build the set of toolCallIds whose corresponding text_editor call
+ * targets `activeFile`, capped at the most-recent `windowSize`. The
+ * pruner exempts toolResult blocks with these ids from size limits even
+ * under aggressive mode — the rationale being that late-run navigation
+ * on the active file paid tokens just to re-read the same state.
+ */
+export function buildActiveFileResultIds(
+  messages: AgentMessage[],
+  activeFile: string | null,
+  windowSize: number,
+): Set<string> {
+  const out = new Set<string>();
+  if (activeFile === null || windowSize <= 0) return out;
+  for (let i = messages.length - 1; i >= 0 && out.size < windowSize; i -= 1) {
+    const m = messages[i];
+    if (m?.role !== 'assistant') continue;
+    const original = m as unknown as { content?: Array<Record<string, unknown>> };
+    if (!Array.isArray(original.content)) continue;
+    for (const block of original.content) {
+      if (block?.['type'] !== 'toolCall') continue;
+      if (block['name'] !== TEXT_EDITOR_TOOL_NAME) continue;
+      const input = block['input'];
+      if (typeof input !== 'object' || input === null) continue;
+      const path = (input as Record<string, unknown>)['path'];
+      if (path !== activeFile) continue;
+      const id = block['id'];
+      if (typeof id === 'string' && id.length > 0) {
+        out.add(id);
+        if (out.size >= windowSize) break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Index threshold (inclusive) — messages at or after this index are "recent"
  * and their tool payloads stay verbatim. Counts assistant + toolResult roles
  * from the tail; user messages are never a prune target but also don't
@@ -170,6 +243,9 @@ interface CapConfig {
   toolInputLimitRecent: number | null;
   toolResultLimitRecent: number | null;
   windowTurns: number;
+  /** Set of toolCallIds whose toolResult blocks are exempt from size
+   *  limits even under aggressive mode — see backlog-2 #3. */
+  activeFileResultIds: Set<string>;
 }
 
 function applyCaps(messages: AgentMessage[], cfg: CapConfig): AgentMessage[] {
@@ -184,6 +260,14 @@ function applyCaps(messages: AgentMessage[], cfg: CapConfig): AgentMessage[] {
       );
     }
     if (m.role === 'toolResult') {
+      const tcId = (m as unknown as { toolCallId?: unknown }).toolCallId;
+      if (typeof tcId === 'string' && cfg.activeFileResultIds.has(tcId)) {
+        // Active-file exemption — backlog-2 #3. Keep the result verbatim
+        // regardless of the recent window or aggressive mode so late-run
+        // navigation on the file the agent is editing doesn't re-pay
+        // tokens to re-establish state.
+        return m;
+      }
       return compactToolResult(m, isRecent ? cfg.toolResultLimitRecent : cfg.toolResultLimitOld);
     }
     return m;
@@ -196,6 +280,16 @@ export function buildTransformContext(
   return async (messages) => {
     if (messages.length === 0) return messages;
 
+    const activeFile = findActiveFile(messages);
+    const activeFileResultIds = buildActiveFileResultIds(messages, activeFile, ACTIVE_FILE_WINDOW);
+    if (activeFile !== null && activeFileResultIds.size > 0) {
+      log.info('[context-prune] step=active_file_kept', {
+        activeFile,
+        keptResults: activeFileResultIds.size,
+        windowSize: ACTIVE_FILE_WINDOW,
+      });
+    }
+
     const before = estimateBytes(messages);
     const first = applyCaps(messages, {
       textLimit: TEXT_BLOCK_LIMIT,
@@ -204,6 +298,7 @@ export function buildTransformContext(
       toolInputLimitRecent: null,
       toolResultLimitRecent: null,
       windowTurns: RECENT_WINDOW,
+      activeFileResultIds,
     });
     const firstSize = estimateBytes(first);
 
@@ -226,6 +321,7 @@ export function buildTransformContext(
       toolInputLimitRecent: AGGRESSIVE_BLOCK_LIMIT,
       toolResultLimitRecent: AGGRESSIVE_BLOCK_LIMIT,
       windowTurns: 0,
+      activeFileResultIds,
     });
     const aggressiveSize = estimateBytes(aggressive);
     log.info('[context-prune] step=aggressive', {
@@ -234,6 +330,7 @@ export function buildTransformContext(
       first: firstSize,
       after: aggressiveSize,
       blockLimit: AGGRESSIVE_BLOCK_LIMIT,
+      activeFileExempt: activeFileResultIds.size,
     });
     return aggressive;
   };

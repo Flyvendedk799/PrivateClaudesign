@@ -24,6 +24,25 @@ function assistantWithToolCall(toolCallId: string, inputArg: string): AgentMessa
   } as unknown as AgentMessage;
 }
 
+function assistantWithEditorCall(
+  toolCallId: string,
+  path: string,
+  command: 'view' | 'str_replace' | 'create' | 'insert' = 'view',
+): AgentMessage {
+  return {
+    role: 'assistant',
+    content: [
+      { type: 'text', text: 'ok' },
+      {
+        type: 'toolCall',
+        id: toolCallId,
+        name: 'str_replace_based_edit_tool',
+        input: { command, path },
+      },
+    ],
+  } as unknown as AgentMessage;
+}
+
 function toolResult(toolCallId: string, body: string): AgentMessage {
   return {
     role: 'toolResult',
@@ -179,5 +198,100 @@ describe('buildTransformContext — size-based block compaction with recent-turn
       }
     }
     expect(droppedTextCount).toBeGreaterThanOrEqual(35);
+  });
+});
+
+describe('buildTransformContext — active-file exemption (backlog-2 #3)', () => {
+  it('keeps the most-recent active-file toolResults un-pruned even under aggressive mode', async () => {
+    const transform = buildTransformContext();
+    const messages: AgentMessage[] = [userMsg('go')];
+    const bigBody = 'A'.repeat(20_000);
+    // Push enough other-file noise so the global aggressive threshold trips.
+    for (let i = 0; i < 12; i += 1) {
+      messages.push(assistantWithToolCall(`noise-${i}`, 'noise'));
+      messages.push(toolResult(`noise-${i}`, 'p'.repeat(10_000)));
+    }
+    // Now 6 active-file edits on index.html — these should survive.
+    for (let i = 0; i < 6; i += 1) {
+      messages.push(assistantWithEditorCall(`edit-${i}`, 'index.html'));
+      messages.push(toolResult(`edit-${i}`, bigBody));
+    }
+    const out = await transform(messages);
+    // The 6 most-recent index.html toolResults must keep their full body.
+    for (let i = 0; i < 6; i += 1) {
+      const tr = out.find(
+        (m) => (m as unknown as { toolCallId?: string }).toolCallId === `edit-${i}`,
+      ) as { content: Array<{ text: string }> } | undefined;
+      const txt = tr?.content[0]?.text ?? '';
+      expect(txt.length).toBe(bigBody.length);
+      expect(txt.startsWith('[tool result dropped')).toBe(false);
+    }
+  });
+
+  it('only the most-recent active file counts (switch from styles.css to index.html drops styles.css)', async () => {
+    const transform = buildTransformContext();
+    const big = 'b'.repeat(20_000);
+    const messages: AgentMessage[] = [
+      userMsg('go'),
+      // Older edits on styles.css
+      assistantWithEditorCall('css-1', 'styles.css'),
+      toolResult('css-1', big),
+      // Then newer edits on index.html — index.html becomes active
+      assistantWithEditorCall('html-1', 'index.html'),
+      toolResult('html-1', big),
+      // Plus enough noise to push into aggressive mode
+      ...Array.from({ length: 14 }, (_, i) => [
+        assistantWithToolCall(`n-${i}`, 'n'.repeat(10_000)),
+        toolResult(`n-${i}`, 'n'.repeat(10_000)),
+      ]).flat(),
+    ];
+    const out = await transform(messages);
+    // index.html result kept verbatim
+    const htmlRes = out.find(
+      (m) => (m as unknown as { toolCallId?: string }).toolCallId === 'html-1',
+    ) as { content: Array<{ text: string }> } | undefined;
+    expect(htmlRes?.content[0]?.text.startsWith('[tool result dropped')).toBe(false);
+    // styles.css result stubbed (under aggressive mode, no active-file
+    // exemption since index.html displaced it)
+    const cssRes = out.find(
+      (m) => (m as unknown as { toolCallId?: string }).toolCallId === 'css-1',
+    ) as { content: Array<{ text: string }> } | undefined;
+    expect(cssRes?.content[0]?.text.startsWith('[tool result dropped')).toBe(true);
+  });
+
+  it('falls back gracefully when no text_editor calls have happened (returns null)', async () => {
+    const transform = buildTransformContext();
+    const big = 'p'.repeat(20_000);
+    const messages: AgentMessage[] = [
+      userMsg('go'),
+      // Assistant with no toolCall, just chat — no active file detectable.
+      assistantText('thinking…'),
+      // Push into aggressive mode via noise via a non-text_editor tool name
+      ...Array.from({ length: 14 }, (_, i) => [
+        {
+          role: 'assistant' as const,
+          content: [
+            { type: 'text', text: 'ok' },
+            {
+              type: 'toolCall',
+              id: `web-${i}`,
+              name: 'read_url',
+              input: { url: 'https://example.com' },
+            },
+          ],
+        } as unknown as AgentMessage,
+        toolResult(`web-${i}`, big),
+      ]).flat(),
+    ];
+    // Should not throw and should still aggressively prune (no active file
+    // means no exemption). The 14 read_url results all get stubbed.
+    const out = await transform(messages);
+    let stubbed = 0;
+    for (const m of out) {
+      if (m.role !== 'toolResult') continue;
+      const txt = (m as unknown as { content: Array<{ text: string }> }).content[0]?.text ?? '';
+      if (txt.startsWith('[tool result dropped')) stubbed += 1;
+    }
+    expect(stubbed).toBeGreaterThanOrEqual(10);
   });
 });
