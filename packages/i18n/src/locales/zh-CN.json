@@ -104,7 +104,13 @@
     "commentModeHint": "点击任意元素留评",
     "runtimeError": "预览运行时错误",
     "dismissErrors": "关闭预览错误",
-    "zoom": "缩放"
+    "zoom": "缩放",
+    "viewport": {
+      "label": "预览视口",
+      "desktop": "桌面预览",
+      "tablet": "平板预览",
+      "mobile": "手机预览"
+    }
   },
   "tweaks": {
     "title": "微调",
@@ -644,6 +650,11 @@
     "generationFailedFixUnavailable": "自动修复不可用",
     "generationFailedFixUnavailableDescription": "当前 app 版本无法自动应用此修复，请到设置中手动编辑 Base URL。",
     "generationFailedFixApplyFailed": "应用修复失败",
+    "claudeCodeReimport": "重新导入 Claude Code",
+    "claudeCodeReimportSucceeded": "已重新导入 Claude Code，请重试。",
+    "claudeCodeReimportFailed": "无法重新导入 Claude Code",
+    "claudeCodeReimportUnavailable": "无法自动重新导入",
+    "claudeCodeReimportUnavailableDescription": "当前版本无法自动触发重新导入，请在设置中手动导入 Claude Code。",
     "cancellationFailed": "取消失败",
     "inlineCommentFailed": "局部修改失败",
     "commentNeedsSnapshot": "请先生成一个设计，再添加批注",
@@ -780,6 +791,48 @@
     "modelListFailed": "无法加载模型列表。",
     "unknown": "未知错误",
     "localePersistFailed": "无法保存语言偏好"
+  },
+  "promptAssist": {
+    "title": "快速锁定范围",
+    "body": "提示语较短——补几个约束能避免模型瞎猜，更贴合你的意图。",
+    "skip": "跳过",
+    "submit": "使用以下选项",
+    "skipIn": "{{seconds}} 秒后自动跳过…",
+    "skipPaused": "已暂停自动跳过",
+    "persistFailed": "无法保存提示约束",
+    "rows": {
+      "audience": "受众",
+      "device": "主要设备",
+      "depth": "深度",
+      "vibe": "风格",
+      "a11y": "可访问性"
+    },
+    "audience": {
+      "devs": "开发者",
+      "pms": "产品",
+      "endUsers": "终端用户",
+      "designers": "设计师"
+    },
+    "device": {
+      "desktop": "桌面",
+      "tablet": "平板 / 笔记本",
+      "mobile": "手机"
+    },
+    "depth": {
+      "quick": "速览",
+      "standard": "标准",
+      "deep": "深入"
+    },
+    "vibe": {
+      "calm": "克制",
+      "energetic": "活力",
+      "editorial": "编辑感",
+      "minimal": "极简"
+    },
+    "a11y": {
+      "baseline": "基础",
+      "enhanced": "增强（WCAG AA+）"
+    }
   },
   "projects": {
     "untitled": "未命名设计",
@@ -1160,6 +1213,9 @@
     "CONFIG_NOT_LOADED": "配置尚未加载，请重启应用。",
     "CONFIG_MISSING": "未找到配置，请先完成引导流程。",
     "SNAPSHOTS_UNAVAILABLE": "本地设计数据库不可用，重启应用可能有助于恢复。",
+    "CHAT_SCHEMA_MISMATCH": "某条聊天记录由更新版本写入，当前版本无法读取。",
+    "CLAUDE_CODE_TOKEN_REFRESH_FAILED": "无法刷新 Claude Code 访问令牌，下次请求会重试；若持续失败，请重新从 Claude Code 导入。",
+    "CLAUDE_CODE_REIMPORT_REQUIRED": "Claude Code 登录已失效，请重新从 Claude Code 导入以继续。",
     "BOOT_ORDER": "启动过程出现内部错误，请重启应用。",
     "STORAGE_SETTINGS_READ_FAILED": "读取存储位置设置失败。",
     "STORAGE_SETTINGS_PARSE_FAILED": "存储位置设置解析失败。",

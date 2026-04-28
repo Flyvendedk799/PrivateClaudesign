@@ -104,7 +104,13 @@
     "commentModeHint": "Clique em qualquer elemento para comentar",
     "runtimeError": "Erro de execução na pré-visualização",
     "dismissErrors": "Dispensar erros da pré-visualização",
-    "zoom": "Zoom"
+    "zoom": "Zoom",
+    "viewport": {
+      "label": "Viewport da pré-visualização",
+      "desktop": "Pré-visualização desktop",
+      "tablet": "Pré-visualização tablet",
+      "mobile": "Pré-visualização mobile"
+    }
   },
   "tweaks": {
     "title": "Ajustes",
@@ -611,7 +617,12 @@
     "commentUpdateFailed": "Não foi possível atualizar o comentário",
     "commentDeleteFailed": "Não foi possível excluir o comentário",
     "noDesignToExport": "Nenhum design para exportar ainda.",
-    "exportedTo": "Exportado para {{path}}"
+    "exportedTo": "Exportado para {{path}}",
+    "claudeCodeReimport": "Reimportar Claude Code",
+    "claudeCodeReimportSucceeded": "Claude Code reimportado. Tente a requisição novamente.",
+    "claudeCodeReimportFailed": "Não foi possível reimportar o Claude Code",
+    "claudeCodeReimportUnavailable": "Reimportação indisponível",
+    "claudeCodeReimportUnavailableDescription": "Esta versão do app não consegue acionar a reimportação automaticamente. Abra Configurações e importe o Claude Code manualmente."
   },
   "inlineComment": {
     "title": "Comentar em",
@@ -740,6 +751,48 @@
     "modelListFailed": "Não foi possível carregar a lista de modelos.",
     "unknown": "Erro desconhecido",
     "localePersistFailed": "Falha ao salvar a preferência de idioma"
+  },
+  "promptAssist": {
+    "title": "Verificação rápida de escopo",
+    "body": "Seu prompt é curto — algumas restrições ajudam o agente a manter o foco em vez de adivinhar.",
+    "skip": "Pular",
+    "submit": "Usar essas",
+    "skipIn": "Pulando automaticamente em {{seconds}}s…",
+    "skipPaused": "Pulagem automática pausada",
+    "persistFailed": "Não foi possível salvar as escolhas de prompt-assist",
+    "rows": {
+      "audience": "Público",
+      "device": "Dispositivo principal",
+      "depth": "Profundidade",
+      "vibe": "Tom",
+      "a11y": "Acessibilidade"
+    },
+    "audience": {
+      "devs": "Desenvolvedores",
+      "pms": "PMs",
+      "endUsers": "Usuários finais",
+      "designers": "Designers"
+    },
+    "device": {
+      "desktop": "Desktop",
+      "tablet": "Tablet / Laptop",
+      "mobile": "Mobile"
+    },
+    "depth": {
+      "quick": "Rápido",
+      "standard": "Padrão",
+      "deep": "Profundo"
+    },
+    "vibe": {
+      "calm": "Calmo",
+      "energetic": "Energético",
+      "editorial": "Editorial",
+      "minimal": "Minimalista"
+    },
+    "a11y": {
+      "baseline": "Base",
+      "enhanced": "Aprimorada (WCAG AA+)"
+    }
   },
   "projects": {
     "untitled": "Design sem título",
@@ -1115,6 +1168,9 @@
     "CONFIG_NOT_LOADED": "A configuração ainda não foi carregada. Reinicie o app.",
     "CONFIG_MISSING": "Nenhuma configuração encontrada. Conclua o onboarding para começar.",
     "SNAPSHOTS_UNAVAILABLE": "O banco de designs local está indisponível. Reiniciar o app pode ajudar.",
+    "CHAT_SCHEMA_MISMATCH": "Uma entrada do histórico de chat foi escrita por uma versão mais recente do app e não pode ser lida.",
+    "CLAUDE_CODE_TOKEN_REFRESH_FAILED": "Não foi possível atualizar o token do Claude Code. A próxima requisição tentará de novo; se continuar falhando, reimporte do Claude Code.",
+    "CLAUDE_CODE_REIMPORT_REQUIRED": "O login do Claude Code não é mais válido. Reimporte do Claude Code para continuar.",
     "BOOT_ORDER": "Ocorreu um erro interno de inicialização. Reinicie o app.",
     "STORAGE_SETTINGS_READ_FAILED": "Falha ao ler as configurações de local de armazenamento.",
     "STORAGE_SETTINGS_PARSE_FAILED": "As configurações de local de armazenamento não puderam ser lidas.",

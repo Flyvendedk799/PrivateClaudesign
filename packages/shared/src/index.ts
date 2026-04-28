@@ -163,6 +163,10 @@ export const ApplyCommentPayload = z.object({
   model: ModelRef.optional(),
   referenceUrl: z.string().url().optional(),
   attachments: z.array(LocalInputFile).max(12).default([]),
+  /** Optional — when provided, the IPC handler reads the design's
+   *  promptAssistMetadata so the refinement turn keeps the same
+   *  scope/taste constraints as the initial generation (backlog-1 #9). */
+  designId: z.string().min(1).optional(),
 });
 export type ApplyCommentPayload = z.infer<typeof ApplyCommentPayload>;
 
@@ -234,6 +238,27 @@ export class CodesignError extends Error {
   ) {
     super(message, options);
     this.name = 'CodesignError';
+  }
+}
+
+/** Thrown when a row read off disk carries a `schema_version` newer than the
+ *  current writer can safely deserialise. Callers in the read path should
+ *  catch and either skip the row (best-effort, with a log warning) or surface
+ *  the failure to the user. Older rows go through `migrateChatMessageRow`
+ *  instead and never raise this. */
+export class SchemaMismatchError extends CodesignError {
+  constructor(
+    public readonly table: string,
+    public readonly got: number,
+    public readonly expected: number,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `${table} row schema_version=${got} exceeds supported version ${expected}`,
+      'CHAT_SCHEMA_MISMATCH',
+      options,
+    );
+    this.name = 'SchemaMismatchError';
   }
 }
 
@@ -319,6 +344,7 @@ export { DesignTokenV1, DesignTokenSet } from './design-token';
 export type { DesignToken } from './design-token';
 
 export {
+  CHAT_MESSAGE_SCHEMA_VERSION,
   ChatMessageKind,
   ChatMessageRowV1,
   CommentKind,
@@ -329,6 +355,7 @@ export {
   DesignMessageV1,
   DesignSnapshotV1,
   DesignV1,
+  PromptAssistMetadataV1,
   UserSkillV1,
 } from './snapshot';
 export type {
@@ -347,6 +374,7 @@ export type {
   DesignFile,
   DesignMessage,
   DesignSnapshot,
+  PromptAssistMetadata,
   SnapshotCreateInput,
   UserSkill,
   UserSkillCreateInput,

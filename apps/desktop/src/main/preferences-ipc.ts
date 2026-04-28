@@ -34,6 +34,9 @@ const V2_DEFAULT_TIMEOUT_SEC = 600;
 // big briefs with reasoning, still finite. Users on fast endpoints can
 // lower it in Settings → Advanced.
 const V5_DEFAULT_TIMEOUT_SEC = 1200;
+/** v6 default — kept as a named constant so the migration check below
+ *  reads symbolically and the DEFAULTS literal stays the source of truth. */
+const V6_DEFAULT_TIMEOUT_SEC = 2700;
 
 function prefsFile(): string {
   return join(configDir(), 'preferences.json');
@@ -63,7 +66,7 @@ const DEFAULTS: Preferences = {
   // chunked re-planning. 2700s = 45 min is generous enough for big
   // reasoning-on briefs without being unbounded. Lower in Settings →
   // Advanced for fast endpoints.
-  generationTimeoutSec: 2700,
+  generationTimeoutSec: V6_DEFAULT_TIMEOUT_SEC,
   checkForUpdatesOnStartup: true,
   dismissedUpdateVersion: '',
   diagnosticsLastReadTs: 0,
@@ -121,19 +124,35 @@ export async function readPersisted(): Promise<Preferences> {
     );
   }
   const parsed = parsePersistedFile((rawJson ?? {}) as Partial<PreferencesFile>);
-  // One-time migration seed: users upgrading from schema < 5 have no record of
-  // when they last read Diagnostics. Without a persisted seed, every call to
-  // readPersisted would mint a fresh Date.now(), sliding the "last read"
-  // baseline forward and masking newer errors before the user ever opens the
-  // panel. Seed once and write back synchronously so subsequent reads return
-  // the same ts. Fresh installs (ENOENT above) skip this branch and stay at 0,
-  // which is fine because their diagnostics DB is empty anyway.
   if (typeof rawJson === 'object' && rawJson !== null) {
     const r = rawJson as Record<string, unknown>;
     const persistedSchema = typeof r['schemaVersion'] === 'number' ? r['schemaVersion'] : 1;
-    const wasMissingField = r['diagnosticsLastReadTs'] === undefined;
-    if (persistedSchema < SCHEMA_VERSION && wasMissingField) {
-      const seeded: Preferences = { ...parsed, diagnosticsLastReadTs: Date.now() };
+    // One-time migration seed: users upgrading from schema < 5 have no record
+    // of when they last read Diagnostics. Without a persisted seed, every
+    // readPersisted call would mint a fresh Date.now(), sliding the "last
+    // read" baseline forward and masking newer errors before the user ever
+    // opens the panel. Seed once and write back synchronously so subsequent
+    // reads return the same ts. Fresh installs (ENOENT above) skip this
+    // branch and stay at 0 — their diagnostics DB is empty anyway.
+    const wasMissingDiagnosticsField = r['diagnosticsLastReadTs'] === undefined;
+    // The v5→v6 generationTimeoutSec migration in parsePersistedFile rewrites
+    // the in-memory value but, before this commit, only persisted on the
+    // diagnostics-seed path above — so a v5 install with a persisted
+    // diagnosticsLastReadTs would never write the bumped schemaVersion / new
+    // timeout to disk and would re-apply the migration on every read. Detect
+    // an applied timeout migration and write back so the file matches what
+    // the runtime actually uses.
+    const persistedRawTimeout =
+      typeof r['generationTimeoutSec'] === 'number' && r['generationTimeoutSec'] > 0
+        ? r['generationTimeoutSec']
+        : undefined;
+    const timeoutMigrationApplied =
+      persistedRawTimeout !== undefined && persistedRawTimeout !== parsed.generationTimeoutSec;
+    const schemaBumpNeeded = persistedSchema < SCHEMA_VERSION;
+    if (schemaBumpNeeded && (wasMissingDiagnosticsField || timeoutMigrationApplied)) {
+      const seeded: Preferences = wasMissingDiagnosticsField
+        ? { ...parsed, diagnosticsLastReadTs: Date.now() }
+        : parsed;
       try {
         await writePersisted(seeded);
       } catch (err) {

@@ -178,6 +178,63 @@ describe('readPersisted()', () => {
     expect(second.diagnosticsLastReadTs).toBe(first.diagnosticsLastReadTs);
   });
 
+  it('v5 install with the legacy 1200s default writes back the bumped schema and 2700s timeout', async () => {
+    readFileMock.mockResolvedValueOnce(
+      JSON.stringify({
+        schemaVersion: 5,
+        updateChannel: 'stable',
+        generationTimeoutSec: 1200,
+        checkForUpdatesOnStartup: true,
+        dismissedUpdateVersion: '',
+        diagnosticsLastReadTs: 12345,
+      }),
+    );
+    const result = await readPersisted();
+    expect(result.generationTimeoutSec).toBe(2700);
+    expect(result.diagnosticsLastReadTs).toBe(12345);
+    const lastCall = writeFileMock.mock.calls.at(-1);
+    if (!lastCall) throw new Error('writeFile was not called for the v5→v6 timeout migration');
+    const written = JSON.parse(lastCall[1] as string) as {
+      schemaVersion: number;
+      generationTimeoutSec: number;
+      diagnosticsLastReadTs: number;
+    };
+    expect(written.schemaVersion).toBe(6);
+    expect(written.generationTimeoutSec).toBe(2700);
+    expect(written.diagnosticsLastReadTs).toBe(12345);
+  });
+
+  it('v5 install with a customised timeout is left alone (no write-back, no rewrite)', async () => {
+    readFileMock.mockResolvedValueOnce(
+      JSON.stringify({
+        schemaVersion: 5,
+        updateChannel: 'stable',
+        generationTimeoutSec: 900,
+        checkForUpdatesOnStartup: true,
+        dismissedUpdateVersion: '',
+        diagnosticsLastReadTs: 12345,
+      }),
+    );
+    const result = await readPersisted();
+    expect(result.generationTimeoutSec).toBe(900);
+    expect(writeFileMock).not.toHaveBeenCalled();
+  });
+
+  it('v6 install is idempotent — no migration write-back', async () => {
+    readFileMock.mockResolvedValueOnce(
+      JSON.stringify({
+        schemaVersion: 6,
+        updateChannel: 'stable',
+        generationTimeoutSec: 2700,
+        checkForUpdatesOnStartup: true,
+        dismissedUpdateVersion: '',
+        diagnosticsLastReadTs: 99999,
+      }),
+    );
+    await readPersisted();
+    expect(writeFileMock).not.toHaveBeenCalled();
+  });
+
   it('schema migration writes the seeded preferences to disk', async () => {
     readFileMock.mockResolvedValueOnce(
       JSON.stringify({

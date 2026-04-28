@@ -14,6 +14,7 @@ import type {
   LocalInputFile,
   ModelRef,
   OnboardingState,
+  PromptAssistMetadata,
   ReportEventInput,
   ReportEventResult,
   ReportableError,
@@ -346,7 +347,27 @@ interface CodesignState {
      *  visible as a user message — the agent still receives it and responds
      *  normally, but the chat transcript reads as one continuous run. */
     silent?: boolean | undefined;
+    /** Internal: set by the prompt-assist dialog after the user picks
+     *  constraints, so the second-pass sendPrompt skips the dialog
+     *  intercept (the design now has metadata). */
+    skipPromptAssist?: boolean | undefined;
   }) => Promise<void>;
+  /** Pending short-prompt submission queued behind the prompt-assist
+   *  interstitial. The dialog reads this; when null, the dialog is closed.
+   *  See backlog-1 #9. */
+  promptAssistPending: {
+    designId: string;
+    input: {
+      prompt: string;
+      attachments?: LocalInputFile[] | undefined;
+      referenceUrl?: string | undefined;
+    };
+  } | null;
+  /** Persist the user's chip picks to the design (or null on skip), close
+   *  the dialog, and resume the original sendPrompt. */
+  resolvePromptAssist: (picks: PromptAssistMetadata | null) => Promise<void>;
+  /** Cancel the pending submission entirely (Esc / overlay click). */
+  cancelPromptAssist: () => void;
   /** Set of designIds for which the automatic polish / deepen follow-up has
    *  already fired. Prevents infinite loops (polish round would otherwise
    *  also end in agent_end and trigger itself). Cleared when a design is
@@ -1200,6 +1221,19 @@ function buildGenerateFixAction(
   err: unknown,
   cfg: OnboardingState | null,
 ): Toast['action'] | undefined {
+  // Claude Code OAuth re-import: when the refresh helper bubbles the
+  // terminal CLAUDE_CODE_REIMPORT_REQUIRED code (revoked/expired refresh
+  // token), give the user a one-click action that runs the existing
+  // import IPC. No baseUrl manipulation involved.
+  const code = extractCodesignErrorCode(err);
+  if (code === 'CLAUDE_CODE_REIMPORT_REQUIRED') {
+    return {
+      label: tr('notifications.claudeCodeReimport'),
+      onClick: () => {
+        void applyClaudeCodeReimport(get, set);
+      },
+    };
+  }
   const fix = hypothesis?.suggestedFix;
   if (fix === undefined) return undefined;
   if (fix.baseUrlTransform === undefined) return undefined;
@@ -1221,6 +1255,35 @@ function buildGenerateFixAction(
       void applyGenerateBaseUrlFix(get, set, providerId, nextBaseUrl);
     },
   };
+}
+
+async function applyClaudeCodeReimport(get: GetState, set: SetState): Promise<void> {
+  const api = window.codesign?.config?.importClaudeCodeConfig;
+  if (api === undefined) {
+    get().reportableErrorToast({
+      code: 'CLAUDE_CODE_REIMPORT_UNAVAILABLE',
+      scope: 'generate',
+      title: tr('notifications.claudeCodeReimportUnavailable'),
+      description: tr('notifications.claudeCodeReimportUnavailableDescription'),
+    });
+    return;
+  }
+  try {
+    const next = await api();
+    set({ config: next });
+    get().pushToast({
+      variant: 'success',
+      title: tr('notifications.claudeCodeReimportSucceeded'),
+    });
+  } catch (err) {
+    get().reportableErrorToast({
+      code: 'CLAUDE_CODE_REIMPORT_FAILED',
+      scope: 'generate',
+      title: tr('notifications.claudeCodeReimportFailed'),
+      description: err instanceof Error ? err.message : String(err),
+      ...(err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
+    });
+  }
 }
 
 export async function applyGenerateBaseUrlFix(
@@ -1449,6 +1512,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   designToDelete: null,
   designToRename: null,
   workspaceRebindPending: null,
+  promptAssistPending: null,
 
   inputFiles: [],
   referenceUrl: '',
@@ -1606,6 +1670,39 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         },
       });
       return;
+    }
+
+    // Prompt-assist intercept (backlog-1 #9): a sub-120-char prompt with no
+    // existing per-design constraints leaves the model guessing audience /
+    // device / vibe / a11y. Open the chip dialog FIRST, then let
+    // resolvePromptAssist re-call sendPrompt with skipPromptAssist=true.
+    // Skip when silent (auto-polish/retry paths), when no design is bound
+    // yet, or when the design already has metadata.
+    if (
+      input.silent !== true &&
+      input.skipPromptAssist !== true &&
+      input.prompt.trim().length > 0 &&
+      input.prompt.trim().length < 120
+    ) {
+      const designId = get().currentDesignId;
+      if (designId !== null) {
+        const design = get().designs.find((d) => d.id === designId);
+        const hasMetadata =
+          design?.promptAssistMetadata !== undefined && design.promptAssistMetadata !== null;
+        if (!hasMetadata) {
+          set({
+            promptAssistPending: {
+              designId,
+              input: {
+                prompt: input.prompt,
+                ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
+                ...(input.referenceUrl !== undefined ? { referenceUrl: input.referenceUrl } : {}),
+              },
+            },
+          });
+          return;
+        }
+      }
     }
 
     // Pending edit chips let the user submit with an empty prompt — we
@@ -2456,6 +2553,40 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   },
   requestRenameDesign(design) {
     set({ designToRename: design });
+  },
+
+  async resolvePromptAssist(picks) {
+    const pending = get().promptAssistPending;
+    if (pending === null) return;
+    const { designId, input: pendingInput } = pending;
+    const api = window.codesign?.snapshots?.setPromptAssist;
+    if (api !== undefined) {
+      try {
+        const updated = await api(designId, picks);
+        // Patch the in-store design list so the next sendPrompt sees the
+        // metadata via the same skip-intercept path the IPC handler uses.
+        set((s) => ({
+          designs: s.designs.map((d) => (d.id === updated.id ? updated : d)),
+        }));
+      } catch (err) {
+        get().reportableErrorToast({
+          code: 'PROMPT_ASSIST_PERSIST_FAILED',
+          scope: 'generate',
+          title: tr('promptAssist.persistFailed'),
+          description: err instanceof Error ? err.message : String(err),
+          ...(err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
+        });
+        // Don't resume the run — the design state is now inconsistent.
+        set({ promptAssistPending: null });
+        return;
+      }
+    }
+    set({ promptAssistPending: null });
+    await get().sendPrompt({ ...pendingInput, skipPromptAssist: true });
+  },
+
+  cancelPromptAssist() {
+    set({ promptAssistPending: null });
   },
 
   requestWorkspaceRebind(design, newPath) {

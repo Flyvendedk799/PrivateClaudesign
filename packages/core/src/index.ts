@@ -12,6 +12,7 @@ import type {
   ChatMessage,
   LoadedSkill,
   ModelRef,
+  PromptAssistMetadata,
   SelectedElement,
   StoredDesignSystem,
   WireApi,
@@ -20,7 +21,6 @@ import { CodesignError, ERROR_CODES } from '@open-codesign/shared';
 import { remapProviderError } from './errors.js';
 import { type CoreLogger, NOOP_LOGGER } from './logger.js';
 import { type PromptComposeOptions, composeSystemPrompt } from './prompts/index.js';
-import { loadBuiltinSkills } from './skills/loader.js';
 
 export type { PromptComposeOptions };
 export type { CoreLogger } from './logger.js';
@@ -162,6 +162,10 @@ export interface GenerateInput {
    * or, when omitted, defaults to `'jsx'` (current behavior).
    */
   pattern?: 'jsx' | 'vanilla' | undefined;
+  /** Per-design constraints captured by the prompt-assist interstitial
+   *  (backlog-1 #9). Forwarded into composeSystemPrompt so refinement
+   *  turns also see the original picks. */
+  promptAssist?: PromptAssistMetadata | undefined;
   logger?: CoreLogger | undefined;
 }
 
@@ -198,6 +202,8 @@ export interface ApplyCommentInput {
    *  partial revise output to the renderer instead of waiting for the full
    *  buffer. */
   onTextDelta?: ((delta: string) => void) | undefined;
+  /** @see GenerateInput.promptAssist — refinement turns inherit the same picks. */
+  promptAssist?: PromptAssistMetadata | undefined;
   logger?: CoreLogger | undefined;
 }
 
@@ -617,6 +623,7 @@ async function collectAllSkillBlobs(
   const start = Date.now();
   let skills: LoadedSkill[];
   try {
+    const { loadBuiltinSkills } = await import('./skills/loader.js');
     skills = await loadBuiltinSkills();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -753,6 +760,7 @@ export async function generate(input: GenerateInput): Promise<GenerateOutput> {
           mode: 'create',
           userPrompt: input.prompt,
           ...(skillBlobs.length > 0 ? { skills: skillBlobs } : {}),
+          ...(input.promptAssist !== undefined ? { promptAssist: input.promptAssist } : {}),
         }),
     },
     ...input.history,
@@ -811,6 +819,7 @@ export async function applyComment(input: ApplyCommentInput): Promise<GenerateOu
       role: 'system',
       content: composeSystemPrompt({
         mode: 'revise',
+        ...(input.promptAssist !== undefined ? { promptAssist: input.promptAssist } : {}),
       }),
     },
     { role: 'user', content: buildRevisionPrompt(input, buildContextSections(input)) },

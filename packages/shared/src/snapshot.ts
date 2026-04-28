@@ -14,6 +14,21 @@ export const DesignSnapshotV1 = z.object({
 });
 export type DesignSnapshot = z.infer<typeof DesignSnapshotV1>;
 
+/** v1 schema for prompt-assist chip selections. Captured before the agent
+ *  runs when the prompt is short and underspecified (see backlog-1 #9), and
+ *  injected into the system prompt as structured constraints on every
+ *  generation for the design (initial + refinements). */
+export const PromptAssistMetadataV1 = z.object({
+  schemaVersion: z.literal(1).default(1),
+  audience: z.string().optional(),
+  device: z.enum(['desktop', 'tablet', 'mobile']).optional(),
+  depth: z.enum(['quick', 'standard', 'deep']).optional(),
+  primaryAction: z.string().optional(),
+  vibe: z.string().optional(),
+  a11y: z.enum(['baseline', 'enhanced']).optional(),
+});
+export type PromptAssistMetadata = z.infer<typeof PromptAssistMetadataV1>;
+
 export const DesignV1 = z.object({
   schemaVersion: z.literal(1).default(1),
   id: z.string().min(1),
@@ -23,6 +38,9 @@ export const DesignV1 = z.object({
   thumbnailText: z.string().nullable().default(null),
   deletedAt: z.string().nullable().default(null),
   workspacePath: z.string().nullable().default(null),
+  /** Per-design constraints captured by the prompt-assist interstitial.
+   *  Optional — long prompts skip the dialog entirely and leave this null. */
+  promptAssistMetadata: PromptAssistMetadataV1.nullable().default(null).optional(),
 });
 export type Design = z.infer<typeof DesignV1>;
 
@@ -63,11 +81,18 @@ export const ChatMessageRowV1 = z.object({
 });
 export type ChatMessageRow = z.infer<typeof ChatMessageRowV1>;
 
+/** Current on-disk schema version for `chat_messages` rows. Bump together
+ *  with `migrateChatMessageRow` in the main process when shapes change. */
+export const CHAT_MESSAGE_SCHEMA_VERSION = 1 as const;
+
 export interface ChatAppendInput {
   designId: string;
   kind: ChatMessageKind;
   payload: unknown;
   snapshotId?: string | null;
+  /** Persisted alongside the row so the read path can refuse / migrate
+   *  forward-incompatible rows. Defaults to the current writer version. */
+  schemaVersion?: typeof CHAT_MESSAGE_SCHEMA_VERSION;
 }
 
 // Payload shapes (not strictly validated — payload is opaque JSON in DB).

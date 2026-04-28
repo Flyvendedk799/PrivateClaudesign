@@ -19,6 +19,7 @@ import {
   listDesigns,
   listSnapshots,
   renameDesign,
+  setDesignPromptAssistMetadata,
   setDesignThumbnail,
   softDeleteDesign,
   updateChatToolCallStatus,
@@ -712,7 +713,6 @@ describe('user_skills CRUD (backlog-2 #7)', () => {
       sourceSnapshotId: null,
       sourceRect: null,
     });
-    // Force a different timestamp so DESC ordering is testable.
     await new Promise((r) => setTimeout(r, 5));
     const b = createUserSkill(db, {
       name: 'lesson-row',
@@ -784,5 +784,89 @@ describe('user_skills CRUD (backlog-2 #7)', () => {
     const { initInMemoryDb, updateUserSkill } = await import('./snapshots-db');
     const db = initInMemoryDb();
     expect(updateUserSkill(db, 'no-such-id', { name: 'x' })).toBeNull();
+  });
+});
+
+describe('setDesignPromptAssistMetadata (backlog-1 #9)', () => {
+  it('persists metadata and round-trips it via getDesign', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    setDesignPromptAssistMetadata(db, d.id, {
+      schemaVersion: 1,
+      audience: 'pm',
+      device: 'mobile',
+      depth: 'quick',
+    });
+    const after = getDesign(db, d.id);
+    expect(after?.promptAssistMetadata).toMatchObject({
+      audience: 'pm',
+      device: 'mobile',
+      depth: 'quick',
+    });
+  });
+
+  it('null clears the column so the dialog re-prompts', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    setDesignPromptAssistMetadata(db, d.id, { schemaVersion: 1, audience: 'pm' });
+    setDesignPromptAssistMetadata(db, d.id, null);
+    expect(getDesign(db, d.id)?.promptAssistMetadata).toBeNull();
+  });
+
+  it('returns null when the design id does not exist', () => {
+    const db = makeDb();
+    expect(setDesignPromptAssistMetadata(db, 'no-such-id', null)).toBeNull();
+  });
+
+  it('rejects malformed metadata (e.g. unknown device enum value)', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    expect(() =>
+      setDesignPromptAssistMetadata(db, d.id, {
+        schemaVersion: 1,
+        // @ts-expect-error: deliberately bad value to test runtime guard
+        device: 'watch',
+      }),
+    ).toThrow();
+  });
+
+  it('rows on a fresh design have promptAssistMetadata=null by default', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    expect(getDesign(db, d.id)?.promptAssistMetadata).toBeNull();
+  });
+});
+
+describe('chat_messages schema_version validation', () => {
+  it('writes schemaVersion=1 on insert and reads it back', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'hi' } });
+    const raw = db
+      .prepare('SELECT schema_version FROM chat_messages WHERE design_id = ?')
+      .all(d.id) as Array<{ schema_version: number }>;
+    expect(raw[0]?.schema_version).toBe(1);
+    const list = listChatMessages(db, d.id);
+    expect(list[0]?.schemaVersion).toBe(1);
+  });
+
+  it('skips rows with a future schema_version and returns the rest', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'one' } });
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'two' } });
+    db.prepare('UPDATE chat_messages SET schema_version = 99 WHERE seq = 0').run();
+    const list = listChatMessages(db, d.id);
+    expect(list).toHaveLength(1);
+    expect((list[0]?.payload as { text: string }).text).toBe('two');
+  });
+
+  it('rows backfilled by the additive migration default to schema_version=1', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'legacy' } });
+    const list = listChatMessages(db, d.id);
+    expect(list).toHaveLength(1);
+    expect(list[0]?.schemaVersion).toBe(1);
   });
 });

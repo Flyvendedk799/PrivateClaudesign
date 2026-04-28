@@ -644,7 +644,9 @@ describe('useCodesignStore artifact persistence', () => {
 
     useCodesignStore.setState({ currentDesignId: designId, designs: [designRow] });
 
-    await useCodesignStore.getState().sendPrompt({ prompt: 'make a hero section' });
+    await useCodesignStore
+      .getState()
+      .sendPrompt({ prompt: 'make a hero section', skipPromptAssist: true });
     // persistDesignState fires-and-forgets; drain microtasks until create resolves.
     for (let i = 0; i < 5; i++) await Promise.resolve();
 

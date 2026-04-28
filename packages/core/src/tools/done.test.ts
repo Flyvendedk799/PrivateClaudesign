@@ -382,3 +382,61 @@ function App() { return <div>Hi</div>; }`,
     expect((r3.content[0] as { text: string }).text).toMatch(/LAST fix attempt/);
   });
 });
+
+describe('Babel-aware static lint (backlog-1 #10)', () => {
+  it('skips findUnclosedTags for JSX (self-closing component tags are not HTML)', async () => {
+    // Component-style self-closing <Header /> would be flagged as unclosed
+    // by findUnclosedTags before #10 — the agent then "fixes" perfectly
+    // valid JSX into a state that breaks Babel. Skipping the HTML check
+    // for JSX artifacts stops the loop.
+    const jsx = [
+      '<!doctype html><html><body><div id="root"></div>',
+      '<script type="text/babel">',
+      'function App() { return <Header /> }',
+      'ReactDOM.createRoot(document.getElementById("root")).render(<App />);',
+      '</script></body></html>',
+    ].join('\n');
+    const fs = makeFs({ 'index.html': jsx });
+    const tool = makeDoneTool(fs);
+    const res = await tool.execute('jsx-self', {});
+    expect(res.details.errors.some((e) => /Unclosed/.test(e.message))).toBe(false);
+  });
+
+  it('skips findMissingAlt for JSX (component <Image/> is not an HTML <img>)', async () => {
+    const jsx = [
+      '<!doctype html><html><body><div id="root"></div>',
+      '<script type="text/babel">',
+      'function App() { return <Image src="hero.png" /> }',
+      'ReactDOM.createRoot(document.getElementById("root")).render(<App />);',
+      '</script></body></html>',
+    ].join('\n');
+    const fs = makeFs({ 'index.html': jsx });
+    const tool = makeDoneTool(fs);
+    const res = await tool.execute('jsx-img', {});
+    expect(res.details.errors.some((e) => /alt/.test(e.message))).toBe(false);
+  });
+
+  it('still flags duplicate ids inside JSX (the rule is valid in either runtime)', async () => {
+    const jsx = [
+      '<!doctype html><html><body><div id="root"></div>',
+      '<script type="text/babel">',
+      'function App() {',
+      '  return <div><span id="dup">a</span><span id="dup">b</span></div>;',
+      '}',
+      'ReactDOM.createRoot(document.getElementById("root")).render(<App />);',
+      '</script></body></html>',
+    ].join('\n');
+    const fs = makeFs({ 'index.html': jsx });
+    const tool = makeDoneTool(fs);
+    const res = await tool.execute('jsx-dup', {});
+    expect(res.details.errors.some((e) => /Duplicate id/.test(e.message))).toBe(true);
+  });
+
+  it('pure HTML still gets the HTML-only checks (regression guard)', async () => {
+    const html = '<!doctype html><html><body>\n<section>\n<div>\n</body></html>';
+    const fs = makeFs({ 'index.html': html });
+    const tool = makeDoneTool(fs);
+    const res = await tool.execute('html-unclosed', {});
+    expect(res.details.errors.some((e) => /Unclosed/.test(e.message))).toBe(true);
+  });
+});

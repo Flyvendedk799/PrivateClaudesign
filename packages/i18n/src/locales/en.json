@@ -104,7 +104,13 @@
     "commentModeHint": "Click any element to comment",
     "runtimeError": "Preview runtime error",
     "dismissErrors": "Dismiss preview errors",
-    "zoom": "Zoom"
+    "zoom": "Zoom",
+    "viewport": {
+      "label": "Preview viewport",
+      "desktop": "Desktop preview",
+      "tablet": "Tablet preview",
+      "mobile": "Mobile preview"
+    }
   },
   "tweaks": {
     "title": "Tweaks",
@@ -655,6 +661,11 @@
     "generationFailedFixUnavailable": "Auto-fix unavailable",
     "generationFailedFixUnavailableDescription": "This app version can't apply the fix automatically. Please edit the Base URL manually in Settings.",
     "generationFailedFixApplyFailed": "Could not apply fix",
+    "claudeCodeReimport": "Re-import Claude Code",
+    "claudeCodeReimportSucceeded": "Claude Code re-imported. Try the request again.",
+    "claudeCodeReimportFailed": "Could not re-import Claude Code",
+    "claudeCodeReimportUnavailable": "Re-import unavailable",
+    "claudeCodeReimportUnavailableDescription": "This app version can't trigger the re-import automatically. Open Settings and import Claude Code manually.",
     "cancellationFailed": "Cancellation failed",
     "inlineCommentFailed": "Inline comment failed",
     "commentNeedsSnapshot": "Generate a design first before leaving a comment",
@@ -791,6 +802,48 @@
     "modelListFailed": "Could not load model list.",
     "unknown": "Unknown error",
     "localePersistFailed": "Failed to save language preference"
+  },
+  "promptAssist": {
+    "title": "Quick scope check",
+    "body": "Your prompt is short — a few constraints help the agent stay on-brief instead of guessing.",
+    "skip": "Skip",
+    "submit": "Use these",
+    "skipIn": "Auto-skipping in {{seconds}}s…",
+    "skipPaused": "Auto-skip paused",
+    "persistFailed": "Could not save the prompt-assist picks",
+    "rows": {
+      "audience": "Audience",
+      "device": "Primary device",
+      "depth": "Depth",
+      "vibe": "Vibe",
+      "a11y": "Accessibility"
+    },
+    "audience": {
+      "devs": "Developers",
+      "pms": "PMs",
+      "endUsers": "End users",
+      "designers": "Designers"
+    },
+    "device": {
+      "desktop": "Desktop",
+      "tablet": "Tablet / Laptop",
+      "mobile": "Mobile"
+    },
+    "depth": {
+      "quick": "Quick",
+      "standard": "Standard",
+      "deep": "Deep"
+    },
+    "vibe": {
+      "calm": "Calm",
+      "energetic": "Energetic",
+      "editorial": "Editorial",
+      "minimal": "Minimal"
+    },
+    "a11y": {
+      "baseline": "Baseline",
+      "enhanced": "Enhanced (WCAG AA+)"
+    }
   },
   "projects": {
     "untitled": "Untitled design",
@@ -1175,6 +1228,9 @@
     "CONFIG_NOT_LOADED": "Configuration has not been loaded yet. Please restart the app.",
     "CONFIG_MISSING": "No configuration found. Complete onboarding to get started.",
     "SNAPSHOTS_UNAVAILABLE": "The local design database is unavailable. Restarting the app may help.",
+    "CHAT_SCHEMA_MISMATCH": "A chat history entry was written by a newer version of the app and cannot be read.",
+    "CLAUDE_CODE_TOKEN_REFRESH_FAILED": "Could not refresh the Claude Code access token. The next request will retry; if it keeps failing, re-import from Claude Code.",
+    "CLAUDE_CODE_REIMPORT_REQUIRED": "Claude Code login is no longer valid. Re-import from Claude Code to continue.",
     "BOOT_ORDER": "An internal startup error occurred. Please restart the app.",
     "STORAGE_SETTINGS_READ_FAILED": "Failed to read storage location settings.",
     "STORAGE_SETTINGS_PARSE_FAILED": "Storage location settings could not be parsed.",

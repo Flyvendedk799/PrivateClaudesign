@@ -17,6 +17,7 @@ import type {
   LocalInputFile,
   ModelRef,
   OnboardingState,
+  PromptAssistMetadata,
   ProviderEntry,
   ReasoningLevel,
   ReportEventInput,
@@ -465,6 +466,12 @@ const api = {
         schemaVersion: 1,
         id,
         thumbnailText,
+      }) as Promise<Design>,
+    setPromptAssist: (id: string, metadata: PromptAssistMetadata | null) =>
+      ipcRenderer.invoke('snapshots:v1:set-prompt-assist', {
+        schemaVersion: 1,
+        id,
+        metadata,
       }) as Promise<Design>,
     softDeleteDesign: (id: string) =>
       ipcRenderer.invoke('snapshots:v1:soft-delete-design', {

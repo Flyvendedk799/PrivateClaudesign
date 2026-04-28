@@ -5,6 +5,7 @@ import { DeleteDesignDialog } from './components/DeleteDesignDialog';
 import { DesignsView } from './components/DesignsView';
 import { NewDesignDialog } from './components/NewDesignDialog';
 import { PreviewPane } from './components/PreviewPane';
+import { PromptAssistDialog } from './components/PromptAssistDialog';
 import { RebindWorkspaceDialog } from './components/RebindWorkspaceDialog';
 import { RenameDesignDialog } from './components/RenameDesignDialog';
 import { Settings } from './components/Settings';
@@ -261,6 +262,7 @@ export function App() {
       <DeleteDesignDialog />
       <RebindWorkspaceDialog />
       <NewDesignDialog />
+      <PromptAssistDialog />
       <SkillExtractorOverlay />
       <ToastViewport />
       <CommentsPanel />
