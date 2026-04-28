@@ -329,6 +329,7 @@ export {
   DesignMessageV1,
   DesignSnapshotV1,
   DesignV1,
+  UserSkillV1,
 } from './snapshot';
 export type {
   ChatAppendInput,
@@ -347,6 +348,10 @@ export type {
   DesignMessage,
   DesignSnapshot,
   SnapshotCreateInput,
+  UserSkill,
+  UserSkillCreateInput,
+  UserSkillExtractInput,
+  UserSkillUpdateInput,
 } from './snapshot';
 
 export { SkillFrontmatterV1 } from './skills';

@@ -81,9 +81,11 @@ import { cleanupStaleTmps } from './reported-fingerprints';
 import { resolveActiveApiKey, resolveApiKeyWithKeylessFallback } from './resolve-api-key';
 import { withRun } from './runContext';
 import { resolveUseAgentRuntime } from './runtime-flag';
+import { registerSkillsIpc, registerSkillsUnavailableIpc } from './skills-ipc';
 import {
   getDesign,
   listChatMessages,
+  listUserSkills,
   normalizeDesignFilePath,
   pruneDiagnosticEvents,
   recordDiagnosticEvent,
@@ -706,10 +708,17 @@ function registerIpcHandlers(db: Database | null): void {
     let deltaCount = 0;
     let toolCount = 0;
 
+    // backlog-2 #7 — user-authored skills, loaded once per run from the
+    // local DB. Empty array on DB-unavailable or zero saved skills.
+    const userSkills: ReadonlyArray<readonly [string, string]> = db
+      ? listUserSkills(db).map((s) => [s.name, `// when_to_use: ${s.whenToUse}\n${s.source}`])
+      : [];
+
     return generateViaAgent(input, {
       fs,
       runtimeVerify,
       renderPreview,
+      userSkills,
       ...(generateImageAsset !== undefined ? { generateImageAsset } : {}),
       onEvent: (event: AgentEvent) => {
         // High-signal only. Skip per-token deltas and inner message_*
@@ -1750,6 +1759,45 @@ if (!IS_VITEST) {
         registerWorkspaceIpc(dbResult.db, () => mainWindow);
         registerChatMessagesIpc(dbResult.db);
         registerCommentsIpc(dbResult.db);
+        // backlog-2 #7 — Skills CRUD + extractor. The extractor closure
+        // routes through `generate()` so the active provider's auth /
+        // cache / OAuth-refresh path is reused. systemPrompt override
+        // skips skill loading + artifact parsing — extractor returns
+        // raw JSON from the model.
+        registerSkillsIpc(dbResult.db, {
+          runOneShotCompletion: async (messages) => {
+            const cfg = getCachedConfig();
+            if (cfg === null) {
+              throw new CodesignError(
+                'No configuration; complete onboarding first.',
+                'CONFIG_MISSING',
+              );
+            }
+            const active = resolveActiveModel(cfg, {
+              provider: cfg.activeProvider,
+              modelId: cfg.activeModel,
+            });
+            const allowKeyless = active.allowKeyless;
+            const apiKey = await resolveApiKeyForActive(active.model.provider, allowKeyless);
+            const baseUrl = active.baseUrl ?? undefined;
+            const sys = messages.find((m) => m.role === 'system')?.content ?? '';
+            const userMsgs = messages.filter((m) => m.role !== 'system');
+            const prompt = userMsgs.map((m) => m.content).join('\n\n');
+            const out = await generate({
+              prompt,
+              history: [],
+              model: active.model,
+              apiKey,
+              ...(baseUrl !== undefined ? { baseUrl } : {}),
+              wire: active.wire,
+              ...(active.httpHeaders !== undefined ? { httpHeaders: active.httpHeaders } : {}),
+              ...(allowKeyless ? { allowKeyless: true } : {}),
+              systemPrompt: sys,
+              logger: getLogger('skills-extractor'),
+            });
+            return out.message;
+          },
+        });
         try {
           pruneDiagnosticEvents(dbResult.db, 500);
         } catch (err) {
@@ -1769,6 +1817,7 @@ if (!IS_VITEST) {
         registerSnapshotsUnavailableIpc(dbResult.error.message);
         registerChatMessagesUnavailableIpc(dbResult.error.message);
         registerCommentsUnavailableIpc(dbResult.error.message);
+        registerSkillsUnavailableIpc(dbResult.error.message);
         dialog.showErrorBox(
           'Design history unavailable',
           `Could not open the local snapshots database. Version history will be disabled for this session.\n\n${dbResult.error.message}`,

@@ -1020,6 +1020,22 @@
     "casestudy": "做一个 B2B 金融科技的客户案例单页。含客户名 Hero 区、三个大指标（带变化值）、CFO 引言、三步实施流程、合作伙伴 Logo 条。深色主题，衬线标题，等宽数字。",
     "animation": "做一个展示页，含六个有机风格的 CSS 加载动画。每个在独立卡片里：水滴变形、叶片摇摆、墨滴扩散、呼吸圆环、脉冲波纹、丝带编织。暖奶油色背景，柔和色彩，纯 CSS/SVG。"
   },
+  "skills": {
+    "title": "技能",
+    "body": "可复用的 JSX 模板，agent 在下一次生成时通过 list_design_skills 自动可见。把你常用的模式存起来，避免模型每次重新发明。",
+    "new": "新建技能",
+    "empty": "还没有技能。创建一个，以便 agent 可以复用。",
+    "delete": "删除 {{name}}",
+    "unavailable": "本次会话的技能存储不可用。",
+    "newDialog": {
+      "title": "新建技能",
+      "name": "标识符",
+      "whenToUse": "适用场景",
+      "whenToUsePlaceholder": "用于设计移动端底部 Tab 导航。",
+      "source": "JSX / HTML 主体",
+      "save": "保存"
+    }
+  },
   "hub": {
     "newDesign": "新建设计",
     "newDesignCardTitle": "新建设计",
@@ -1029,7 +1045,8 @@
       "recent": "最近",
       "your": "我的设计",
       "examples": "示例",
-      "designSystems": "设计系统"
+      "designSystems": "设计系统",
+      "skills": "技能"
     },
     "recent": {
       "title": "最近",

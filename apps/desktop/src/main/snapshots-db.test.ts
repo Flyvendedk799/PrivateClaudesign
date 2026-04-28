@@ -699,3 +699,90 @@ describe('tool_status_normalize_2026_04_20 migration', () => {
     expect((recentRow?.payload as { status: string }).status).toBe('running');
   });
 });
+
+describe('user_skills CRUD (backlog-2 #7)', () => {
+  it('creates and lists user-authored skills (most-recent first)', async () => {
+    const { initInMemoryDb, createUserSkill, listUserSkills } = await import('./snapshots-db');
+    const db = initInMemoryDb();
+    const a = createUserSkill(db, {
+      name: 'mobile-tab-bar',
+      whenToUse: 'Use when designing a mobile bottom-tab navigation.',
+      source: '<TabBar/>',
+      sourceDesignId: null,
+      sourceSnapshotId: null,
+      sourceRect: null,
+    });
+    // Force a different timestamp so DESC ordering is testable.
+    await new Promise((r) => setTimeout(r, 5));
+    const b = createUserSkill(db, {
+      name: 'lesson-row',
+      whenToUse: 'Use for a tappable lesson list row.',
+      source: '<button/>',
+      sourceDesignId: null,
+      sourceSnapshotId: null,
+      sourceRect: null,
+    });
+    const list = listUserSkills(db);
+    expect(list).toHaveLength(2);
+    expect(list[0]?.id).toBe(b.id);
+    expect(list[1]?.id).toBe(a.id);
+    expect(list[0]?.whenToUse).toMatch(/lesson list row/);
+  });
+
+  it('persists sourceRect as JSON when provided', async () => {
+    const { initInMemoryDb, createUserSkill, getUserSkill } = await import('./snapshots-db');
+    const db = initInMemoryDb();
+    const skill = createUserSkill(db, {
+      name: 'card',
+      whenToUse: 'Use for cards.',
+      source: '<div/>',
+      sourceDesignId: null,
+      sourceSnapshotId: null,
+      sourceRect: { top: 12, left: 24, width: 200, height: 80 },
+    });
+    const got = getUserSkill(db, skill.id);
+    expect(got?.sourceRect).toEqual({ top: 12, left: 24, width: 200, height: 80 });
+  });
+
+  it('updateUserSkill patches name / whenToUse / source and bumps updatedAt', async () => {
+    const { initInMemoryDb, createUserSkill, updateUserSkill } = await import('./snapshots-db');
+    const db = initInMemoryDb();
+    const skill = createUserSkill(db, {
+      name: 'x',
+      whenToUse: 'Use for x.',
+      source: '<div/>',
+      sourceDesignId: null,
+      sourceSnapshotId: null,
+      sourceRect: null,
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    const updated = updateUserSkill(db, skill.id, { name: 'y', whenToUse: 'Use for y.' });
+    expect(updated?.name).toBe('y');
+    expect(updated?.whenToUse).toBe('Use for y.');
+    expect(updated?.source).toBe('<div/>');
+    expect(updated && updated.updatedAt > skill.updatedAt).toBe(true);
+  });
+
+  it('deleteUserSkill removes the row', async () => {
+    const { initInMemoryDb, createUserSkill, deleteUserSkill, listUserSkills } = await import(
+      './snapshots-db'
+    );
+    const db = initInMemoryDb();
+    const skill = createUserSkill(db, {
+      name: 'x',
+      whenToUse: 'Use for x.',
+      source: '<div/>',
+      sourceDesignId: null,
+      sourceSnapshotId: null,
+      sourceRect: null,
+    });
+    deleteUserSkill(db, skill.id);
+    expect(listUserSkills(db)).toHaveLength(0);
+  });
+
+  it('updateUserSkill returns null for an unknown id', async () => {
+    const { initInMemoryDb, updateUserSkill } = await import('./snapshots-db');
+    const db = initInMemoryDb();
+    expect(updateUserSkill(db, 'no-such-id', { name: 'x' })).toBeNull();
+  });
+});

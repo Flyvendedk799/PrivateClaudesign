@@ -1035,6 +1035,22 @@
     "casestudy": "Create a one-page customer case study for a B2B fintech. Hero with client name, three large metrics with deltas, a CFO pull quote, a three-step 'How we did it' section, and a logo strip. Dark theme, serif headings, monospace numerals.",
     "animation": "Build a showcase page with six organic CSS loading animations. Each in its own card: blob morph, leaf sway, ink drop, breathing circle, soft pulse, ribbon weave. Warm cream background, muted pastels, pure CSS/SVG only."
   },
+  "skills": {
+    "title": "Skills",
+    "body": "Reusable JSX scaffolds the agent can pick up via list_design_skills on the next generation. Save the patterns you reach for repeatedly so the model doesn't reinvent them.",
+    "new": "New skill",
+    "empty": "No skills yet. Create one to make a reusable scaffold available to the agent.",
+    "delete": "Delete {{name}}",
+    "unavailable": "Skills storage is unavailable for this session.",
+    "newDialog": {
+      "title": "New skill",
+      "name": "Slug",
+      "whenToUse": "When to use",
+      "whenToUsePlaceholder": "Use when designing a mobile bottom-tab navigation.",
+      "source": "JSX / HTML body",
+      "save": "Save"
+    }
+  },
   "hub": {
     "newDesign": "New design",
     "newDesignCardTitle": "Start a new design",
@@ -1044,7 +1060,8 @@
       "recent": "Recent",
       "your": "Your designs",
       "examples": "Examples",
-      "designSystems": "Design systems"
+      "designSystems": "Design systems",
+      "skills": "Skills"
     },
     "recent": {
       "title": "Recent",

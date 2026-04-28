@@ -798,6 +798,13 @@ export interface GenerateViaAgentDeps {
    * before calling `done`. See backlog-2 #5.
    */
   renderPreview?: RenderPreviewer | undefined;
+  /**
+   * User-authored design skills loaded from the host's local DB. Surfaced
+   * to the agent through `list_design_skills` and `view_design_skill`
+   * alongside the bundled set. Empty / undefined means no user skills
+   * are available for this run. See backlog-2 #7.
+   */
+  userSkills?: ReadonlyArray<readonly [name: string, source: string]> | undefined;
 }
 
 /**
@@ -874,8 +881,12 @@ export async function generateViaAgent(
   defaultTools.push(makeReadUrlTool() as unknown as AgentTool<TSchema, unknown>);
   // Design library — both `list_design_skills` + `view_*` lookup tools.
   // No fs deps; available even when `deps.fs` is absent (read-only path).
-  defaultTools.push(makeListDesignSkillsTool() as unknown as AgentTool<TSchema, unknown>);
-  defaultTools.push(makeViewDesignSkillTool() as unknown as AgentTool<TSchema, unknown>);
+  defaultTools.push(
+    makeListDesignSkillsTool(deps.userSkills) as unknown as AgentTool<TSchema, unknown>,
+  );
+  defaultTools.push(
+    makeViewDesignSkillTool(deps.userSkills) as unknown as AgentTool<TSchema, unknown>,
+  );
   defaultTools.push(makeViewFrameTool() as unknown as AgentTool<TSchema, unknown>);
   defaultTools.push(
     makeReadDesignSystemTool(() => input.designSystem ?? null) as unknown as AgentTool<

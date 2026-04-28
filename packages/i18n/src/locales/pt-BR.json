@@ -978,6 +978,22 @@
     "casestudy": "Crie um case em uma página para uma fintech B2B. Hero com nome do cliente, três métricas grandes com variação, uma citação em destaque do CFO, uma seção \"Como fizemos\" em três passos e uma faixa de logos. Tema escuro, títulos com serifa, numerais monoespaçados.",
     "animation": "Crie uma página de showcase com seis animações de loading orgânicas em CSS. Cada uma em seu card: blob morph, balanço de folha, gota de tinta, círculo respirando, pulso suave, trançado de fita. Fundo creme quente, pastéis suaves, apenas CSS/SVG puro."
   },
+  "skills": {
+    "title": "Skills",
+    "body": "Andaimes JSX reutilizáveis que o agente seleciona via list_design_skills na próxima geração. Salve os padrões que você usa com frequência para o modelo não reinventá-los.",
+    "new": "Nova skill",
+    "empty": "Nenhuma skill ainda. Crie uma para disponibilizar um andaime reutilizável ao agente.",
+    "delete": "Excluir {{name}}",
+    "unavailable": "Armazenamento de skills indisponível nesta sessão.",
+    "newDialog": {
+      "title": "Nova skill",
+      "name": "Slug",
+      "whenToUse": "Quando usar",
+      "whenToUsePlaceholder": "Use ao desenhar uma tab bar inferior mobile.",
+      "source": "Corpo JSX / HTML",
+      "save": "Salvar"
+    }
+  },
   "hub": {
     "newDesign": "Novo design",
     "newDesignCardTitle": "Começar um novo design",
@@ -987,7 +1003,8 @@
       "recent": "Recentes",
       "your": "Seus designs",
       "examples": "Exemplos",
-      "designSystems": "Design systems"
+      "designSystems": "Design systems",
+      "skills": "Skills"
     },
     "recent": {
       "title": "Recentes",

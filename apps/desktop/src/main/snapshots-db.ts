@@ -29,6 +29,9 @@ import type {
   DiagnosticEventRow,
   DiagnosticLevel,
   SnapshotCreateInput,
+  UserSkill,
+  UserSkillCreateInput,
+  UserSkillUpdateInput,
 } from '@open-codesign/shared';
 import type BetterSqlite3 from 'better-sqlite3';
 import { getLogger } from './logger';
@@ -184,6 +187,20 @@ function applySchema(db: Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_diag_events_ts          ON diagnostic_events(ts DESC);
     CREATE INDEX IF NOT EXISTS idx_diag_events_fingerprint ON diagnostic_events(fingerprint);
+
+    CREATE TABLE IF NOT EXISTS user_skills (
+      id                 TEXT PRIMARY KEY,
+      schema_version     INTEGER NOT NULL DEFAULT 1,
+      name               TEXT NOT NULL,
+      when_to_use        TEXT NOT NULL,
+      source             TEXT NOT NULL,
+      source_design_id   TEXT REFERENCES designs(id) ON DELETE SET NULL,
+      source_snapshot_id TEXT REFERENCES design_snapshots(id) ON DELETE SET NULL,
+      source_rect        TEXT,
+      created_at         TEXT NOT NULL,
+      updated_at         TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_skills_updated ON user_skills(updated_at DESC);
   `);
 
   applyAdditiveMigrations(db);
@@ -1230,4 +1247,116 @@ export function pruneDiagnosticEvents(db: Database, maxRows: number): number {
     )
     .run(maxRows);
   return result.changes;
+}
+
+// ---------------------------------------------------------------------------
+// User-authored skills (backlog-2 #7)
+// ---------------------------------------------------------------------------
+
+interface UserSkillRow {
+  id: string;
+  schema_version: number;
+  name: string;
+  when_to_use: string;
+  source: string;
+  source_design_id: string | null;
+  source_snapshot_id: string | null;
+  source_rect: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToUserSkill(row: UserSkillRow): UserSkill {
+  let rect = null;
+  if (typeof row.source_rect === 'string' && row.source_rect.length > 0) {
+    try {
+      rect = JSON.parse(row.source_rect);
+    } catch {
+      rect = null;
+    }
+  }
+  return {
+    schemaVersion: 1,
+    id: row.id,
+    name: row.name,
+    whenToUse: row.when_to_use,
+    source: row.source,
+    sourceDesignId: row.source_design_id,
+    sourceSnapshotId: row.source_snapshot_id,
+    sourceRect: rect as UserSkill['sourceRect'],
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function listUserSkills(db: Database): UserSkill[] {
+  const rows = db
+    .prepare('SELECT * FROM user_skills ORDER BY updated_at DESC')
+    .all() as UserSkillRow[];
+  return rows.map(rowToUserSkill);
+}
+
+export function getUserSkill(db: Database, id: string): UserSkill | null {
+  const row = db.prepare('SELECT * FROM user_skills WHERE id = ?').get(id) as
+    | UserSkillRow
+    | undefined;
+  return row ? rowToUserSkill(row) : null;
+}
+
+export function createUserSkill(db: Database, input: UserSkillCreateInput): UserSkill {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const rect = input.sourceRect ? JSON.stringify(input.sourceRect) : null;
+  db.prepare(
+    `INSERT INTO user_skills
+       (id, schema_version, name, when_to_use, source, source_design_id, source_snapshot_id, source_rect, created_at, updated_at)
+     VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.name,
+    input.whenToUse,
+    input.source,
+    input.sourceDesignId ?? null,
+    input.sourceSnapshotId ?? null,
+    rect,
+    now,
+    now,
+  );
+  const row = db.prepare('SELECT * FROM user_skills WHERE id = ?').get(id) as UserSkillRow;
+  return rowToUserSkill(row);
+}
+
+export function updateUserSkill(
+  db: Database,
+  id: string,
+  patch: UserSkillUpdateInput,
+): UserSkill | null {
+  const now = new Date().toISOString();
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  if (patch.name !== undefined) {
+    sets.push('name = ?');
+    values.push(patch.name);
+  }
+  if (patch.whenToUse !== undefined) {
+    sets.push('when_to_use = ?');
+    values.push(patch.whenToUse);
+  }
+  if (patch.source !== undefined) {
+    sets.push('source = ?');
+    values.push(patch.source);
+  }
+  if (sets.length === 0) return getUserSkill(db, id);
+  sets.push('updated_at = ?');
+  values.push(now);
+  values.push(id);
+  const result = db
+    .prepare(`UPDATE user_skills SET ${sets.join(', ')} WHERE id = ?`)
+    .run(...values);
+  if (result.changes === 0) return null;
+  return getUserSkill(db, id);
+}
+
+export function deleteUserSkill(db: Database, id: string): void {
+  db.prepare('DELETE FROM user_skills WHERE id = ?').run(id);
 }

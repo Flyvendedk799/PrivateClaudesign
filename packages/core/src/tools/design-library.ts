@@ -22,7 +22,15 @@ import { Type } from '@sinclair/typebox';
 import { DESIGN_SKILLS } from '../design-skills/index.js';
 import { FRAME_TEMPLATES } from '../frames/index.js';
 
-const SKILL_MAP = new Map<string, string>(DESIGN_SKILLS.map(([name, src]) => [name, src]));
+/** A user-authored skill the host has pulled from disk for this run.
+ *  Same `[name, source]` shape as the built-in DESIGN_SKILLS so callers
+ *  don't have to differentiate. The `whenToUse` hint comes from the
+ *  shared body via the existing `// when_to_use:` comment convention or
+ *  via an explicit prefix line — either way, the skill becomes
+ *  list-able + view-able by the agent on the next generation. See
+ *  backlog-2 #7. */
+export type UserSkillTuple = readonly [name: string, source: string];
+
 const FRAME_MAP = new Map<string, string>(FRAME_TEMPLATES.map(([name, src]) => [name, src]));
 
 /** Parse the leading `// when_to_use: ...` block (one or more contiguous
@@ -62,24 +70,28 @@ export interface ListDesignSkillsDetails {
   skills: DesignSkillEntry[];
 }
 
-export function makeListDesignSkillsTool(): AgentTool<
-  typeof ListDesignSkillsParams,
-  ListDesignSkillsDetails
-> {
+export function makeListDesignSkillsTool(
+  userSkills: ReadonlyArray<UserSkillTuple> = [],
+): AgentTool<typeof ListDesignSkillsParams, ListDesignSkillsDetails> {
   return {
     name: 'list_design_skills',
     label: 'List design skills',
     description:
-      'Return the catalogue of bundled design-skill starter snippets. Each entry has a name, ' +
-      'a `whenToUse` hint, and a byte size. Call this once before scaffolding `index.html` ' +
-      'so you can pick a starter that matches the brief (landing-page, dashboard, slide-deck, ' +
-      'chart-svg, glassmorphism, editorial-typography, heroes, pricing, footers, chat-ui, ' +
-      'data-table, calendar). Then call `view_design_skill({name})` on the best match. ' +
+      'Return the catalogue of design-skill starter snippets — both the bundled set and any user-authored skills the host knows about. ' +
+      'Each entry has a name, a `whenToUse` hint, and a byte size. Call this once before scaffolding `index.html` ' +
+      'so you can pick a starter that matches the brief. Then call `view_design_skill({name})` on the best match. ' +
       'Skipping this means rewriting things the bundled snippets already do well.',
     parameters: ListDesignSkillsParams,
     async execute(): Promise<AgentToolResult<ListDesignSkillsDetails>> {
       const skills: DesignSkillEntry[] = [];
       for (const [name, src] of DESIGN_SKILLS) {
+        skills.push({
+          name,
+          whenToUse: parseWhenToUse(src),
+          sizeBytes: src.length,
+        });
+      }
+      for (const [name, src] of userSkills) {
         skills.push({
           name,
           whenToUse: parseWhenToUse(src),
@@ -104,22 +116,29 @@ export interface ViewDesignSkillDetails {
   source: string;
 }
 
-export function makeViewDesignSkillTool(): AgentTool<
-  typeof ViewDesignSkillParams,
-  ViewDesignSkillDetails
-> {
+export function makeViewDesignSkillTool(
+  userSkills: ReadonlyArray<UserSkillTuple> = [],
+): AgentTool<typeof ViewDesignSkillParams, ViewDesignSkillDetails> {
+  // Built-ins first so a user-authored skill that re-uses a bundled
+  // name doesn't shadow the canonical version. Collisions are unlikely
+  // (different naming conventions) but if they happen, the bundled
+  // version wins for safety.
+  const map = new Map<string, string>(DESIGN_SKILLS.map(([name, src]) => [name, src]));
+  for (const [name, src] of userSkills) {
+    if (!map.has(name)) map.set(name, src);
+  }
   return {
     name: 'view_design_skill',
     label: 'View design skill',
     description:
-      'Return the full source of one bundled design-skill snippet. Call after `list_design_skills` ' +
+      'Return the full source of one design-skill snippet (bundled or user-authored). Call after `list_design_skills` ' +
       'to load the matching starter. Adapt the snippet to the brief — never paste it verbatim, but ' +
       'use it as the starting structure for your `text_editor.create("index.html", ...)` call.',
     parameters: ViewDesignSkillParams,
     async execute(_id, params): Promise<AgentToolResult<ViewDesignSkillDetails>> {
-      const source = SKILL_MAP.get(params.name);
+      const source = map.get(params.name);
       if (source === undefined) {
-        const valid = Array.from(SKILL_MAP.keys()).join(', ');
+        const valid = Array.from(map.keys()).join(', ');
         throw new Error(`Unknown design skill "${params.name}". Available: ${valid}`);
       }
       return {

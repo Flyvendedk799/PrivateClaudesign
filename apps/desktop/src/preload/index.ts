@@ -24,6 +24,7 @@ import type {
   SelectedElement,
   SnapshotCreateInput,
   SupportedOnboardingProvider,
+  UserSkill,
   WireApi,
 } from '@open-codesign/shared';
 import { contextBridge, ipcRenderer } from 'electron';
@@ -588,6 +589,39 @@ const api = {
         ids,
         snapshotId,
       }) as Promise<CommentRow[]>,
+  },
+  // backlog-2 #7 — user-authored skills (Skills hub tab)
+  skills: {
+    list: () => ipcRenderer.invoke('skills:v1:list') as Promise<UserSkill[]>,
+    get: (id: string) =>
+      ipcRenderer.invoke('skills:v1:get', { schemaVersion: 1, id }) as Promise<UserSkill | null>,
+    create: (input: {
+      name: string;
+      whenToUse: string;
+      source: string;
+      sourceDesignId?: string | null;
+      sourceSnapshotId?: string | null;
+      sourceRect?: { top: number; left: number; width: number; height: number } | null;
+    }) =>
+      ipcRenderer.invoke('skills:v1:create', { schemaVersion: 1, ...input }) as Promise<UserSkill>,
+    update: (id: string, patch: { name?: string; whenToUse?: string; source?: string }) =>
+      ipcRenderer.invoke('skills:v1:update', {
+        schemaVersion: 1,
+        id,
+        patch,
+      }) as Promise<UserSkill>,
+    delete: (id: string) =>
+      ipcRenderer.invoke('skills:v1:delete', { schemaVersion: 1, id }) as Promise<void>,
+    extractFromDesign: (input: {
+      designId: string;
+      snapshotId: string;
+      rect: { top: number; left: number; width: number; height: number };
+      userPrompt: string;
+    }) =>
+      ipcRenderer.invoke('skills:v1:extract-from-design', {
+        schemaVersion: 1,
+        ...input,
+      }) as Promise<UserSkill>,
   },
   diagnostics: {
     log: (entry: {

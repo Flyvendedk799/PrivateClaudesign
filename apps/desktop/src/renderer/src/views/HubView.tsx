@@ -3,6 +3,7 @@ import { useCodesignStore } from '../store';
 import { DesignSystemsTab } from './hub/DesignSystemsTab';
 import { ExamplesTab } from './hub/ExamplesTab';
 import { RecentTab } from './hub/RecentTab';
+import { SkillsTab } from './hub/SkillsTab';
 import { YourDesignsTab } from './hub/YourDesignsTab';
 
 export interface HubViewProps {
@@ -43,6 +44,11 @@ export function HubView({ onUseExamplePrompt }: HubViewProps = {}) {
           {mounted.has('designSystems') ? (
             <div hidden={hubTab !== 'designSystems'}>
               <DesignSystemsTab />
+            </div>
+          ) : null}
+          {mounted.has('skills') ? (
+            <div hidden={hubTab !== 'skills'}>
+              <SkillsTab />
             </div>
           ) : null}
         </div>

@@ -192,3 +192,64 @@ export interface SnapshotCreateInput {
   artifactSource: string;
   message?: string;
 }
+
+// ---------------------------------------------------------------------------
+// User-authored skills (backlog-2 #7) — the "Skills hub tab" output of the
+// in-app authoring flow. Persisted alongside the built-in DESIGN_SKILLS so
+// the agent can `view_design_skill` either kind on the next generation.
+// ---------------------------------------------------------------------------
+
+export const UserSkillV1 = z.object({
+  schemaVersion: z.literal(1).default(1),
+  id: z.string().min(1),
+  /** Slug-form label the agent matches against. Must be a valid jsx file
+   *  stem (e.g. `mobile-tab-bar`, `lesson-row`) so it round-trips through
+   *  the existing `view_design_skill name` parameter. */
+  name: z.string().min(1).max(80),
+  /** One-sentence "when to use" hint shown in `list_design_skills`. The
+   *  agent reads this to decide whether to pull the source. */
+  whenToUse: z.string().min(1).max(500),
+  /** JSX/HTML body of the skill — already parameterised (placeholders for
+   *  copy, design tokens for colour) so it's reusable. Capped well above
+   *  the text-editor ceilings; a 50 KB skill is plenty. */
+  source: z.string().min(1).max(50_000),
+  /** Origin design id (NULL when imported from elsewhere). FK with
+   *  ON DELETE SET NULL so deleting the design doesn't cascade away the
+   *  skill. */
+  sourceDesignId: z.string().nullable(),
+  /** Origin snapshot id (NULL when imported / when the design has no
+   *  snapshots yet). */
+  sourceSnapshotId: z.string().nullable(),
+  /** Region rect captured from the source iframe at extraction time.
+   *  Reuses the existing CommentRect schema. NULL when the user authored
+   *  the skill without picking a region (e.g. typed it manually). */
+  sourceRect: CommentRect.nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type UserSkill = z.infer<typeof UserSkillV1>;
+
+export interface UserSkillCreateInput {
+  name: string;
+  whenToUse: string;
+  source: string;
+  sourceDesignId?: string | null;
+  sourceSnapshotId?: string | null;
+  sourceRect?: CommentRect | null;
+}
+
+export interface UserSkillUpdateInput {
+  name?: string;
+  whenToUse?: string;
+  source?: string;
+}
+
+export interface UserSkillExtractInput {
+  designId: string;
+  snapshotId: string;
+  rect: CommentRect;
+  /** What the user wants extracted ("a reusable mobile tab bar", "the
+   *  lesson row component", …). The extractor LLM uses it to scope the
+   *  output to the relevant subtree. */
+  userPrompt: string;
+}
