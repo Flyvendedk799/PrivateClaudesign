@@ -9,6 +9,8 @@
  * When editing a section, update BOTH the .txt file and the constant below.
  */
 
+import { SYSTEM_PROMPTS } from '@open-codesign/templates';
+
 // Section constants (keep in sync with the sibling .txt files)
 // ---------------------------------------------------------------------------
 
@@ -1115,6 +1117,13 @@ function planKeywordMatches(userPrompt: string): KeywordMatchPlan {
     // iPad / Watch / Android-frame mock. Bind to the mobile keyword so it
     // doesn't bloat the always-on prefix.
     topLevel.push(DEVICE_FRAMES_HINT);
+    // Mobile-flow scaffolding (TabBar, screen-routing, safe-area,
+    // lesson/quiz patterns) — keyword-routed via composeSystemPrompt
+    // so the agent picks it up only when the prompt actually asks for
+    // a mobile flow. Hardcoded in @open-codesign/templates so it's the
+    // same skeleton on every mobile run instead of being reinvented.
+    // See backlog-2 #6.
+    topLevel.push(SYSTEM_PROMPTS.mobileFlow);
   }
   if (KEYWORDS_MARKETING.test(userPrompt)) {
     topLevel.push(MARKETING_FONT_HINT);

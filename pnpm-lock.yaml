@@ -184,6 +184,9 @@ importers:
       '@open-codesign/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-codesign/templates':
+        specifier: workspace:*
+        version: link:../templates
       '@sinclair/typebox':
         specifier: ^0.34.49
         version: 0.34.49

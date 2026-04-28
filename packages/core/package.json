@@ -18,6 +18,7 @@
     "@open-codesign/artifacts": "workspace:*",
     "@open-codesign/providers": "workspace:*",
     "@open-codesign/shared": "workspace:*",
+    "@open-codesign/templates": "workspace:*",
     "@sinclair/typebox": "^0.34.49"
   },
   "devDependencies": {
