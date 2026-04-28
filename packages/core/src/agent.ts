@@ -74,6 +74,7 @@ import {
 import { makeListFilesTool } from './tools/list-files.js';
 import { makeReadDesignSystemTool } from './tools/read-design-system.js';
 import { makeReadUrlTool } from './tools/read-url.js';
+import { type RenderPreviewer, makeRenderPreviewTool } from './tools/render-preview.js';
 import { makeSetTodosTool } from './tools/set-todos.js';
 import { type TextEditorFsCallbacks, makeTextEditorTool } from './tools/text-editor.js';
 
@@ -791,6 +792,12 @@ export interface GenerateViaAgentDeps {
    * poster/background asset is worth generating.
    */
   generateImageAsset?: GenerateImageAssetFn | undefined;
+  /**
+   * Optional host-injected screenshot renderer. When provided, the default
+   * toolset adds `render_preview` so the agent can self-verify mobile flows
+   * before calling `done`. See backlog-2 #5.
+   */
+  renderPreview?: RenderPreviewer | undefined;
 }
 
 /**
@@ -882,6 +889,17 @@ export async function generateViaAgent(
     defaultTools.push(
       makeDeclareTweakSchemaTool(deps.fs) as unknown as AgentTool<TSchema, unknown>,
     );
+    if (deps.renderPreview !== undefined) {
+      // Self-verification screenshot tool. Only registered when the host
+      // can actually render (Electron BrowserWindow); vitest / headless
+      // CI runs simply omit it. See backlog-2 #5.
+      defaultTools.push(
+        makeRenderPreviewTool(deps.fs, deps.renderPreview) as unknown as AgentTool<
+          TSchema,
+          unknown
+        >,
+      );
+    }
     defaultTools.push(
       makeDoneTool(deps.fs, deps.runtimeVerify, log) as unknown as AgentTool<TSchema, unknown>,
     );

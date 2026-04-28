@@ -76,6 +76,7 @@ import { readPersisted as readPreferences, registerPreferencesIpc } from './pref
 import { preparePromptContext } from './prompt-context';
 import { createProviderContextStore } from './provider-context';
 import { resolveActiveModel } from './provider-settings';
+import { makeRenderPreviewer } from './render-preview';
 import { cleanupStaleTmps } from './reported-fingerprints';
 import { resolveActiveApiKey, resolveApiKeyWithKeylessFallback } from './resolve-api-key';
 import { withRun } from './runContext';
@@ -633,6 +634,7 @@ function registerIpcHandlers(db: Database | null): void {
     const baseCtx = { designId: designId ?? '', generationId: id } as const;
     const toolStartedAt = new Map<string, number>();
     const runtimeVerify = makeRuntimeVerifier();
+    const renderPreview = makeRenderPreviewer();
     const { fs, fsMap } = createRuntimeTextEditorFs({
       db,
       designId,
@@ -707,6 +709,7 @@ function registerIpcHandlers(db: Database | null): void {
     return generateViaAgent(input, {
       fs,
       runtimeVerify,
+      renderPreview,
       ...(generateImageAsset !== undefined ? { generateImageAsset } : {}),
       onEvent: (event: AgentEvent) => {
         // High-signal only. Skip per-token deltas and inner message_*

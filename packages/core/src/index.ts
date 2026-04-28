@@ -62,6 +62,14 @@ export {
   type DoneError,
   type DoneRuntimeVerifier,
 } from './tools/done.js';
+export {
+  makeRenderPreviewTool,
+  type RenderPreviewer,
+  type RenderPreviewerInput,
+  type RenderPreviewerOutput,
+  type RenderPreviewDetails,
+  type RenderPreviewViewport,
+} from './tools/render-preview.js';
 
 export interface AttachmentContext {
   name: string;
