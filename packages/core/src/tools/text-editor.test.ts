@@ -123,8 +123,8 @@ describe('text-editor str_replace miss handling', () => {
 describe('text-editor per-call size guards', () => {
   it('throws on text_editor.create when file_text exceeds the skeleton cap', async () => {
     const tool = makeTextEditorTool(makeFs());
-    // 8193 bytes — one byte over the 8 KB cap.
-    const huge = 'x'.repeat(8193);
+    // 24577 bytes — one byte over the 24 KB cap.
+    const huge = 'x'.repeat(24577);
     const msg = await runAndCatch(() =>
       tool.execute('id-create-too-big', {
         command: 'create',
@@ -132,9 +132,21 @@ describe('text-editor per-call size guards', () => {
         file_text: huge,
       }),
     );
-    expect(msg).toMatch(/exceeds the 8192-byte cap/);
+    expect(msg).toMatch(/exceeds the 24576-byte cap/);
     expect(msg).toMatch(/SKELETON tool/);
     expect(msg).toMatch(/str_replace/);
+  });
+
+  it('lets a 20 KB JSX skeleton through create (regression: backlog-2 #1 ceiling raise)', async () => {
+    const tool = makeTextEditorTool(makeFs());
+    // 20 KB — would have failed under the old 8 KB cap; passes the new 24 KB cap.
+    const skeleton = `<!doctype html>\n<html>\n<body>\n<div id="root"></div>\n<script type="text/babel">\n${'function Tab() { return <div>tab</div>; }\n'.repeat(420)}</script>\n</body>\n</html>`;
+    const res = await tool.execute('id-jsx-skeleton', {
+      command: 'create',
+      path: 'index.html',
+      file_text: skeleton,
+    });
+    expect((res.content[0] as { text: string }).text).toMatch(/Created index\.html/);
   });
 
   it('lets sidecar files (.css / .js) through with the relaxed 64KB create cap', async () => {
@@ -178,7 +190,7 @@ describe('text-editor per-call size guards', () => {
   it('throws on str_replace when new_str exceeds the per-edit cap', async () => {
     const fs = makeFs({ 'index.html': '<App/>' });
     const tool = makeTextEditorTool(fs);
-    const huge = 'y'.repeat(12289); // 12289 = 12 KB + 1
+    const huge = 'y'.repeat(24577); // 24577 = 24 KB + 1
     const msg = await runAndCatch(() =>
       tool.execute('id-replace-too-big', {
         command: 'str_replace',
@@ -187,15 +199,15 @@ describe('text-editor per-call size guards', () => {
         new_str: huge,
       }),
     );
-    expect(msg).toMatch(/exceeds the 12288-byte cap/);
+    expect(msg).toMatch(/exceeds the 24576-byte cap/);
     expect(msg).toMatch(/Split this into 2-3/);
   });
 
-  it('lets sidecar files through with the relaxed 32KB str_replace cap', async () => {
+  it('lets sidecar files through with the relaxed 48KB str_replace cap', async () => {
     const fs = makeFs({ 'mindspace.js': '// engine v1' });
     const tool = makeTextEditorTool(fs);
-    // 30 KB replacement — over the 12 KB index cap, under the 32 KB sidecar cap.
-    const big = `// engine v2\n${'window.thing();\n'.repeat(1900)}`;
+    // 40 KB replacement — over the 24 KB index cap, under the 48 KB sidecar cap.
+    const big = `// engine v2\n${'window.thing();\n'.repeat(2500)}`;
     const res = await tool.execute('id-js-ok', {
       command: 'str_replace',
       path: 'mindspace.js',
@@ -203,6 +215,35 @@ describe('text-editor per-call size guards', () => {
       new_str: big,
     });
     expect((res.content[0] as { text: string }).text).toMatch(/Edited mindspace\.js/);
+  });
+
+  it('throws on insert when new_str exceeds the per-extension cap (backlog-2 #1 insert symmetry)', async () => {
+    const fs = makeFs({ 'index.html': '<App/>' });
+    const tool = makeTextEditorTool(fs);
+    const huge = 'z'.repeat(24577);
+    const msg = await runAndCatch(() =>
+      tool.execute('id-insert-too-big', {
+        command: 'insert',
+        path: 'index.html',
+        insert_line: 1,
+        new_str: huge,
+      }),
+    );
+    expect(msg).toMatch(/text_editor\.insert/);
+    expect(msg).toMatch(/exceeds the 24576-byte cap/);
+  });
+
+  it('lets a typical insert through under the cap', async () => {
+    const fs = makeFs({ 'index.html': '<App/>' });
+    const tool = makeTextEditorTool(fs);
+    const text = `<section>${'<p>x</p>'.repeat(50)}</section>`;
+    const res = await tool.execute('id-insert-ok', {
+      command: 'insert',
+      path: 'index.html',
+      insert_line: 1,
+      new_str: text,
+    });
+    expect((res.content[0] as { text: string }).text).toMatch(/Inserted at index\.html:1/);
   });
 
   it('lets a typical section-sized str_replace through', async () => {

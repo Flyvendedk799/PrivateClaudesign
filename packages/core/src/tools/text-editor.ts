@@ -76,10 +76,17 @@ function ok(text: string, details: TextEditorDetails): AgentToolResult<TextEdito
  * Thresholds remain generous for legit one-shot writes; only the "write
  * everything in one tool call" anti-pattern trips them.
  */
-const MAX_CREATE_BYTES_INDEX = 8192;
-const MAX_STR_REPLACE_NEW_BYTES_INDEX = 12288;
+// Per-write byte ceilings. The 2026-04-27 mobile e-learning trace
+// (backlog-2 §3) hit the old 8 KB / 12 KB caps and chunked a single
+// 5-screen JSX skeleton into ~6 sliced str_replace calls, each preceded
+// by a redundant context `view`. Bumping to 24 KB lets a one-shot
+// skeleton land in one call without losing the "no monolithic dumps"
+// signal — a 24 KB JSX module is still well under the per-turn output
+// budget but covers the realistic upper bound of a complete mobile flow.
+const MAX_CREATE_BYTES_INDEX = 24576;
+const MAX_STR_REPLACE_NEW_BYTES_INDEX = 24576;
 const MAX_CREATE_BYTES_SIDECAR = 65536;
-const MAX_STR_REPLACE_NEW_BYTES_SIDECAR = 32768;
+const MAX_STR_REPLACE_NEW_BYTES_SIDECAR = 49152;
 
 /** Sidecar files (CSS / JS / JSON) get the relaxed cap. The `index.html`
  *  and any other `.html` file stays on the tighter cap so the JSX-pattern
@@ -102,6 +109,15 @@ function maxStrReplaceBytesFor(path: string): number {
   return isSidecarFile(path) ? MAX_STR_REPLACE_NEW_BYTES_SIDECAR : MAX_STR_REPLACE_NEW_BYTES_INDEX;
 }
 
+/** insert mirrors create semantics — it adds NEW content to a file —
+ *  so the same per-extension cap as create makes the size guarantees
+ *  symmetric across the four commands. Without a cap, an oversized
+ *  insert would slip through where an equivalent create/str_replace
+ *  would block (backlog-2 §3 noted this as an inconsistency). */
+function maxInsertBytesFor(path: string): number {
+  return maxCreateBytesFor(path);
+}
+
 function throwOversizedCreate(path: string, byteLen: number, cap: number): never {
   const isSidecar = isSidecarFile(path);
   const guidance = isSidecar
@@ -119,6 +135,16 @@ function throwOversizedStrReplace(path: string, byteLen: number, cap: number): n
     : `${MAX_STR_REPLACE_NEW_BYTES_INDEX} bytes is a generous per-edit ceiling for index.html. Split this into 2-3 smaller \`str_replace\` calls across separate turns, one section at a time.`;
   throw new Error(
     `text_editor.str_replace on "${path}" was called with new_str=${byteLen} bytes, which exceeds the ${cap}-byte cap for this file type. A typical section is 1-3 KB. ${guidance}`,
+  );
+}
+
+function throwOversizedInsert(path: string, byteLen: number, cap: number): never {
+  const isSidecar = isSidecarFile(path);
+  const guidance = isSidecar
+    ? `Sidecar files (.css, .js, .json) accept up to ${MAX_CREATE_BYTES_SIDECAR} bytes per insert. Split bigger inserts into smaller chunks.`
+    : `${MAX_CREATE_BYTES_INDEX} bytes is the per-write ceiling for index.html. Split bigger inserts into smaller chunks anchored at sequential lines.`;
+  throw new Error(
+    `text_editor.insert on "${path}" was called with new_str=${byteLen} bytes, which exceeds the ${cap}-byte cap for this file type. ${guidance}`,
   );
 }
 
@@ -284,6 +310,9 @@ export function makeTextEditorTool(
         case 'insert': {
           const line = params.insert_line ?? 0;
           const text = params.new_str ?? '';
+          const insertBytes = Buffer.byteLength(text, 'utf8');
+          const insertCap = maxInsertBytesFor(path);
+          if (insertBytes > insertCap) throwOversizedInsert(path, insertBytes, insertCap);
           const result = await fs.insert(path, line, text);
           return ok(`Inserted at ${result.path}:${line}`, { command: 'insert', path, result });
         }
