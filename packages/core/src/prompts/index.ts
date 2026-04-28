@@ -372,6 +372,25 @@ Dark does not mean monotone. A dark design that is one near-black plus one accen
 - Hover states: subtle, not dramatic. \`opacity: 0.85\` or \`translateY(-2px)\` — not scale + shadow + color simultaneously.
 - Page-level animation: \`@keyframes\` fade-in on \`<main>\` at 150ms is enough. No scroll-triggered choreography.
 
+## Touch targets
+
+Mobile artifacts (any output that targets the iphone or android frame, or declares a viewport ≤ 480 px wide) MUST meet platform minimums:
+
+- Tap target ≥ 44 × 44 px (iOS HIG, also covers Android M3 minimum 48 dp). Lesson rows, list items, tab-bar tabs, and inline buttons all count.
+- Min 8 px gap between adjacent tappable targets to prevent accidental hits.
+- Body input ≥ 16 px font-size on iOS Safari (anything smaller triggers the unwanted auto-zoom-on-focus behavior).
+- Active / pressed state visible — \`opacity: 0.7\` or a 1 px inset shadow is enough; absence of any feedback reads as a non-interactive element.
+
+Desktop artifacts may go smaller, but never below 32 × 32 px for primary CTAs.
+
+## Iconography
+
+When an icon set is already in scope (lucide-react, Heroicons, Phosphor, system SF Symbols), all icon slots use that set. **Decorative emoji are content, not chrome — never substitute an emoji for an icon.** Mixing 🚀 / 🎓 / 📊 with a clean line-icon set is the single biggest "AI tell" in a generated artifact.
+
+- A tab-bar icon, a card affordance, an achievement badge, a status indicator → use the icon set.
+- An emoji is acceptable only when it IS the content (a reaction picker, a language-flag list, a celebration moment in copy).
+- If the brief doesn't pull in an icon library, draw inline SVG icons at uniform stroke weight matching the design's overall weight.
+
 ## Texture and depth
 
 - Grain overlay: a \`0.03\` opacity SVG noise filter or CSS \`url()\` feTurbulence adds tactile quality to flat surfaces. Use on hero backgrounds, not everywhere.
@@ -844,13 +863,14 @@ const ANTI_SLOP_DIGEST = `# Anti-slop digest (forbidden patterns)
 - Footer with three columns of nav links plus a social icon row.
 - "Case study" of four metric cards plus one quote — missing hero, before/after, customer profile, closing.
 - Logo as a soft-rounded square with one random letter centered. Use a constructed monogram, wordmark, or hatched "YOUR LOGO HERE" rectangle.
-- Decorative emoji as section icons (unless brief asks).
+- Decorative emoji as section icons. **When an icon set is in scope (lucide / Heroicons / Phosphor / SF Symbols), all icon slots use that set — never substitute 🚀 / 🎓 / 📊 / 🔥 / etc.**
 - Default Tailwind blue (\`#3b82f6\`) or default Tailwind grays as the entire neutral scale.
 - Lorem ipsum, "John Doe", "Acme Corp", "100%" / "1,234" round-number filler.
 - Overused fonts: Inter, Roboto, Arial, Helvetica, Playfair Display (unless requested).
 - Hotlinked photos from any external host (\`placeholder.com\`, \`unsplash.com\`, \`picsum.photos\`, \`randomuser.me\`).
 - Center-aligned body paragraphs.
-- Pure black (\`#000\`) for text — use near-black with a slight hue cast.`;
+- Pure black (\`#000\`) for text — use near-black with a slight hue cast.
+- Mobile artifacts with sub-44 px touch targets, no 8 px gap between tappable elements, or sub-16 px form input fonts (triggers iOS auto-zoom).`;
 
 const DEVICE_FRAMES_HINT = `# Device frames (optional starter templates)
 
