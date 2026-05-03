@@ -29,6 +29,8 @@ export const ERROR_CODES = {
   PROVIDER_GATEWAY_INCOMPATIBLE: 'PROVIDER_GATEWAY_INCOMPATIBLE',
   PROVIDER_ABORTED: 'PROVIDER_ABORTED',
   PROVIDER_RETRY_EXHAUSTED: 'PROVIDER_RETRY_EXHAUSTED',
+  PROVIDER_OVERLOADED: 'PROVIDER_OVERLOADED',
+  PROVIDER_RATE_LIMITED: 'PROVIDER_RATE_LIMITED',
   CLAUDE_CODE_OAUTH_ONLY: 'CLAUDE_CODE_OAUTH_ONLY',
   CODEX_TOKEN_PARSE_FAILED: 'CODEX_TOKEN_PARSE_FAILED',
   CODEX_TOKEN_NOT_LOGGED_IN: 'CODEX_TOKEN_NOT_LOGGED_IN',
@@ -89,6 +91,13 @@ export const ERROR_CODES = {
   EXPORTER_PPTX_FAILED: 'EXPORTER_PPTX_FAILED',
   EXPORTER_ZIP_UNSAFE_PATH: 'EXPORTER_ZIP_UNSAFE_PATH',
   EXPORTER_ZIP_FAILED: 'EXPORTER_ZIP_FAILED',
+  /** gameplan §A7 — invalid input to a game-mode exporter (empty file
+   *  list, unsupported engine, missing entry point). */
+  EXPORTER_INPUT_INVALID: 'EXPORTER_INPUT_INVALID',
+  /** gameplan §A7 — invalid format-for-artifact pairing (e.g. PDF on a
+   *  game artifact). Surface a clear message instead of silently failing
+   *  the export. */
+  EXPORTER_FORMAT_REJECTED: 'EXPORTER_FORMAT_REJECTED',
 
   // Misc / shell
   OPEN_PATH_FAILED: 'OPEN_PATH_FAILED',
@@ -186,6 +195,18 @@ export const ERROR_CODE_DESCRIPTIONS: Record<CodesignErrorCode, ErrorCodeDescrip
   PROVIDER_RETRY_EXHAUSTED: {
     userFacing: 'The provider failed after several retries. Check your connection and try again.',
     userFacingKey: 'err.PROVIDER_RETRY_EXHAUSTED',
+    category: 'connection',
+  },
+  PROVIDER_OVERLOADED: {
+    userFacing:
+      'The provider is currently overloaded. We retried automatically — please try again in a moment.',
+    userFacingKey: 'err.PROVIDER_OVERLOADED',
+    category: 'connection',
+  },
+  PROVIDER_RATE_LIMITED: {
+    userFacing:
+      'The provider is rate-limiting your account. Wait a moment, then try again — or check your plan limits.',
+    userFacingKey: 'err.PROVIDER_RATE_LIMITED',
     category: 'connection',
   },
   CLAUDE_CODE_OAUTH_ONLY: {
@@ -399,6 +420,16 @@ export const ERROR_CODE_DESCRIPTIONS: Record<CodesignErrorCode, ErrorCodeDescrip
   EXPORTER_PPTX_FAILED: {
     userFacing: 'PowerPoint export failed.',
     userFacingKey: 'err.EXPORTER_PPTX_FAILED',
+    category: 'other',
+  },
+  EXPORTER_INPUT_INVALID: {
+    userFacing: 'The export input is missing required content.',
+    userFacingKey: 'err.EXPORTER_INPUT_INVALID',
+    category: 'other',
+  },
+  EXPORTER_FORMAT_REJECTED: {
+    userFacing: 'That export format is not supported for this artifact.',
+    userFacingKey: 'err.EXPORTER_FORMAT_REJECTED',
     category: 'other',
   },
   EXPORTER_ZIP_UNSAFE_PATH: {

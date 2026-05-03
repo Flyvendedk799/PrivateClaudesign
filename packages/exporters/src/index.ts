@@ -9,8 +9,26 @@
 
 import { CodesignError, ERROR_CODES } from '@open-codesign/shared';
 
-export const EXPORTER_FORMATS = ['html', 'pdf', 'pptx', 'zip', 'markdown'] as const;
+export const EXPORTER_FORMATS = [
+  'html',
+  'pdf',
+  'pptx',
+  'zip',
+  'markdown',
+  // gameplan §A7 — game-mode exporters. Take a different input shape
+  // (multi-file bundle), so they bypass `exportArtifact` and have their
+  // own `exportGameArtifact` entry point below.
+  'game-html',
+  'game-zip',
+] as const;
 export type ExporterFormat = (typeof EXPORTER_FORMATS)[number];
+
+/** Format groups by intended artifact type. The renderer's export menu
+ *  uses these to hide non-applicable formats (e.g. PDF on a game). */
+export const DESIGN_EXPORTER_FORMATS = ['html', 'pdf', 'pptx', 'zip', 'markdown'] as const;
+export const GAME_EXPORTER_FORMATS = ['game-html', 'game-zip', 'markdown'] as const;
+export type DesignExporterFormat = (typeof DESIGN_EXPORTER_FORMATS)[number];
+export type GameExporterFormat = (typeof GAME_EXPORTER_FORMATS)[number];
 
 export interface ExportOptions {
   artifactId: string;
@@ -31,6 +49,8 @@ export type { ExportPdfOptions } from './pdf';
 export type { ExportPptxOptions } from './pptx';
 export type { ExportZipOptions, ZipAsset } from './zip';
 export type { ExportMarkdownOptions, MarkdownMeta } from './markdown';
+export type { ExportGameZipOptions } from './game-zip';
+export type { ExportGameHtmlOptions } from './game-html';
 export { htmlToMarkdown } from './markdown';
 
 export async function exportHtml(
@@ -83,8 +103,75 @@ export async function exportArtifact(
     const mod = await import('./markdown');
     return mod.exportMarkdown(htmlContent, destinationPath);
   }
+  if (format === 'game-html' || format === 'game-zip') {
+    throw new CodesignError(
+      `Format "${format}" is a game-mode exporter — call exportGameArtifact() with the multi-file bundle instead of exportArtifact() with one HTML string.`,
+      ERROR_CODES.EXPORTER_FORMAT_REJECTED,
+    );
+  }
   throw new CodesignError(
     `Unknown exporter format: ${format as string}`,
+    ERROR_CODES.EXPORTER_UNKNOWN,
+  );
+}
+
+/** gameplan §A7 — game-mode export entry point. Takes the design's full
+ *  multi-file bundle (read from `design_files` rows by the host) and
+ *  dispatches to game-html (single offline file) or game-zip (directory
+ *  archive). 'markdown' is allowed too — produces a README of the game's
+ *  controls + mechanics from the agent's `done` summary. */
+export async function exportGameArtifact(
+  format: GameExporterFormat,
+  destinationPath: string,
+  opts: {
+    files: import('./zip').ZipAsset[];
+    designName?: string;
+    engine?: 'three' | 'phaser' | 'pygame' | 'godot';
+    engineVersion?: string;
+    /** Required for game-html (engine bundle inlining target). Ignored
+     *  for game-zip / markdown. */
+    htmlForMarkdown?: string;
+  },
+): Promise<ExportResult> {
+  if (format === 'game-zip') {
+    const mod = await import('./game-zip');
+    const zipOpts: import('./game-zip').ExportGameZipOptions = { files: opts.files };
+    if (opts.designName !== undefined) zipOpts.designName = opts.designName;
+    if (opts.engine !== undefined) zipOpts.engine = opts.engine;
+    if (opts.engineVersion !== undefined) zipOpts.engineVersion = opts.engineVersion;
+    return mod.exportGameZip(destinationPath, zipOpts);
+  }
+  if (format === 'game-html') {
+    if (opts.engine !== 'three' && opts.engine !== 'phaser') {
+      throw new CodesignError(
+        `game-html is browser-engine-only (Three.js / Phaser). For ${opts.engine ?? 'this engine'}, use game-zip / game-py / game-godot-project.`,
+        ERROR_CODES.EXPORTER_FORMAT_REJECTED,
+      );
+    }
+    const mod = await import('./game-html');
+    return mod.exportGameHtml(destinationPath, {
+      files: opts.files,
+      engine: opts.engine,
+      ...(opts.engineVersion !== undefined ? { engineVersion: opts.engineVersion } : {}),
+    });
+  }
+  if (format === 'markdown') {
+    const mod = await import('./markdown');
+    // For game-mode markdown export we use the index.html (or any HTML the
+    // bundle carries) as the source. Falls back to a stub if no HTML is
+    // present so the call doesn't throw.
+    const indexEntry = opts.files.find((f) => f.path === 'index.html');
+    const html =
+      opts.htmlForMarkdown ??
+      (indexEntry !== undefined
+        ? typeof indexEntry.content === 'string'
+          ? indexEntry.content
+          : indexEntry.content.toString('utf8')
+        : `<html><body><h1>${opts.designName ?? 'Game'}</h1></body></html>`);
+    return mod.exportMarkdown(html, destinationPath);
+  }
+  throw new CodesignError(
+    `Unknown game exporter format: ${format as string}`,
     ERROR_CODES.EXPORTER_UNKNOWN,
   );
 }
