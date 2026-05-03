@@ -173,6 +173,10 @@ interface PreviewSlotProps {
   srcUrl?: string;
   active: boolean;
   viewport: 'mobile' | 'tablet' | 'desktop';
+  /** A6.x — when set, the iframe renders inside a max-aspect frame
+   *  instead of the device-form-factor wrappers. Game designs use this
+   *  exclusively. */
+  gameAspect?: '16:9' | '4:3' | '1:1' | '9:16';
   zoom: number;
   showCommentUi: boolean;
   commentHintLabel: string;
@@ -182,6 +186,17 @@ interface PreviewSlotProps {
   onIframeError: (message: string) => void;
   onIframeLoaded: (designId: string) => void;
 }
+
+/** A6.x — width / height the preview wrapper uses for each aspect.
+ *  Larger axis is 1280 (16:9) / 1024 (4:3) / 800 (1:1) / 540 (9:16) so
+ *  most desktops show the full frame without scrolling. The iframe
+ *  scales to its container so these are upper bounds, not fixed sizes. */
+const GAME_ASPECT_DIMS = {
+  '16:9': { w: 1280, h: 720 },
+  '4:3': { w: 1024, h: 768 },
+  '1:1': { w: 800, h: 800 },
+  '9:16': { w: 540, h: 960 },
+} as const;
 
 // One iframe per pool entry. Hidden (display:none) when not active, but kept
 // in the DOM so its document — already parsed HTML, executed scripts, laid
@@ -194,6 +209,7 @@ function PreviewSlot({
   srcUrl,
   active,
   viewport,
+  gameAspect,
   zoom,
   showCommentUi,
   commentHintLabel,
@@ -263,7 +279,26 @@ function PreviewSlot({
     );
 
   let body: React.ReactNode;
-  if (isMobile) {
+  if (gameAspect !== undefined) {
+    const dims = GAME_ASPECT_DIMS[gameAspect];
+    body = (
+      <div className="h-full w-full p-6 flex items-center justify-center overflow-auto bg-[var(--color-background)]">
+        <div
+          className="relative bg-black shadow-[var(--shadow-elevated)]"
+          style={{
+            width: '100%',
+            height: '100%',
+            maxWidth: `${dims.w}px`,
+            maxHeight: `${dims.h}px`,
+            aspectRatio: `${dims.w} / ${dims.h}`,
+          }}
+        >
+          {iframe}
+          {active ? pinOverlay : null}
+        </div>
+      </div>
+    );
+  } else if (isMobile) {
     body = (
       <div className="min-h-full p-6 flex flex-col items-center justify-center overflow-auto">
         <div className="relative inline-flex">
@@ -376,6 +411,7 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
   const currentDesignId = useCodesignStore((s) => s.currentDesignId);
   const currentDesignEngine = useCodesignStore((s) => s.currentDesignEngine);
   const godotPreviewByDesign = useCodesignStore((s) => s.godotPreviewByDesign);
+  const gameAspect = useCodesignStore((s) => s.gameAspect);
   const designs = useCodesignStore((s) => s.designs);
   const chatMessages = useCodesignStore((s) => s.chatMessages);
   const canvasTabs = useCodesignStore((s) => s.canvasTabs);
@@ -653,6 +689,7 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
             srcUrl={resolveGameSrc(entry.id, currentDesignEngine, godotPreviewByDesign)}
             active={entry.id === currentDesignId}
             viewport={previewViewport}
+            {...(currentDesignEngine !== null ? { gameAspect } : {})}
             zoom={previewZoom}
             showCommentUi={showCommentUi}
             commentHintLabel={t('preview.commentModeHint')}

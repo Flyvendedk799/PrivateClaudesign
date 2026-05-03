@@ -125,6 +125,24 @@ export type InteractionMode = 'default' | 'comment' | 'skill-extract';
 
 export type PreviewViewport = 'desktop' | 'tablet' | 'mobile';
 
+/** A6.x — game-mode preview aspect presets. Swap in for the
+ *  desktop/tablet/mobile triplet on game-mode designs since device
+ *  form factors don't map cleanly to game canvases. The renderer
+ *  applies these as max-width / max-height constraints on the
+ *  iframe wrapper. */
+export type GameAspect = '16:9' | '4:3' | '1:1' | '9:16';
+
+/** Pixel dimensions used to size the preview wrapper for each aspect.
+ *  Width is always the larger axis except for 9:16 (portrait). The
+ *  iframe scales to its parent so these are upper bounds, not fixed
+ *  viewports. */
+export const GAME_ASPECT_DIMS: Record<GameAspect, { width: number; height: number }> = {
+  '16:9': { width: 1280, height: 720 },
+  '4:3': { width: 1024, height: 768 },
+  '1:1': { width: 800, height: 800 },
+  '9:16': { width: 540, height: 960 },
+};
+
 // Workstream G — canvas tabs.
 // 'files' is the pinned tab that hosts the file list + inline preview; 'file'
 // tabs wrap a single file preview opened by double-clicking the list. Closing
@@ -344,6 +362,8 @@ interface CodesignState {
   settingsTab: SettingsTab | null;
   hubTab: HubTab;
   previewViewport: PreviewViewport;
+  /** A6.x — selected aspect for game-mode previews. Defaults to 16:9. */
+  gameAspect: GameAspect;
   toasts: Toast[];
   iframeErrors: string[];
 
@@ -549,6 +569,7 @@ interface CodesignState {
   clearSettingsTab: () => void;
   setHubTab: (tab: HubTab) => void;
   setPreviewViewport: (viewport: PreviewViewport) => void;
+  setGameAspect: (aspect: GameAspect) => void;
 
   loadDesigns: () => Promise<void>;
   ensureCurrentDesign: () => Promise<void>;
@@ -1647,6 +1668,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   settingsTab: null as SettingsTab | null,
   hubTab: 'recent' as HubTab,
   previewViewport: 'desktop' as PreviewViewport,
+  gameAspect: '16:9' as GameAspect,
   toasts: [],
   iframeErrors: [],
 
@@ -2508,6 +2530,9 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     set({ hubTab: tab });
   },
 
+  setGameAspect(aspect) {
+    set({ gameAspect: aspect });
+  },
   setPreviewViewport(viewport) {
     set({ previewViewport: viewport });
   },

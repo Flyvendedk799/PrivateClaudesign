@@ -12,8 +12,10 @@ import {
 } from 'lucide-react';
 import { type ReactElement, useEffect, useRef, useState } from 'react';
 import type { ExportFormat } from '../../../preload/index';
-import type { PreviewViewport } from '../store';
+import type { GameAspect, PreviewViewport } from '../store';
 import { useCodesignStore } from '../store';
+
+const GAME_ASPECT_OPTIONS: GameAspect[] = ['16:9', '4:3', '1:1', '9:16'];
 
 const VIEWPORT_OPTIONS: Array<{
   value: PreviewViewport;
@@ -56,6 +58,9 @@ export function PreviewToolbar(): ReactElement {
     currentDesignId ? (s.godotPreviewByDesign[currentDesignId] ?? 'project') : 'project',
   );
   const buildGodotWebPreview = useCodesignStore((s) => s.buildGodotWebPreview);
+  const gameAspect = useCodesignStore((s) => s.gameAspect);
+  const setGameAspect = useCodesignStore((s) => s.setGameAspect);
+  const isGameMode = currentDesignEngine !== null;
   const [refreshSpinning, setRefreshSpinning] = useState(false);
   const [open, setOpen] = useState(false);
   const [zoomOpen, setZoomOpen] = useState(false);
@@ -149,33 +154,64 @@ export function PreviewToolbar(): ReactElement {
         />
       </button>
 
-      <div
-        role="group"
-        aria-label={t('preview.viewport.label')}
-        className="inline-flex items-center"
-      >
-        {VIEWPORT_OPTIONS.map(({ value, Icon, label }) => {
-          const isActive = previewViewport === value;
-          return (
-            <button
-              key={value}
-              type="button"
-              disabled={disabled}
-              aria-pressed={isActive}
-              aria-label={t(label)}
-              title={t(label)}
-              onClick={() => setPreviewViewport(value)}
-              className={`inline-flex items-center justify-center w-[28px] h-[26px] transition-[background-color,color,transform] duration-[var(--duration-faster)] active:scale-[var(--scale-press-down)] disabled:opacity-40 disabled:pointer-events-none ${
-                isActive
-                  ? 'text-[var(--color-accent)]'
-                  : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]'
-              }`}
-            >
-              <Icon className="w-3.5 h-3.5" aria-hidden="true" />
-            </button>
-          );
-        })}
-      </div>
+      {isGameMode ? (
+        <div
+          role="group"
+          aria-label={t('preview.aspect.label', { defaultValue: 'Aspect ratio' })}
+          className="inline-flex items-center"
+        >
+          {GAME_ASPECT_OPTIONS.map((value) => {
+            const isActive = gameAspect === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                disabled={disabled}
+                aria-pressed={isActive}
+                aria-label={value}
+                title={value}
+                onClick={() => setGameAspect(value)}
+                className={`inline-flex items-center justify-center px-[8px] h-[26px] text-[11px] tabular-nums transition-[background-color,color,transform] duration-[var(--duration-faster)] active:scale-[var(--scale-press-down)] disabled:opacity-40 disabled:pointer-events-none ${
+                  isActive
+                    ? 'text-[var(--color-accent)]'
+                    : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]'
+                }`}
+                style={{ fontFamily: 'var(--font-mono)' }}
+              >
+                {value}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div
+          role="group"
+          aria-label={t('preview.viewport.label')}
+          className="inline-flex items-center"
+        >
+          {VIEWPORT_OPTIONS.map(({ value, Icon, label }) => {
+            const isActive = previewViewport === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                disabled={disabled}
+                aria-pressed={isActive}
+                aria-label={t(label)}
+                title={t(label)}
+                onClick={() => setPreviewViewport(value)}
+                className={`inline-flex items-center justify-center w-[28px] h-[26px] transition-[background-color,color,transform] duration-[var(--duration-faster)] active:scale-[var(--scale-press-down)] disabled:opacity-40 disabled:pointer-events-none ${
+                  isActive
+                    ? 'text-[var(--color-accent)]'
+                    : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       <button
         type="button"
