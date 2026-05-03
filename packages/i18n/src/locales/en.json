@@ -1277,6 +1277,10 @@
     "EXPORTER_PPTX_FAILED": "PowerPoint export failed.",
     "EXPORTER_ZIP_UNSAFE_PATH": "Export was blocked: an asset path would escape the ZIP archive.",
     "EXPORTER_ZIP_FAILED": "ZIP export failed.",
+    "EXPORTER_INPUT_INVALID": "The export input is missing required content.",
+    "EXPORTER_FORMAT_REJECTED": "That export format is not supported for this artifact.",
+    "PROVIDER_OVERLOADED": "The provider is currently overloaded. We retried automatically — please try again in a moment.",
+    "PROVIDER_RATE_LIMITED": "The provider is rate-limiting your account. Wait a moment, then try again — or check your plan limits.",
     "OPEN_PATH_FAILED": "Could not open the requested folder or file.",
     "RENDERER_ERROR": "An error occurred in the renderer. Details are in the log."
   }

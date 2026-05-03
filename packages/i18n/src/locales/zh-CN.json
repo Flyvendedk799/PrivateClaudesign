@@ -1262,6 +1262,10 @@
     "EXPORTER_PPTX_FAILED": "PowerPoint 导出失败。",
     "EXPORTER_ZIP_UNSAFE_PATH": "导出被阻止：有资源路径会越出 ZIP 包边界。",
     "EXPORTER_ZIP_FAILED": "ZIP 导出失败。",
+    "EXPORTER_INPUT_INVALID": "导出输入缺少必要内容。",
+    "EXPORTER_FORMAT_REJECTED": "此构件不支持该导出格式。",
+    "PROVIDER_OVERLOADED": "提供方目前过载。已自动重试 — 请稍后再试。",
+    "PROVIDER_RATE_LIMITED": "提供方正在限制您的账户速率。请稍候再试 — 或检查您的套餐限额。",
     "OPEN_PATH_FAILED": "无法打开目标文件夹或文件。",
     "RENDERER_ERROR": "渲染进程出现错误，详情见日志。"
   }
