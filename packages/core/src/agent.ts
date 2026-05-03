@@ -78,6 +78,7 @@ import {
   makeViewFrameTool,
 } from './tools/design-library.js';
 import { type DoneRuntimeVerifier, makeDoneTool, makeVerifyArtifactTool } from './tools/done.js';
+import { makeGenerateAudioAssetTool } from './tools/generate-audio-asset.js';
 import {
   type GenerateImageAssetFn,
   makeGenerateImageAssetTool,
@@ -984,6 +985,15 @@ export async function generateViaAgent(
           getCurrentEngine: deps.gameMode.getCurrentEngine,
           validate: deps.gameMode.validate,
         }) as unknown as AgentTool<TSchema, unknown>,
+      );
+    }
+    // gameplan §E1 — generate_audio_asset only registers in game mode.
+    // The bundled audio bank is keyword-routed retrieval; no provider
+    // call needed. Lives behind isGameMode so design-mode prompts don't
+    // see a tool that would never apply to them.
+    if (isGameMode) {
+      defaultTools.push(
+        makeGenerateAudioAssetTool(deps.fs, log) as unknown as AgentTool<TSchema, unknown>,
       );
     }
   }
