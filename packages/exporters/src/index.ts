@@ -21,6 +21,8 @@ export const EXPORTER_FORMATS = [
   'game-html',
   'game-zip',
   'game-godot-project',
+  'game-py',
+  'game-pyodide-html',
 ] as const;
 export type ExporterFormat = (typeof EXPORTER_FORMATS)[number];
 
@@ -31,6 +33,8 @@ export const GAME_EXPORTER_FORMATS = [
   'game-html',
   'game-zip',
   'game-godot-project',
+  'game-py',
+  'game-pyodide-html',
   'markdown',
 ] as const;
 export type DesignExporterFormat = (typeof DESIGN_EXPORTER_FORMATS)[number];
@@ -58,6 +62,8 @@ export type { ExportMarkdownOptions, MarkdownMeta } from './markdown';
 export type { ExportGameZipOptions } from './game-zip';
 export type { ExportGameHtmlOptions } from './game-html';
 export type { ExportGameGodotProjectOptions } from './game-godot-project';
+export type { ExportGamePyOptions } from './game-py';
+export type { ExportGamePyodideHtmlOptions } from './game-pyodide-html';
 export { htmlToMarkdown } from './markdown';
 
 export async function exportHtml(
@@ -110,7 +116,13 @@ export async function exportArtifact(
     const mod = await import('./markdown');
     return mod.exportMarkdown(htmlContent, destinationPath);
   }
-  if (format === 'game-html' || format === 'game-zip' || format === 'game-godot-project') {
+  if (
+    format === 'game-html' ||
+    format === 'game-zip' ||
+    format === 'game-godot-project' ||
+    format === 'game-py' ||
+    format === 'game-pyodide-html'
+  ) {
     throw new CodesignError(
       `Format "${format}" is a game-mode exporter — call exportGameArtifact() with the multi-file bundle instead of exportArtifact() with one HTML string.`,
       ERROR_CODES.EXPORTER_FORMAT_REJECTED,
@@ -176,6 +188,34 @@ export async function exportGameArtifact(
     if (opts.designName !== undefined) godotOpts.designName = opts.designName;
     if (opts.engineVersion !== undefined) godotOpts.engineVersion = opts.engineVersion;
     return mod.exportGameGodotProject(destinationPath, godotOpts);
+  }
+  if (format === 'game-py') {
+    if (opts.engine !== 'pygame' && opts.engine !== undefined) {
+      throw new CodesignError(
+        `game-py requires engine='pygame' (got "${opts.engine}"). Use game-html / game-zip for the JS engines, game-godot-project for godot.`,
+        ERROR_CODES.EXPORTER_FORMAT_REJECTED,
+      );
+    }
+    const mod = await import('./game-py');
+    const pyOpts: import('./game-py').ExportGamePyOptions = { files: opts.files };
+    if (opts.designName !== undefined) pyOpts.designName = opts.designName;
+    if (opts.engineVersion !== undefined) pyOpts.engineVersion = opts.engineVersion;
+    return mod.exportGamePy(destinationPath, pyOpts);
+  }
+  if (format === 'game-pyodide-html') {
+    if (opts.engine !== 'pygame' && opts.engine !== undefined) {
+      throw new CodesignError(
+        `game-pyodide-html requires engine='pygame' (got "${opts.engine}"). Use game-html for the JS engines, game-godot-project for godot.`,
+        ERROR_CODES.EXPORTER_FORMAT_REJECTED,
+      );
+    }
+    const mod = await import('./game-pyodide-html');
+    const phOpts: import('./game-pyodide-html').ExportGamePyodideHtmlOptions = {
+      files: opts.files,
+    };
+    if (opts.designName !== undefined) phOpts.designName = opts.designName;
+    if (opts.engineVersion !== undefined) phOpts.engineVersion = opts.engineVersion;
+    return mod.exportGamePyodideHtml(destinationPath, phOpts);
   }
   if (format === 'markdown') {
     const mod = await import('./markdown');
