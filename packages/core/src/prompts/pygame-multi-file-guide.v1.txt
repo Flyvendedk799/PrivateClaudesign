@@ -1,0 +1,107 @@
+## Pygame multi-file project guide
+
+Pygame projects can ship as a single `main.py` for jam-scale games (≤ 200 LOC, one mechanic, one screen). Beyond that, split — the validator and per-extension byte caps assume a real package layout.
+
+## Recommended layout
+
+```
+main.py                # entry — pygame.init, async main loop, scene dispatch
+entities/
+  __init__.py          # empty file — required for the import system
+  player.py
+  enemy.py
+  projectile.py
+scenes/
+  __init__.py
+  play.py              # the active mechanic
+  gameover.py          # restart screen
+systems/
+  __init__.py
+  audio.py             # Sound wrapper + autoplay-policy unlock
+  input.py             # uniform keyboard / mouse polling
+assets/
+  sprites/
+  audio/
+  fonts/               # TTF if needed
+requirements.txt       # pygame-ce==2.5.5
+README.md              # how to run locally (venv + pip)
+```
+
+## Per-extension byte caps (gameplan §4 / Q5)
+
+`text_editor.create` enforces these for game-mode files:
+
+- `.py` → 16 KB. Past that, split by responsibility — one file per entity / system / scene controller. Pull shared helpers into `systems/_shared.py`.
+
+If you hit the cap, the right move is structural: more modules. Not compression.
+
+## `__init__.py` is required
+
+Every directory under the project root that contains importable modules MUST have an empty `__init__.py`. Without it, Pyodide's importer treats the directory as a namespace and `from entities.player import Player` fails at runtime.
+
+```python
+# entities/__init__.py — empty file is fine
+```
+
+## Asset paths
+
+Pyodide mounts the project tree at `/home/pyodide` and chdir's there before running `main.py`. Use **relative** paths from the project root:
+
+```python
+img = pygame.image.load("assets/sprites/player.png").convert_alpha()
+```
+
+Don't use absolute paths (`/home/pyodide/...`). Don't use `__file__`-relative paths (Pyodide's `__file__` works but is brittle). Relative-from-cwd is canonical.
+
+## Module imports
+
+```python
+# main.py
+from entities.player import Player
+from scenes.play import PlayScene
+from systems.audio import AudioBank
+```
+
+Pyodide's import system mirrors CPython's — relative imports, package-style imports, and standard-library imports all work. Third-party imports (other than `pygame` / `pygame_ce`) are limited to packages Pyodide ships natively (no `pip install` at runtime).
+
+## requirements.txt
+
+For the downloadable-zip exporter (`game-py`), include a `requirements.txt` so users can `pip install -r requirements.txt` locally:
+
+```
+pygame-ce==2.5.5
+```
+
+ONE pinned line. Don't add any other deps unless the brief explicitly requires them — the in-app preview only ships pygame-ce, and a deeper pip install on local machines fights with venv conventions.
+
+## README.md (recommended)
+
+For project-download exports, ship a README that names the venv + pip path:
+
+```markdown
+# <Game name>
+
+## Run locally
+\`\`\`bash
+python3 -m venv .venv
+source .venv/bin/activate    # macOS / Linux
+# .venv\\Scripts\\activate     # Windows PowerShell
+pip install -r requirements.txt
+python main.py
+\`\`\`
+
+## Controls
+- Arrow keys: move
+- Space: jump / fire
+- Esc: quit
+```
+
+The exporter generates a basic README when one isn't authored, but a model-authored one is more useful (knows the actual controls).
+
+## Forbidden
+
+- Absolute paths (`/Users/...`, `C:\\...`).
+- Authoring `__pycache__/` files (regenerated automatically).
+- `os.system(...)`, `subprocess.run(...)` — Pyodide can't actually shell out.
+- Filenames with spaces or hyphens (Python module names disallow both).
+- Top-level `await` in modules other than `main.py` — Pyodide's `runPythonAsync` only awaits the entry script's body.

@@ -1,0 +1,128 @@
+## Pygame engine guide (pinned to pygame-ce 2.5.5 on Pyodide 0.26.4)
+
+Pygame runs **inside the iframe** via Pyodide. The starter `index.html` (provided by the engine, NOT authored by you) loads Pyodide + `pygame-ce==2.5.5` from `cdn.jsdelivr.net`, mounts the project files into Pyodide's MEMFS at `/home/pyodide`, and executes `main.py`. Your job is to write `main.py` (and any helper modules) — NOT to author the Pyodide bootstrap.
+
+The first preview run downloads ~13 MB (Pyodide + pygame-ce). Show empathy: keep the first useful frame visible within ~1 s of `pygame.display.flip()`. Subsequent runs hit the browser cache and load in <1 s.
+
+## Required `main.py` skeleton (asyncio-aware)
+
+Pyodide runs Python on the browser's main thread. A traditional `while True:` blocking loop **freezes the page** until the loop exits. Always yield to the JS event loop with `await asyncio.sleep(0)`:
+
+```python
+import asyncio
+import pygame
+
+async def main():
+    pygame.init()
+    screen = pygame.display.set_mode((800, 600))
+    pygame.display.set_caption("Game")
+    clock = pygame.time.Clock()
+    running = True
+
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+        # update + draw here
+
+        screen.fill((11, 11, 14))
+        # blit sprites, draw shapes, etc.
+        pygame.display.flip()
+        clock.tick(60)
+        await asyncio.sleep(0)  # YIELD to the JS event loop — required on Pyodide
+
+    pygame.quit()
+
+asyncio.ensure_future(main())
+```
+
+The synchronous-loop pattern (`while running: ...` without `await`) DOES work on desktop Python but hangs the browser on Pyodide. The validator does not catch this — discipline matters here.
+
+## Asset loading
+
+Mounted at `/home/pyodide/<your-path>`. Reference assets relative to the project root:
+
+```python
+player_img = pygame.image.load("assets/sprites/player.png").convert_alpha()
+jump_sfx = pygame.mixer.Sound("assets/audio/jump.wav")
+```
+
+Always `convert_alpha()` for PNGs with transparency, `convert()` for opaque images. Skipping the conversion costs ~3× per-blit cost.
+
+## Audio (Pyodide gotchas)
+
+`pygame.mixer.Sound` works for one-shot SFX and short loops:
+
+```python
+pygame.mixer.init()
+hit = pygame.mixer.Sound("assets/audio/hit.wav")
+hit.set_volume(0.4)
+hit.play()
+```
+
+`pygame.mixer.music` (streaming long-form music) is **unsupported** on Pyodide. The validator rejects `pygame.mixer.music.load(...)` calls. If the brief calls for music, load it as a `Sound` instead and accept that the whole file is decoded into memory upfront.
+
+The browser's autoplay policy gates audio until first user input. Respect `window.__game.config.startMuted`:
+
+```python
+import js  # Pyodide bridge — exposes the host's window/document
+muted = bool(getattr(js.window.__game.config, "startMuted", False))
+if not muted:
+    hit.play()
+```
+
+## Input
+
+Keyboard:
+```python
+keys = pygame.key.get_pressed()
+if keys[pygame.K_LEFT]:
+    player.x -= speed * dt
+```
+
+Or the event-driven version:
+```python
+for event in pygame.event.get():
+    if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+        player.jump()
+```
+
+Mouse:
+```python
+mx, my = pygame.mouse.get_pos()
+buttons = pygame.mouse.get_pressed()
+```
+
+## Tweak parameters via window.__game.params
+
+The host exposes live tweak knobs via `window.__game.params`. Read them through Pyodide's `js` bridge:
+
+```python
+import js
+def get_param(name, default):
+    try:
+        return getattr(js.window.__game.params, name)
+    except Exception:
+        return default
+
+speed = get_param("player_speed", 200)
+```
+
+Declare the schema via `declare_tweak_schema` with `kind: 'param'` so the host's TweakPanel renders sliders that postMessage updates.
+
+## Performance
+
+- 60 fps target. `clock.tick(60)` caps it on slow machines.
+- `convert_alpha()` / `convert()` every loaded surface ONCE at load time.
+- Group sprites with `pygame.sprite.Group` and call `.draw(screen)` instead of per-sprite `.blit`.
+- Don't allocate Vector2 / new Rect per frame — pool them in `__init__`.
+
+## Forbidden
+
+- `import requests` / `import urllib3` / `import aiohttp` / `import httpx` — the iframe sandbox blocks network and Pyodide loading these adds megabytes for nothing.
+- `pygame.mixer.music.load(...)` — unsupported on Pyodide. Use `Sound`.
+- Synchronous `while True:` loops without `await asyncio.sleep(0)` — freezes the page.
+- Authoring `index.html` — the engine's bootstrap provides it. Author `main.py` and modules only.
+- `time.sleep(...)` for animation — use `pygame.time.Clock.tick(60)` (same wall-clock effect, but yields to the engine).
+- `os` / `subprocess` / `shutil` calls — Pyodide ships them but they hit a virtual FS only; don't pretend you can spawn anything.

@@ -13,17 +13,19 @@
 
 import { godotAdapter } from './godot';
 import { phaserAdapter } from './phaser';
+import { pygameAdapter } from './pygame';
 import { threeAdapter } from './three';
 import type { GameEngineAdapter, GameEngineId } from './types';
 
 export type { GameEngineAdapter, GameEngineId, ValidationIssue, ValidationResult } from './types';
 
 /** Adapters registered for the current ship. Phase A: three + phaser.
- *  Phase B (this commit): + godot. Phase C: + pygame. */
+ *  Phase B: + godot. Phase C (this commit): + pygame. */
 export const GAME_ENGINE_ADAPTERS: ReadonlyMap<GameEngineId, GameEngineAdapter> = new Map([
   ['three', threeAdapter],
   ['phaser', phaserAdapter],
   ['godot', godotAdapter],
+  ['pygame', pygameAdapter],
 ] as Array<[GameEngineId, GameEngineAdapter]>);
 
 /** Look up the adapter for an engine id, or `null` when the engine is

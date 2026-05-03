@@ -1882,6 +1882,76 @@ describe('Godot engine guide composition (gameplan §B1)', () => {
   });
 });
 
+describe('Pygame engine guide composition (gameplan §C1)', () => {
+  it('includes the Pygame guide when engine = "pygame"', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'pygame',
+    });
+    expect(prompt).toContain('Pygame engine guide (pinned to pygame-ce 2.5.5');
+    expect(prompt).not.toContain('Three.js engine guide');
+    expect(prompt).not.toContain('Phaser engine guide');
+    expect(prompt).not.toContain('Godot engine guide');
+  });
+
+  it('layers the Pygame multi-file guide alongside the generic one', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'pygame',
+    });
+    expect(prompt).toContain('Game multi-file authoring guide');
+    expect(prompt).toContain('Pygame multi-file project guide');
+  });
+
+  it('does NOT layer the Pygame multi-file guide on three/phaser/godot runs', () => {
+    for (const engine of ['three', 'phaser', 'godot'] as const) {
+      const prompt = composeSystemPrompt({ mode: 'create', artifactType: 'game', engine });
+      expect(prompt).not.toContain('Pygame multi-file project guide');
+    }
+  });
+
+  it('explicitly tells the agent NOT to author index.html (engine bootstrap provides it)', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'pygame',
+    });
+    expect(prompt).toContain('NOT to author the Pyodide bootstrap');
+    expect(prompt).toContain('Authoring `index.html`');
+  });
+
+  it('flags pygame.mixer.music as Pyodide-incompatible', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'pygame',
+    });
+    expect(prompt).toContain('pygame.mixer.music');
+    expect(prompt).toContain('unsupported');
+  });
+
+  it('mandates the asyncio.sleep(0) yield pattern', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'pygame',
+    });
+    expect(prompt).toContain('asyncio.sleep(0)');
+    expect(prompt).toContain('YIELD to the JS event loop');
+  });
+
+  it('mentions __init__.py requirement for multi-file projects', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'pygame',
+    });
+    expect(prompt).toContain('__init__.py');
+  });
+});
+
 describe('reasoningForModel', () => {
   it('returns undefined for Claude 4 under anthropic provider (adaptive default)', () => {
     expect(

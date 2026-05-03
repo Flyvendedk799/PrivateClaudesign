@@ -1715,6 +1715,248 @@ Godot 4.4 added deterministic UID files (\`script.gd.uid\`) alongside scripts. W
 - Splitting one 50-line script into 5 files for the sake of "cleanliness."
 - Committing \`.godot/\`, \`.import/cache/\`, \`*.tmp\` (export \`.gitignore\` handles this).`;
 
+// gameplan §C1 — Pygame prompts. composeGame routes to PYGAME_ENGINE_GUIDE
+// when engine === 'pygame'. The pygame multi-file guide layers alongside
+// the cross-engine guide because Python package-import rules + asyncio
+// patterns differ enough from JS / Godot to warrant their own treatment.
+
+const PYGAME_ENGINE_GUIDE = `## Pygame engine guide (pinned to pygame-ce 2.5.5 on Pyodide 0.26.4)
+
+Pygame runs **inside the iframe** via Pyodide. The starter \`index.html\` (provided by the engine, NOT authored by you) loads Pyodide + \`pygame-ce==2.5.5\` from \`cdn.jsdelivr.net\`, mounts the project files into Pyodide's MEMFS at \`/home/pyodide\`, and executes \`main.py\`. Your job is to write \`main.py\` (and any helper modules) — NOT to author the Pyodide bootstrap.
+
+The first preview run downloads ~13 MB (Pyodide + pygame-ce). Show empathy: keep the first useful frame visible within ~1 s of \`pygame.display.flip()\`. Subsequent runs hit the browser cache and load in <1 s.
+
+## Required \`main.py\` skeleton (asyncio-aware)
+
+Pyodide runs Python on the browser's main thread. A traditional \`while True:\` blocking loop **freezes the page** until the loop exits. Always yield to the JS event loop with \`await asyncio.sleep(0)\`:
+
+\`\`\`python
+import asyncio
+import pygame
+
+async def main():
+    pygame.init()
+    screen = pygame.display.set_mode((800, 600))
+    pygame.display.set_caption("Game")
+    clock = pygame.time.Clock()
+    running = True
+
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+        # update + draw here
+
+        screen.fill((11, 11, 14))
+        # blit sprites, draw shapes, etc.
+        pygame.display.flip()
+        clock.tick(60)
+        await asyncio.sleep(0)  # YIELD to the JS event loop — required on Pyodide
+
+    pygame.quit()
+
+asyncio.ensure_future(main())
+\`\`\`
+
+The synchronous-loop pattern (\`while running: ...\` without \`await\`) DOES work on desktop Python but hangs the browser on Pyodide. The validator does not catch this — discipline matters here.
+
+## Asset loading
+
+Mounted at \`/home/pyodide/<your-path>\`. Reference assets relative to the project root:
+
+\`\`\`python
+player_img = pygame.image.load("assets/sprites/player.png").convert_alpha()
+jump_sfx = pygame.mixer.Sound("assets/audio/jump.wav")
+\`\`\`
+
+Always \`convert_alpha()\` for PNGs with transparency, \`convert()\` for opaque images. Skipping the conversion costs ~3× per-blit cost.
+
+## Audio (Pyodide gotchas)
+
+\`pygame.mixer.Sound\` works for one-shot SFX and short loops:
+
+\`\`\`python
+pygame.mixer.init()
+hit = pygame.mixer.Sound("assets/audio/hit.wav")
+hit.set_volume(0.4)
+hit.play()
+\`\`\`
+
+\`pygame.mixer.music\` (streaming long-form music) is **unsupported** on Pyodide. The validator rejects \`pygame.mixer.music.load(...)\` calls. If the brief calls for music, load it as a \`Sound\` instead and accept that the whole file is decoded into memory upfront.
+
+The browser's autoplay policy gates audio until first user input. Respect \`window.__game.config.startMuted\`:
+
+\`\`\`python
+import js  # Pyodide bridge — exposes the host's window/document
+muted = bool(getattr(js.window.__game.config, "startMuted", False))
+if not muted:
+    hit.play()
+\`\`\`
+
+## Input
+
+Keyboard:
+\`\`\`python
+keys = pygame.key.get_pressed()
+if keys[pygame.K_LEFT]:
+    player.x -= speed * dt
+\`\`\`
+
+Or the event-driven version:
+\`\`\`python
+for event in pygame.event.get():
+    if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+        player.jump()
+\`\`\`
+
+Mouse:
+\`\`\`python
+mx, my = pygame.mouse.get_pos()
+buttons = pygame.mouse.get_pressed()
+\`\`\`
+
+## Tweak parameters via window.__game.params
+
+The host exposes live tweak knobs via \`window.__game.params\`. Read them through Pyodide's \`js\` bridge:
+
+\`\`\`python
+import js
+def get_param(name, default):
+    try:
+        return getattr(js.window.__game.params, name)
+    except Exception:
+        return default
+
+speed = get_param("player_speed", 200)
+\`\`\`
+
+Declare the schema via \`declare_tweak_schema\` with \`kind: 'param'\` so the host's TweakPanel renders sliders that postMessage updates.
+
+## Performance
+
+- 60 fps target. \`clock.tick(60)\` caps it on slow machines.
+- \`convert_alpha()\` / \`convert()\` every loaded surface ONCE at load time.
+- Group sprites with \`pygame.sprite.Group\` and call \`.draw(screen)\` instead of per-sprite \`.blit\`.
+- Don't allocate Vector2 / new Rect per frame — pool them in \`__init__\`.
+
+## Forbidden
+
+- \`import requests\` / \`import urllib3\` / \`import aiohttp\` / \`import httpx\` — the iframe sandbox blocks network and Pyodide loading these adds megabytes for nothing.
+- \`pygame.mixer.music.load(...)\` — unsupported on Pyodide. Use \`Sound\`.
+- Synchronous \`while True:\` loops without \`await asyncio.sleep(0)\` — freezes the page.
+- Authoring \`index.html\` — the engine's bootstrap provides it. Author \`main.py\` and modules only.
+- \`time.sleep(...)\` for animation — use \`pygame.time.Clock.tick(60)\` (same wall-clock effect, but yields to the engine).
+- \`os\` / \`subprocess\` / \`shutil\` calls — Pyodide ships them but they hit a virtual FS only; don't pretend you can spawn anything.`;
+
+const PYGAME_MULTI_FILE_GUIDE = `## Pygame multi-file project guide
+
+Pygame projects can ship as a single \`main.py\` for jam-scale games (≤ 200 LOC, one mechanic, one screen). Beyond that, split — the validator and per-extension byte caps assume a real package layout.
+
+## Recommended layout
+
+\`\`\`
+main.py                # entry — pygame.init, async main loop, scene dispatch
+entities/
+  __init__.py          # empty file — required for the import system
+  player.py
+  enemy.py
+  projectile.py
+scenes/
+  __init__.py
+  play.py              # the active mechanic
+  gameover.py          # restart screen
+systems/
+  __init__.py
+  audio.py             # Sound wrapper + autoplay-policy unlock
+  input.py             # uniform keyboard / mouse polling
+assets/
+  sprites/
+  audio/
+  fonts/               # TTF if needed
+requirements.txt       # pygame-ce==2.5.5
+README.md              # how to run locally (venv + pip)
+\`\`\`
+
+## Per-extension byte caps (gameplan §4 / Q5)
+
+\`text_editor.create\` enforces these for game-mode files:
+
+- \`.py\` → 16 KB. Past that, split by responsibility — one file per entity / system / scene controller. Pull shared helpers into \`systems/_shared.py\`.
+
+If you hit the cap, the right move is structural: more modules. Not compression.
+
+## \`__init__.py\` is required
+
+Every directory under the project root that contains importable modules MUST have an empty \`__init__.py\`. Without it, Pyodide's importer treats the directory as a namespace and \`from entities.player import Player\` fails at runtime.
+
+\`\`\`python
+# entities/__init__.py — empty file is fine
+\`\`\`
+
+## Asset paths
+
+Pyodide mounts the project tree at \`/home/pyodide\` and chdir's there before running \`main.py\`. Use **relative** paths from the project root:
+
+\`\`\`python
+img = pygame.image.load("assets/sprites/player.png").convert_alpha()
+\`\`\`
+
+Don't use absolute paths (\`/home/pyodide/...\`). Don't use \`__file__\`-relative paths (Pyodide's \`__file__\` works but is brittle). Relative-from-cwd is canonical.
+
+## Module imports
+
+\`\`\`python
+# main.py
+from entities.player import Player
+from scenes.play import PlayScene
+from systems.audio import AudioBank
+\`\`\`
+
+Pyodide's import system mirrors CPython's — relative imports, package-style imports, and standard-library imports all work. Third-party imports (other than \`pygame\` / \`pygame_ce\`) are limited to packages Pyodide ships natively (no \`pip install\` at runtime).
+
+## requirements.txt
+
+For the downloadable-zip exporter (\`game-py\`), include a \`requirements.txt\` so users can \`pip install -r requirements.txt\` locally:
+
+\`\`\`
+pygame-ce==2.5.5
+\`\`\`
+
+ONE pinned line. Don't add any other deps unless the brief explicitly requires them — the in-app preview only ships pygame-ce, and a deeper pip install on local machines fights with venv conventions.
+
+## README.md (recommended)
+
+For project-download exports, ship a README that names the venv + pip path:
+
+\`\`\`markdown
+# <Game name>
+
+## Run locally
+\\\`\\\`\\\`bash
+python3 -m venv .venv
+source .venv/bin/activate    # macOS / Linux
+# .venv\\\\Scripts\\\\activate     # Windows PowerShell
+pip install -r requirements.txt
+python main.py
+\\\`\\\`\\\`
+
+## Controls
+- Arrow keys: move
+- Space: jump / fire
+- Esc: quit
+\`\`\`
+
+The exporter generates a basic README when one isn't authored, but a model-authored one is more useful (knows the actual controls).
+
+## Forbidden
+
+- Absolute paths (\`/Users/...\`, \`C:\\\\...\`).
+- Authoring \`__pycache__/\` files (regenerated automatically).
+- \`os.system(...)\`, \`subprocess.run(...)\` — Pyodide can't actually shell out.
+- Filenames with spaces or hyphens (Python module names disallow both).
+- Top-level \`await\` in modules other than \`main.py\` — Pyodide's \`runPythonAsync\` only awaits the entry script's body.`;
+
 // Split CRAFT_DIRECTIVES into a Map<subsectionName, "## name\n\nbody"> so the
 // progressive-disclosure composer can include only the subsections relevant to
 // the user's prompt. The intro paragraph (everything before the first `## `)
@@ -1774,6 +2016,9 @@ export const PROMPT_SECTIONS: Record<string, string> = {
   // gameplan §B1
   godotEngineGuide: GODOT_ENGINE_GUIDE,
   godotMultiFileGuide: GODOT_MULTI_FILE_GUIDE,
+  // gameplan §C1
+  pygameEngineGuide: PYGAME_ENGINE_GUIDE,
+  pygameMultiFileGuide: PYGAME_MULTI_FILE_GUIDE,
 };
 
 export const PROMPT_SECTION_FILES: Record<keyof typeof PROMPT_SECTIONS, string> = {
@@ -1801,6 +2046,8 @@ export const PROMPT_SECTION_FILES: Record<keyof typeof PROMPT_SECTIONS, string> 
   gameMultiFileGuide: 'game-multi-file-guide.v1.txt',
   godotEngineGuide: 'godot-engine-guide.v1.txt',
   godotMultiFileGuide: 'godot-multi-file-guide.v1.txt',
+  pygameEngineGuide: 'pygame-engine-guide.v1.txt',
+  pygameMultiFileGuide: 'pygame-multi-file-guide.v1.txt',
 };
 
 // ---------------------------------------------------------------------------
@@ -1979,14 +2226,14 @@ function composeGame(engine: PromptComposeOptions['engine']): string[] {
   if (engine === 'three') sections.push(THREE_ENGINE_GUIDE);
   else if (engine === 'phaser') sections.push(PHASER_ENGINE_GUIDE);
   else if (engine === 'godot') sections.push(GODOT_ENGINE_GUIDE);
-  // engine === 'pygame' is reserved for Phase C. Until that guide lands
-  // the prompt simply skips the engine-guide section; the agent's next
-  // choose_engine call drives the correct path.
+  else if (engine === 'pygame') sections.push(PYGAME_ENGINE_GUIDE);
 
-  // Godot's project layout differs enough from JS / Python that it gets
-  // its own multi-file guide layered alongside the generic one.
+  // Engine-specific multi-file guide layered alongside the generic one.
+  // Godot's .tscn format and Pygame's __init__.py / asyncio rules differ
+  // enough from the JS engines to warrant their own treatment.
   sections.push(GAME_MULTI_FILE_GUIDE);
   if (engine === 'godot') sections.push(GODOT_MULTI_FILE_GUIDE);
+  else if (engine === 'pygame') sections.push(PYGAME_MULTI_FILE_GUIDE);
 
   sections.push(SAFETY);
   return sections;
