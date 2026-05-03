@@ -113,6 +113,13 @@
     },
     "refresh": {
       "label": "Recarregar pré-visualização"
+    },
+    "godot": {
+      "build": "Gerar prévia web",
+      "rebuild": "Regerar",
+      "building": "Gerando…",
+      "buildOk": "Prévia web gerada",
+      "buildFailed": "Falha ao gerar prévia web"
     }
   },
   "tweaks": {

@@ -113,6 +113,13 @@
     },
     "refresh": {
       "label": "重新加载预览"
+    },
+    "godot": {
+      "build": "构建 Web 预览",
+      "rebuild": "重新构建",
+      "building": "构建中…",
+      "buildOk": "Web 预览已构建",
+      "buildFailed": "Web 预览构建失败"
     }
   },
   "tweaks": {

@@ -113,6 +113,13 @@
     },
     "refresh": {
       "label": "Reload preview"
+    },
+    "godot": {
+      "build": "Build web preview",
+      "rebuild": "Re-build",
+      "building": "Building…",
+      "buildOk": "Web preview built",
+      "buildFailed": "Web preview build failed"
     }
   },
   "tweaks": {

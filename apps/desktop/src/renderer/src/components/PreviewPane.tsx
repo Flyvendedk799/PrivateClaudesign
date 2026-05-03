@@ -14,6 +14,7 @@ import { ErrorState } from '../preview/ErrorState';
 import { useCodesignStore } from '../store';
 import { CanvasErrorBar } from './CanvasErrorBar';
 import { CanvasTabBar } from './CanvasTabBar';
+import { EditCursorOverlay } from './EditCursorOverlay';
 import { FilesTabView } from './FilesTabView';
 import { PhoneFrame } from './PhoneFrame';
 import { PreviewToolbar } from './PreviewToolbar';
@@ -138,9 +139,37 @@ export function handlePreviewMessage(
 const COMMENT_HINT_CLASS =
   'absolute left-[var(--space-5)] top-[var(--space-5)] z-10 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-[var(--space-3)] py-[var(--space-1)] text-[var(--text-xs)] text-[var(--color-text-secondary)] shadow-[var(--shadow-soft)] backdrop-blur';
 
+/** A6.x — pick the iframe src for a game-mode design. Returns null for
+ *  design-mode (PreviewSlot falls back to srcDoc). For Godot designs we
+ *  only point at game-files:// once the user has built a web preview;
+ *  before that the toolbar surfaces the build button and the iframe
+ *  shows the agent-authored source via srcDoc as a (non-runnable)
+ *  preview. Three.js / Phaser designs always use the game-files://
+ *  origin so module imports + asset lookups resolve through the
+ *  protocol handler. Pygame is deferred — needs a bootstrap-injection
+ *  IPC, tracked as a follow-up. */
+export function resolveGameSrc(
+  designId: string,
+  engine: 'three' | 'phaser' | 'pygame' | 'godot' | null,
+  godotPreviewByDesign: Record<string, 'project' | 'build'>,
+): string | undefined {
+  if (engine === 'three' || engine === 'phaser') {
+    return `game-files://designs/${designId}/index.html`;
+  }
+  if (engine === 'godot' && godotPreviewByDesign[designId] === 'build') {
+    return `game-files://designs/${designId}/_build/index.html`;
+  }
+  return undefined;
+}
+
 interface PreviewSlotProps {
   designId: string;
   html: string;
+  /** A6.x — when present, the iframe loads from this URL via src= instead
+   *  of rendering `html` via srcdoc. Used for game-mode designs whose
+   *  preview lives behind game-files://, and Godot web builds that point
+   *  at the per-design _build/ output. */
+  srcUrl?: string;
   active: boolean;
   viewport: 'mobile' | 'tablet' | 'desktop';
   zoom: number;
@@ -161,6 +190,7 @@ interface PreviewSlotProps {
 function PreviewSlot({
   designId,
   html,
+  srcUrl,
   active,
   viewport,
   zoom,
@@ -186,12 +216,18 @@ function PreviewSlot({
   const scale = zoom / 100;
   const inversePct = `${10000 / zoom}%`;
 
+  // A6.x — game-mode designs (and Godot web-builds) load via src= so the
+  // iframe document lives on a real origin (game-files://) and modules /
+  // assets resolve through the protocol handler. Falls back to srcDoc for
+  // design-mode designs and game designs without a usable URL yet (e.g. a
+  // Godot project the user hasn't built a web preview for).
+  const useSrcUrl = typeof srcUrl === 'string' && srcUrl.length > 0;
   const rawIframe = (
     <iframe
       ref={setRef}
       title={`design-preview-${designId}`}
-      sandbox="allow-scripts"
-      srcDoc={srcDoc}
+      sandbox={useSrcUrl ? 'allow-scripts allow-same-origin' : 'allow-scripts'}
+      {...(useSrcUrl ? { src: srcUrl } : { srcDoc })}
       onLoad={(e) => {
         // Once the iframe's document has actually loaded, its in-page message
         // handler is ready — this is the reliable moment to (re)post SET_MODE.
@@ -273,12 +309,72 @@ function PreviewSlot({
   );
 }
 
+/**
+ * Floating "Preview updated" pill — appears briefly over the active iframe
+ * after an agent run lands edits. Without this, a long multi-section
+ * refactor (e.g. the drone-portfolio run on 2026-04-28 added 5 sections
+ * below the hero) is invisible: the user sees the same hero/above-the-fold
+ * view and concludes nothing changed. The pill makes the change perceptible
+ * AND tells the user to scroll. Fades out after 6 s.
+ */
+function PreviewUpdatedPill() {
+  const previewUpdatedAt = useCodesignStore((s) => s.previewUpdatedAt);
+  const currentDesignId = useCodesignStore((s) => s.currentDesignId);
+  const setPreviewUpdatedAt = useCodesignStore((s) => s.setPreviewUpdatedAt);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!previewUpdatedAt || previewUpdatedAt.designId !== currentDesignId) {
+      setVisible(false);
+      return;
+    }
+    setVisible(true);
+    const id = setTimeout(() => {
+      setVisible(false);
+      // Clear the global state shortly after the fade so it doesn't re-fire
+      // on the next currentDesignId change.
+      setTimeout(() => setPreviewUpdatedAt(null), 400);
+    }, 6_000);
+    return () => clearTimeout(id);
+  }, [previewUpdatedAt, currentDesignId, setPreviewUpdatedAt]);
+  if (!previewUpdatedAt || previewUpdatedAt.designId !== currentDesignId) return null;
+  const kb = (Math.abs(previewUpdatedAt.bytesDelta) / 1024).toFixed(1);
+  const sign = previewUpdatedAt.bytesDelta >= 0 ? '+' : '−';
+  const big = Math.abs(previewUpdatedAt.bytesDelta) >= 4096; // ≥4 KB ≈ a meaningful structural rewrite
+  return (
+    <div
+      className={`pointer-events-none absolute top-[var(--space-2)] left-1/2 -translate-x-1/2 z-30 transition-all duration-300 ${
+        visible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'
+      }`}
+      aria-live="polite"
+    >
+      <div className="rounded-full border border-[var(--color-accent)]/30 bg-[var(--color-surface)] shadow-[0_4px_18px_-6px_rgba(0,0,0,0.25)] px-[var(--space-3)] py-[var(--space-1)] flex items-center gap-[var(--space-2)] text-[12px]">
+        <span className="relative inline-flex w-[8px] h-[8px]">
+          <span className="absolute inline-block w-full h-full rounded-full bg-[var(--color-accent)]" />
+          <span className="absolute inline-block w-full h-full rounded-full bg-[var(--color-accent)]/40 animate-ping" />
+        </span>
+        <span className="font-medium text-[var(--color-text-primary)]">Preview updated</span>
+        <span className="text-[var(--color-text-muted)]">
+          {sign}
+          {kb} KB
+        </span>
+        {big ? (
+          <span className="text-[var(--color-text-muted)] italic">
+            — scroll to see new sections
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
   const t = useT();
   const previewHtml = useCodesignStore((s) => s.previewHtml);
   const previewHtmlByDesign = useCodesignStore((s) => s.previewHtmlByDesign);
   const recentDesignIds = useCodesignStore((s) => s.recentDesignIds);
   const currentDesignId = useCodesignStore((s) => s.currentDesignId);
+  const currentDesignEngine = useCodesignStore((s) => s.currentDesignEngine);
+  const godotPreviewByDesign = useCodesignStore((s) => s.godotPreviewByDesign);
   const designs = useCodesignStore((s) => s.designs);
   const chatMessages = useCodesignStore((s) => s.chatMessages);
   const canvasTabs = useCodesignStore((s) => s.canvasTabs);
@@ -290,6 +386,19 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
   const selectCanvasElement = useCodesignStore((s) => s.selectCanvasElement);
   const previewViewport = useCodesignStore((s) => s.previewViewport);
   const previewZoom = useCodesignStore((s) => s.previewZoom);
+  const previewReloadTick = useCodesignStore((s) => s.previewReloadTick);
+  const previewUpdatedAt = useCodesignStore((s) => s.previewUpdatedAt);
+  // D1 — short-lived edit-flash on the active iframe wrapper. Fires the
+  // moment an agent run completes with a non-zero byte delta (same trigger
+  // as the "Preview updated" pill), then settles after 1.4 s. Adds a
+  // visceral "something just landed" cue on top of the textual pill — the
+  // user's eye catches the flash even if they weren't looking at the chat
+  // when the run completed.
+  const [editFlashKey, setEditFlashKey] = useState(0);
+  useEffect(() => {
+    if (!previewUpdatedAt) return;
+    setEditFlashKey((n) => n + 1);
+  }, [previewUpdatedAt]);
   const interactionMode = useCodesignStore((s) => s.interactionMode);
   const comments = useCodesignStore((s) => s.comments);
   const currentSnapshotId = useCodesignStore((s) => s.currentSnapshotId);
@@ -300,6 +409,7 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
   const applyLiveRects = useCodesignStore((s) => s.applyLiveRects);
   const clearLiveRects = useCodesignStore((s) => s.clearLiveRects);
   const liveRects = useCodesignStore((s) => s.liveRects);
+  const editCursor = useCodesignStore((s) => s.editCursor);
 
   // Active iframe ref consumed by TweakPanel (postMessage target) and by the
   // window.message guard. We re-point this whenever the active design changes
@@ -373,6 +483,32 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
       /* sandbox gone — retry happens next render */
     }
   }, [comments, currentSnapshotId, commentBubble, currentDesignId, iframeLoadTick]);
+
+  // Follow-the-edit cursor — push the agent's source-line range into the
+  // iframe overlay whenever the editCursor slice updates. The overlay finds
+  // the matching DOM element and broadcasts its rect under `EDIT_CURSOR_KEY`
+  // via the existing ELEMENT_RECTS pipeline. We key the effect on
+  // `editCursor.key` (bumped on every edit) so consecutive edits to the same
+  // line range still trigger a refresh.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: editCursor?.key is the intentional re-trigger; iframeRef is a ref.
+  useEffect(() => {
+    if (!editCursor) return;
+    const win = iframeRef.current?.contentWindow;
+    if (!win) return;
+    try {
+      win.postMessage(
+        {
+          __codesign: true,
+          type: 'HIGHLIGHT_SRC_LINE',
+          startLine: editCursor.startLine,
+          endLine: editCursor.endLine,
+        },
+        '*',
+      );
+    } catch {
+      /* sandbox gone — next edit posts again */
+    }
+  }, [editCursor?.key, currentDesignId, iframeLoadTick]);
 
   useEffect(() => {
     function onMessage(event: MessageEvent): void {
@@ -504,10 +640,16 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
     body = (
       <div className="relative h-full w-full">
         {poolEntries.map((entry) => (
+          // Active slot's key includes previewReloadTick so the manual
+          // refresh button (PreviewToolbar → bumpPreviewReload()) forces a
+          // genuine unmount + remount — discarding any stuck iframe state
+          // and re-parsing srcdoc fresh. Background pool slots keep their
+          // stable keys so they stay alive for instant design-switch.
           <PreviewSlot
-            key={entry.id}
+            key={entry.id === currentDesignId ? `${entry.id}::r${previewReloadTick}` : entry.id}
             designId={entry.id}
             html={entry.html}
+            srcUrl={resolveGameSrc(entry.id, currentDesignEngine, godotPreviewByDesign)}
             active={entry.id === currentDesignId}
             viewport={previewViewport}
             zoom={previewZoom}
@@ -549,6 +691,25 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
         <div className="relative flex-1 overflow-hidden">
           {body}
           {previewHtml ? <TweakPanel iframeRef={iframeRef} /> : null}
+          {/* D1 — pulsing accent ring overlay. Mounted with a fresh key on
+           * each previewUpdatedAt so React re-creates the element and the
+           * one-shot keyframe re-fires. pointer-events:none so it doesn't
+           * steal interaction from the iframe. */}
+          {editFlashKey > 0 ? (
+            <div
+              key={`edit-flash-${editFlashKey}`}
+              className="pointer-events-none absolute inset-0 z-20 rounded-[var(--radius-md)]"
+              style={{
+                animation: 'codesign-iframe-edit-flash 1.4s ease-out 1 forwards',
+              }}
+              aria-hidden
+            />
+          ) : null}
+          <PreviewUpdatedPill />
+          {/* Follow-the-edit cursor — halo + tool pill that floats over the
+           *  active iframe at the DOM element corresponding to the agent's
+           *  most recent str_replace. Renders nothing when no edit is active. */}
+          <EditCursorOverlay />
         </div>
         {commentBubble && interactionMode === 'comment'
           ? (() => {

@@ -1,5 +1,15 @@
 import { useT } from '@open-codesign/i18n';
-import { Download, MessageSquare, Monitor, Smartphone, Tablet } from 'lucide-react';
+import {
+  Download,
+  Hammer,
+  Loader2,
+  MessageSquare,
+  Monitor,
+  Play,
+  RefreshCw,
+  Smartphone,
+  Tablet,
+} from 'lucide-react';
 import { type ReactElement, useEffect, useRef, useState } from 'react';
 import type { ExportFormat } from '../../../preload/index';
 import type { PreviewViewport } from '../store';
@@ -36,6 +46,17 @@ export function PreviewToolbar(): ReactElement {
   const setPreviewZoom = useCodesignStore((s) => s.setPreviewZoom);
   const interactionMode = useCodesignStore((s) => s.interactionMode);
   const setInteractionMode = useCodesignStore((s) => s.setInteractionMode);
+  const bumpPreviewReload = useCodesignStore((s) => s.bumpPreviewReload);
+  const currentDesignId = useCodesignStore((s) => s.currentDesignId);
+  const currentDesignEngine = useCodesignStore((s) => s.currentDesignEngine);
+  const godotBuildStatus = useCodesignStore((s) =>
+    currentDesignId ? (s.godotBuildStatusByDesign[currentDesignId] ?? null) : null,
+  );
+  const godotPreview = useCodesignStore((s) =>
+    currentDesignId ? (s.godotPreviewByDesign[currentDesignId] ?? 'project') : 'project',
+  );
+  const buildGodotWebPreview = useCodesignStore((s) => s.buildGodotWebPreview);
+  const [refreshSpinning, setRefreshSpinning] = useState(false);
   const [open, setOpen] = useState(false);
   const [zoomOpen, setZoomOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -107,6 +128,26 @@ export function PreviewToolbar(): ReactElement {
           {toastMessage}
         </output>
       )}
+
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => {
+          bumpPreviewReload();
+          setRefreshSpinning(true);
+          // Match the 0.6 s CSS spin so the icon settles after one full
+          // rotation regardless of how fast the iframe reloads.
+          window.setTimeout(() => setRefreshSpinning(false), 600);
+        }}
+        aria-label={t('preview.refresh.label')}
+        title={t('preview.refresh.label')}
+        className="inline-flex items-center justify-center w-[28px] h-[26px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)] transition-[background-color,color,transform] duration-[var(--duration-faster)] active:scale-[var(--scale-press-down)] disabled:opacity-40 disabled:pointer-events-none"
+      >
+        <RefreshCw
+          className={`w-3.5 h-3.5 ${refreshSpinning ? 'codesign-spin-once' : ''}`}
+          aria-hidden="true"
+        />
+      </button>
 
       <div
         role="group"
@@ -190,6 +231,15 @@ export function PreviewToolbar(): ReactElement {
         )}
       </div>
 
+      {currentDesignEngine === 'godot' && currentDesignId !== null && (
+        <GodotBuildButton
+          designId={currentDesignId}
+          status={godotBuildStatus}
+          previewMode={godotPreview}
+          onBuild={() => void buildGodotWebPreview(currentDesignId)}
+        />
+      )}
+
       <div className="relative" ref={ref}>
         <button
           type="button"
@@ -234,5 +284,58 @@ export function PreviewToolbar(): ReactElement {
         )}
       </div>
     </div>
+  );
+}
+
+interface GodotBuildButtonProps {
+  designId: string;
+  status:
+    | { status: 'idle' }
+    | { status: 'building'; phase: string; line?: string }
+    | { status: 'failed'; reason: string; detail: string }
+    | { status: 'ok' }
+    | null;
+  previewMode: 'project' | 'build';
+  onBuild: () => void;
+}
+
+/** A6.x — Godot-only toolbar button. Shows three visual states:
+ *  - idle / failed: "Build web preview" (Hammer icon)
+ *  - building: spinner + current phase
+ *  - ok: "Re-build" with a Play icon (the iframe has already been
+ *    switched to the build output by the action that set status='ok')
+ */
+function GodotBuildButton({
+  designId: _designId,
+  status,
+  previewMode,
+  onBuild,
+}: GodotBuildButtonProps) {
+  const t = useT();
+  const isBuilding = status?.status === 'building';
+  const isOk = status?.status === 'ok' && previewMode === 'build';
+  const Icon = isBuilding ? Loader2 : isOk ? Play : Hammer;
+  const label = isBuilding
+    ? t('preview.godot.building', { defaultValue: 'Building…' })
+    : isOk
+      ? t('preview.godot.rebuild', { defaultValue: 'Re-build' })
+      : t('preview.godot.build', { defaultValue: 'Build web preview' });
+  const title = isBuilding && status.line ? status.line : label;
+  return (
+    <button
+      type="button"
+      disabled={isBuilding}
+      onClick={onBuild}
+      title={title}
+      aria-label={label}
+      className={`inline-flex items-center gap-[6px] h-[26px] px-[10px] text-[12px] transition-[background-color,color,transform] duration-[var(--duration-faster)] active:scale-[var(--scale-press-down)] disabled:opacity-60 disabled:pointer-events-none ${
+        isOk
+          ? 'text-[var(--color-success,_#4ade80)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]'
+          : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]'
+      }`}
+    >
+      <Icon className={`w-3.5 h-3.5 ${isBuilding ? 'animate-spin' : ''}`} aria-hidden="true" />
+      {label}
+    </button>
   );
 }

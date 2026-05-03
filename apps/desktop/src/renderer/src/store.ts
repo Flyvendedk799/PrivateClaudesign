@@ -309,6 +309,27 @@ interface CodesignState {
    */
   pendingArtifactMode: 'design' | 'game' | null;
   pendingGameEngine: 'three' | 'phaser' | 'pygame' | 'godot' | null;
+  /** A6.x — engine of the currently-loaded design, populated from the
+   *  latest snapshot when a design is opened (and from pendingGameEngine
+   *  when a fresh game design starts generating). null for design-mode
+   *  designs and for design-mode flows. PreviewPane uses this to switch
+   *  the iframe to game-files:// resolution; PreviewToolbar shows the
+   *  Godot "Build web preview" button when the value === 'godot'. */
+  currentDesignEngine: 'three' | 'phaser' | 'pygame' | 'godot' | null;
+  /** A6.x — per-design Godot web-preview state. Default ('project') points
+   *  the iframe at the project tree; ('build') points it at _build/index.html
+   *  after a successful `codesign:v1:godot-web-build`. Toolbar's "Build web
+   *  preview" button flips a design from 'project' to 'build'. */
+  godotPreviewByDesign: Record<string, 'project' | 'build'>;
+  /** A6.x — per-design Godot build status: 'idle' | 'building' | 'failed' |
+   *  'ok'. Toolbar uses this to render the spinner / error / success state. */
+  godotBuildStatusByDesign: Record<
+    string,
+    | { status: 'idle' }
+    | { status: 'building'; phase: string; line?: string }
+    | { status: 'failed'; reason: string; detail: string }
+    | { status: 'ok' }
+  >;
   /** Last-picked mode in the New-design dialog. Hydrated from preferences.json
    *  at boot; updated on every dialog submit. Defaults to 'design'. */
   lastPickedMode: 'design' | 'game';
@@ -540,6 +561,12 @@ interface CodesignState {
     engine: 'three' | 'phaser' | 'pygame' | 'godot' | null,
   ) => void;
   clearPendingGameSelection: () => void;
+  /** A6.x — kick off `codesign:v1:godot-web-build` for a given design,
+   *  stream progress into godotBuildStatusByDesign, flip
+   *  godotPreviewByDesign[id] to 'build' on success. Renders nothing
+   *  visible itself; the toolbar button calls this and reads the status
+   *  back to render its UI. */
+  buildGodotWebPreview: (designId: string) => Promise<void>;
   createNewDesign: (workspacePath?: string | null) => Promise<Design | null>;
   switchDesign: (id: string) => Promise<void>;
   renameCurrentDesign: (name: string) => Promise<void>;
@@ -1630,6 +1657,9 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   newDesignDialogOpen: false,
   pendingArtifactMode: null,
   pendingGameEngine: null,
+  currentDesignEngine: null,
+  godotPreviewByDesign: {},
+  godotBuildStatusByDesign: {},
   lastPickedMode: 'design',
   designToDelete: null,
   designToRename: null,
@@ -1985,6 +2015,13 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       const pendingMode = get().pendingArtifactMode;
       const pendingEngine = get().pendingGameEngine;
       get().clearPendingGameSelection();
+      // A6.x — surface the engine on the active design immediately so
+      // PreviewPane can switch to game-files:// resolution + the toolbar
+      // can render engine-specific chrome (Godot build button, future
+      // aspect presets) before the first snapshot lands. Falls back to
+      // the existing currentDesignEngine when starting a follow-up turn
+      // on an existing design (no fresh dialog selection).
+      if (pendingEngine !== null) set({ currentDesignEngine: pendingEngine });
       await runGenerate(
         get,
         set,
@@ -2623,6 +2660,9 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         commentsLoaded: false,
         commentBubble: null,
         currentSnapshotId: null,
+        // Engine state will be refreshed alongside the background snapshot
+        // pull below — clear stale state from the previous design first.
+        currentDesignEngine: null,
         canvasTabs: [FILES_TAB, { kind: 'file', path: 'index.html' }],
         activeCanvasTab: 1,
       });
@@ -2647,6 +2687,11 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
               recentDesignIds: refreshed.recent,
             });
           }
+          // Surface the engine pin from the latest snapshot so the toolbar
+          // can show the Godot-build button + the preview can switch its
+          // src= to game-files://. Setting null on design-mode snapshots is
+          // intentional: it hides game-mode chrome.
+          set({ currentDesignEngine: latest?.engine ?? null });
         } catch {
           // Background refresh failure is harmless — cached preview remains.
         }
@@ -2677,6 +2722,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         commentsLoaded: false,
         commentBubble: null,
         currentSnapshotId: null,
+        currentDesignEngine: latest?.engine ?? null,
         canvasTabs: latest ? [FILES_TAB, { kind: 'file', path: 'index.html' }] : [FILES_TAB],
         activeCanvasTab: latest ? 1 : 0,
       });
@@ -2807,6 +2853,75 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   },
   clearPendingGameSelection() {
     set({ pendingArtifactMode: null, pendingGameEngine: null });
+  },
+  async buildGodotWebPreview(designId) {
+    if (!window.codesign?.godot) return;
+    set((s) => ({
+      godotBuildStatusByDesign: {
+        ...s.godotBuildStatusByDesign,
+        [designId]: { status: 'building', phase: 'starting' },
+      },
+    }));
+    // Stream progress lines into the per-design status. Only the most
+    // recent phase is kept — the toolbar surfaces it as a one-line label
+    // so we don't need a transcript here.
+    const off = window.codesign.godot.onBuildProgress((event) => {
+      if (event.designId !== designId) return;
+      set((s) => {
+        const current = s.godotBuildStatusByDesign[designId];
+        if (current?.status !== 'building') return s;
+        const next = { ...current, phase: event.phase };
+        if ('line' in event && typeof event.line === 'string') next.line = event.line;
+        return {
+          godotBuildStatusByDesign: { ...s.godotBuildStatusByDesign, [designId]: next },
+        };
+      });
+    });
+    try {
+      const result = await window.codesign.godot.buildWebPreview(designId);
+      if (result.ok) {
+        set((s) => ({
+          godotBuildStatusByDesign: {
+            ...s.godotBuildStatusByDesign,
+            [designId]: { status: 'ok' },
+          },
+          godotPreviewByDesign: { ...s.godotPreviewByDesign, [designId]: 'build' },
+        }));
+        get().pushToast({
+          variant: 'success',
+          title: tr('preview.godot.buildOk'),
+        });
+      } else {
+        set((s) => ({
+          godotBuildStatusByDesign: {
+            ...s.godotBuildStatusByDesign,
+            [designId]: {
+              status: 'failed',
+              reason: result.reason ?? 'unknown',
+              detail: result.detail ?? '',
+            },
+          },
+        }));
+        get().pushToast({
+          variant: 'error',
+          title: tr('preview.godot.buildFailed'),
+          description: result.detail ?? result.reason ?? '',
+        });
+      }
+    } catch (err) {
+      set((s) => ({
+        godotBuildStatusByDesign: {
+          ...s.godotBuildStatusByDesign,
+          [designId]: {
+            status: 'failed',
+            reason: 'exception',
+            detail: err instanceof Error ? err.message : String(err),
+          },
+        },
+      }));
+    } finally {
+      off();
+    }
   },
   closeNewDesignDialog() {
     set({ newDesignDialogOpen: false });
