@@ -883,3 +883,125 @@ describe('FRAME_TEMPLATES — device frame starter assets', () => {
     expect(fsMap.get('frames/watch.jsx')).toMatch(/ReactDOM\.createRoot/);
   });
 });
+
+describe('chatMessageToAgentMessage — Gameimprove §1 tool transcript persistence', () => {
+  const piModel = {
+    id: 'claude-sonnet-4-6',
+    api: 'anthropic',
+    provider: 'anthropic',
+  } as unknown as Parameters<typeof import('./agent').chatMessageToAgentMessage>[2];
+
+  it('converts a plain user message into a UserMessage', async () => {
+    const { chatMessageToAgentMessage } = await import('./agent');
+    const out = chatMessageToAgentMessage(
+      { role: 'user', content: 'hello' },
+      1700000000000,
+      piModel,
+    );
+    expect(out).toEqual({ role: 'user', content: 'hello', timestamp: 1700000000000 });
+  });
+
+  it('converts a plain assistant text message into an AssistantMessage with stopReason=stop', async () => {
+    const { chatMessageToAgentMessage } = await import('./agent');
+    const out = chatMessageToAgentMessage(
+      { role: 'assistant', content: 'sure' },
+      1700000000000,
+      piModel,
+    ) as { role: string; content: unknown[]; stopReason: string };
+    expect(out.role).toBe('assistant');
+    expect(out.content).toEqual([{ type: 'text', text: 'sure' }]);
+    expect(out.stopReason).toBe('stop');
+  });
+
+  it('reconstructs an AssistantMessage with toolCall content + stopReason=toolUse when toolCalls present', async () => {
+    const { chatMessageToAgentMessage } = await import('./agent');
+    const out = chatMessageToAgentMessage(
+      {
+        role: 'assistant',
+        content: 'editing index.html',
+        toolCalls: [
+          {
+            id: 'call-1',
+            name: 'text_editor',
+            argsJson: '{"command":"str_replace","path":"index.html"}',
+          },
+        ],
+      },
+      1700000000000,
+      piModel,
+    ) as { role: string; content: Array<{ type: string }>; stopReason: string };
+    expect(out.role).toBe('assistant');
+    expect(out.stopReason).toBe('toolUse');
+    expect(out.content).toEqual([
+      { type: 'text', text: 'editing index.html' },
+      {
+        type: 'toolCall',
+        id: 'call-1',
+        name: 'text_editor',
+        arguments: { command: 'str_replace', path: 'index.html' },
+      },
+    ]);
+  });
+
+  it('emits a toolResult message for role=tool and pairs by toolCallId', async () => {
+    const { chatMessageToAgentMessage } = await import('./agent');
+    const out = chatMessageToAgentMessage(
+      {
+        role: 'tool',
+        content: '<file content>',
+        toolCallId: 'call-1',
+        toolName: 'text_editor',
+      },
+      1700000000000,
+      piModel,
+    ) as {
+      role: string;
+      toolCallId: string;
+      toolName: string;
+      content: Array<{ type: string; text: string }>;
+      isError: boolean;
+    };
+    expect(out.role).toBe('toolResult');
+    expect(out.toolCallId).toBe('call-1');
+    expect(out.toolName).toBe('text_editor');
+    expect(out.content).toEqual([{ type: 'text', text: '<file content>' }]);
+    expect(out.isError).toBe(false);
+  });
+
+  it('marks tool results as isError=true when isError flag is set', async () => {
+    const { chatMessageToAgentMessage } = await import('./agent');
+    const out = chatMessageToAgentMessage(
+      {
+        role: 'tool',
+        content: 'old_str not found',
+        toolCallId: 'call-2',
+        toolName: 'text_editor',
+        isError: true,
+      },
+      1700000000000,
+      piModel,
+    ) as { isError: boolean };
+    expect(out.isError).toBe(true);
+  });
+
+  it('handles a tool message with malformed argsJson by emitting an empty arg bag (preserves id pairing)', async () => {
+    const { chatMessageToAgentMessage } = await import('./agent');
+    const out = chatMessageToAgentMessage(
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'call-3', name: 'text_editor', argsJson: '{not json' }],
+      },
+      1700000000000,
+      piModel,
+    ) as { content: Array<Record<string, unknown>> };
+    // Empty assistant text → no leading text block, just the toolCall.
+    expect(out.content).toHaveLength(1);
+    expect(out.content[0]).toMatchObject({
+      type: 'toolCall',
+      id: 'call-3',
+      name: 'text_editor',
+      arguments: {},
+    });
+  });
+});

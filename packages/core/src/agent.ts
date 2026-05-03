@@ -1612,7 +1612,8 @@ function aggregateRunUsage(runMessages: AgentMessage[]): AggregatedUsage {
   return totals;
 }
 
-function chatMessageToAgentMessage(
+/** Exported for testing — Gameimprove §1 verifies the wire round-trip. */
+export function chatMessageToAgentMessage(
   m: ChatMessage,
   timestamp: number,
   piModel: PiModel,
@@ -1620,7 +1621,49 @@ function chatMessageToAgentMessage(
   if (m.role === 'user') {
     return { role: 'user', content: m.content, timestamp };
   }
+  if (m.role === 'tool') {
+    // Gameimprove §1 — historical tool result. pi-ai's ToolResultMessage
+    // pairs with the assistant's tool_use by toolCallId. content is an
+    // array of TextContent; we ship a single text block carrying the
+    // (already-summarised) tool output.
+    const toolResult = {
+      role: 'toolResult',
+      toolCallId: m.toolCallId ?? `historical-${timestamp}`,
+      toolName: m.toolName ?? 'unknown',
+      content: m.content.length === 0 ? [] : [{ type: 'text', text: m.content }],
+      isError: m.isError === true,
+      timestamp,
+    };
+    return toolResult as unknown as AgentMessage;
+  }
   if (m.role === 'assistant') {
+    // Gameimprove §1 — assistant message that may include tool_use blocks
+    // alongside text. pi-ai's AssistantMessage.content is an ordered
+    // array of TextContent / ThinkingContent / ToolCall, so we emit text
+    // first (when present) followed by each toolCalls[] entry as a
+    // `ToolCall` content item. This is what pi-agent-core expects so
+    // the next turn can stitch tool results back to their originating
+    // call by id.
+    const content: Array<{ type: string; [key: string]: unknown }> = [];
+    if (m.content.length > 0) content.push({ type: 'text', text: m.content });
+    if (m.toolCalls !== undefined) {
+      for (const call of m.toolCalls) {
+        let parsedArgs: Record<string, unknown> = {};
+        try {
+          parsedArgs = JSON.parse(call.argsJson) as Record<string, unknown>;
+        } catch {
+          // Malformed historical args — keep the tool_use entry but
+          // surface an empty arg bag rather than dropping the call,
+          // since a missing tool_use breaks pi-ai's id pairing.
+        }
+        content.push({
+          type: 'toolCall',
+          id: call.id,
+          name: call.name,
+          arguments: parsedArgs,
+        });
+      }
+    }
     // pi-ai types `api` and `provider` as string unions internal to the SDK.
     // Cast through `unknown` so we don't widen the call-site with `any` while
     // still returning an AgentMessage pi-agent-core accepts verbatim.
@@ -1629,7 +1672,7 @@ function chatMessageToAgentMessage(
       api: piModel.api,
       provider: piModel.provider,
       model: piModel.id,
-      content: m.content.length === 0 ? [] : [{ type: 'text', text: m.content }],
+      content,
       usage: {
         input: 0,
         output: 0,
@@ -1638,7 +1681,9 @@ function chatMessageToAgentMessage(
         totalTokens: 0,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       },
-      stopReason: 'stop' as const,
+      stopReason: (m.toolCalls && m.toolCalls.length > 0 ? 'toolUse' : 'stop') as
+        | 'toolUse'
+        | 'stop',
       timestamp,
     };
     return assistant as unknown as AgentMessage;

@@ -963,23 +963,196 @@ async function persistArtifactSnapshot(
  * only snapshot-era user prompts get backfilled. Falls back to [] when designId
  * is null or IPC is unavailable (renderer tests).
  */
+/** Last N user-prompt turns whose tool transcript we ship verbatim.
+ *  Older turns get summarised. The agent only needs full-fidelity for
+ *  the immediate context — earlier rounds collapse to one assistant
+ *  text + a one-line tool count summary. */
+const FULL_TRANSCRIPT_TURN_COUNT = 2;
+
+/** Total tool-history payload byte cap. ~120 KB ≈ 30 K tokens — well
+ *  inside Anthropic's safe-cache window without dominating the prompt
+ *  budget. When exceeded we drop the oldest tool transcript first. */
+const TOOL_TRANSCRIPT_BYTE_BUDGET = 120 * 1024;
+
+interface ToolCallPayload {
+  toolCallId?: string;
+  toolName?: string;
+  args?: Record<string, unknown>;
+  result?: unknown;
+  status?: 'done' | 'error';
+}
+
+interface ToolResultSummary {
+  text: string;
+  isError: boolean;
+}
+
+/** Stringify the tool result into a compact text block the agent sees
+ *  on the next turn. Truncates very long bodies with a clear marker so
+ *  the model knows it was clipped. Mirrors pi-ai's expected
+ *  `ToolResultMessage.content` shape. */
+function summariseToolResult(payload: ToolCallPayload): ToolResultSummary {
+  const result = payload.result;
+  let raw: string;
+  if (typeof result === 'string') {
+    raw = result;
+  } else if (result === null || result === undefined) {
+    raw = payload.status === 'error' ? '(tool returned an error)' : '(no output)';
+  } else {
+    try {
+      raw = JSON.stringify(result);
+    } catch {
+      raw = String(result);
+    }
+  }
+  const limit = 4000;
+  const text =
+    raw.length > limit ? `${raw.slice(0, limit)}\n…(truncated, ${raw.length} chars)` : raw;
+  return { text, isError: payload.status === 'error' };
+}
+
+/** Render a one-line summary of a turn's tool transcript so older
+ *  rounds collapse without losing the bookkeeping signal. */
+function summariseToolBatch(payloads: ToolCallPayload[]): string {
+  if (payloads.length === 0) return '';
+  const counts: Record<string, number> = {};
+  let errors = 0;
+  for (const p of payloads) {
+    const key = p.toolName ?? '?';
+    counts[key] = (counts[key] ?? 0) + 1;
+    if (p.status === 'error') errors += 1;
+  }
+  const breakdown = Object.entries(counts)
+    .map(([name, n]) => `${n}× ${name}`)
+    .join(', ');
+  const errSuffix = errors > 0 ? ` (${errors} error${errors === 1 ? '' : 's'})` : '';
+  return `[prior turn condensed: ${breakdown}${errSuffix}]`;
+}
+
+/** Pure history-builder for testing. Takes raw chat rows (as the IPC
+ *  returns them) and produces the ChatMessage[] history payload the
+ *  agent sees on the next turn. Exposed separately from
+ *  buildHistoryFromChat (which does the IPC fetch + seeding) so tests
+ *  can pass a fixture without mocking window.codesign. */
+export function buildHistoryFromChatRows(
+  rows: ReadonlyArray<{ kind: string; payload?: unknown }>,
+): ChatMessage[] {
+  // First pass — split rows into per-user-prompt turns. A "turn" starts
+  // at each `kind=user` row and ends at the next user row (or end of
+  // history). This gives us the bracket inside which a single agent
+  // run did its tool work + emitted text.
+  type Turn = {
+    userText: string;
+    toolPayloads: ToolCallPayload[];
+    assistantText: string[];
+  };
+  const turns: Turn[] = [];
+  let current: Turn | null = null;
+  for (const row of rows) {
+    if (row.kind === 'user') {
+      const text = (row.payload as { text?: string } | null)?.text;
+      if (typeof text !== 'string' || text.length === 0) continue;
+      current = { userText: text, toolPayloads: [], assistantText: [] };
+      turns.push(current);
+    } else if (current !== null) {
+      if (row.kind === 'tool_call') {
+        const p = row.payload as ToolCallPayload | null;
+        if (p !== null) current.toolPayloads.push(p);
+      } else if (row.kind === 'assistant_text') {
+        const text = (row.payload as { text?: string } | null)?.text;
+        if (typeof text === 'string' && text.length > 0) current.assistantText.push(text);
+      }
+    }
+  }
+
+  // Second pass — full transcript for the most recent N turns,
+  // condensed for everything older. Apply a global byte budget by
+  // dropping the oldest tool transcripts first if total exceeds cap.
+  const out: ChatMessage[] = [];
+  const fullStart = Math.max(0, turns.length - FULL_TRANSCRIPT_TURN_COUNT);
+  let totalToolBytes = 0;
+
+  for (let i = 0; i < turns.length; i++) {
+    const turn = turns[i];
+    if (turn === undefined) continue;
+
+    out.push({ role: 'user', content: turn.userText });
+
+    const isFullDetailTurn = i >= fullStart;
+    if (!isFullDetailTurn) {
+      // Older turn — collapse tool transcript to a one-line marker so
+      // the model still sees the shape of what happened without
+      // paying the byte tax. The assistant's `done` summary remains.
+      const summary = summariseToolBatch(turn.toolPayloads);
+      const assistantTail = turn.assistantText[turn.assistantText.length - 1] ?? '';
+      const condensed = [summary, assistantTail].filter((s) => s.length > 0).join('\n\n');
+      if (condensed.length > 0) {
+        out.push({ role: 'assistant', content: condensed });
+      }
+      continue;
+    }
+
+    // Recent turn — emit each tool call as an assistant message with
+    // tool-call refs, paired with its tool-result message. Inter-tool
+    // assistant text rolls up into a leading text bundle on the
+    // assistant message that owned the first tool call (kept compact;
+    // narration is filtered separately in Phase 3).
+    const leadingText = turn.assistantText.join('\n\n').trim();
+    if (turn.toolPayloads.length === 0) {
+      if (leadingText.length > 0) out.push({ role: 'assistant', content: leadingText });
+      continue;
+    }
+
+    // Pair each tool call with its summarised result. Group calls
+    // 1-to-1 with results; if the agent emitted text alongside a
+    // tool call (rare but possible in pi-ai), surface it as the
+    // assistant message's text content.
+    let prefixUsed = false;
+    for (const p of turn.toolPayloads) {
+      if (p.toolCallId === undefined || p.toolName === undefined) continue;
+      const argsJson = JSON.stringify(p.args ?? {});
+      const assistantContent = !prefixUsed && leadingText.length > 0 ? leadingText : '';
+      prefixUsed = true;
+      const assistantMsg: ChatMessage = {
+        role: 'assistant',
+        content: assistantContent,
+        toolCalls: [{ id: p.toolCallId, name: p.toolName, argsJson }],
+      };
+      const summary = summariseToolResult(p);
+      const toolMsg: ChatMessage = {
+        role: 'tool',
+        content: summary.text,
+        toolCallId: p.toolCallId,
+        toolName: p.toolName,
+        isError: summary.isError,
+      };
+      const pairBytes = assistantContent.length + argsJson.length + summary.text.length;
+      if (totalToolBytes + pairBytes > TOOL_TRANSCRIPT_BYTE_BUDGET) {
+        // Budget exhausted on this turn — drop remaining tool calls
+        // for THIS turn and collapse the rest into a one-line tail.
+        // Recent turns are kept whole when possible; we only collapse
+        // when we'd blow the cap.
+        out.push({
+          role: 'assistant',
+          content: `[tool transcript clipped — ${turn.toolPayloads.length} more tool calls omitted to stay under budget]`,
+        });
+        break;
+      }
+      out.push(assistantMsg);
+      out.push(toolMsg);
+      totalToolBytes += pairBytes;
+    }
+  }
+
+  return out;
+}
+
 async function buildHistoryFromChat(designId: string | null): Promise<ChatMessage[]> {
   if (!designId || !window.codesign) return [];
   try {
     await window.codesign.chat.seedFromSnapshots(designId);
     const rows = await window.codesign.chat.list(designId);
-    const out: ChatMessage[] = [];
-    for (const row of rows) {
-      if (row.kind === 'user') {
-        const text = (row.payload as { text?: string } | null)?.text;
-        if (typeof text === 'string' && text.length > 0) out.push({ role: 'user', content: text });
-      } else if (row.kind === 'assistant_text') {
-        const text = (row.payload as { text?: string } | null)?.text;
-        if (typeof text === 'string' && text.length > 0)
-          out.push({ role: 'assistant', content: text });
-      }
-    }
-    return out;
+    return buildHistoryFromChatRows(rows);
   } catch {
     return [];
   }

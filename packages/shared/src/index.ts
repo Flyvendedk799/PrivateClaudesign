@@ -85,12 +85,41 @@ export const Artifact = z.object({
 });
 export type Artifact = z.infer<typeof Artifact>;
 
-export const ChatRole = z.enum(['system', 'user', 'assistant']);
+export const ChatRole = z.enum(['system', 'user', 'assistant', 'tool']);
 export type ChatRole = z.infer<typeof ChatRole>;
 
+/**
+ * Inline summary of a tool call the agent made on a prior turn. Persisted
+ * into history so follow-up turns reconstruct the agent's prior actions
+ * instead of re-`view`ing every file from scratch (Gameimprove §1).
+ *
+ * `args` is shipped as a serialised JSON string instead of a generic
+ * unknown to keep the IPC payload schema-stable across bumps; the
+ * receiver `JSON.parse`s right before handing to pi-ai.
+ */
+export const ChatToolCallRef = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  argsJson: z.string(),
+});
+export type ChatToolCallRef = z.infer<typeof ChatToolCallRef>;
+
+/** ChatMessage carries text-only history by default. Optional tool fields
+ *  surface when buildHistoryFromChat reconstructs prior tool transcript
+ *  for follow-up turns. */
 export const ChatMessage = z.object({
   role: ChatRole,
   content: z.string(),
+  /** Present on `assistant` rows when the assistant emitted tool calls
+   *  alongside (or instead of) text. The agent.ts converter rebuilds an
+   *  AssistantMessage with `[text, ...toolCalls]` content. */
+  toolCalls: z.array(ChatToolCallRef).optional(),
+  /** Present on `tool` rows — pairs with the assistant's `toolCalls[].id`
+   *  so pi-ai can stitch the result back to the originating call. */
+  toolCallId: z.string().optional(),
+  toolName: z.string().optional(),
+  /** Did the tool call error? Propagates pi-ai's `isError` flag. */
+  isError: z.boolean().optional(),
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
 
