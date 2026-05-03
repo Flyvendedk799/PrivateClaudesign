@@ -994,7 +994,7 @@ describe('chatMessageToAgentMessage — Gameimprove §1 tool transcript persiste
       },
       1700000000000,
       piModel,
-    ) as { content: Array<Record<string, unknown>> };
+    ) as unknown as { content: Array<Record<string, unknown>> };
     // Empty assistant text → no leading text block, just the toolCall.
     expect(out.content).toHaveLength(1);
     expect(out.content[0]).toMatchObject({
