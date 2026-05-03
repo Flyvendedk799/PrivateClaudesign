@@ -552,6 +552,16 @@ export function TweakPanel({
     const win = iframeRef.current?.contentWindow;
     if (!win) return;
     win.postMessage({ type: 'codesign:tweaks:update', tokens }, '*');
+    // A6.x — game-mode designs also receive a `game:setParams`
+    // postMessage so window.__game.params updates live without the
+    // game needing to know about the design-mode tweaks bridge. The
+    // runtime adapter's bootstrap installs the listener that merges
+    // the params and dispatches a `game:params-changed` event the
+    // agent's code can react to.
+    const engine = useCodesignStore.getState().currentDesignEngine;
+    if (engine !== null) {
+      win.postMessage({ type: 'game:setParams', params: tokens }, '*');
+    }
   }
 
   function schedulePersist(tokens: Tokens): void {
