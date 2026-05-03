@@ -1,0 +1,98 @@
+# Phaser engine guide (pinned to phaser@3.88.0)
+
+Phaser 3.88 is loaded as ESM from a pinned `cdn.jsdelivr.net` URL via `<script type="importmap">`. The starter `index.html` wires this — do **not** swap to Phaser 4.x alpha; the scene/physics APIs differ and break first-shot generation.
+
+## File layout (one mechanic / single scene)
+
+```
+index.html       # provided by the engine starter
+src/main.js      # Phaser.Game config + one Scene
+assets/          # sprites, audio (optional)
+```
+
+## File layout (multi-scene)
+
+```
+index.html
+src/main.js              # boot: instantiate Phaser.Game with the scene list
+src/scenes/boot.js       # preload globals
+src/scenes/menu.js       # title + start
+src/scenes/play.js       # the mechanic
+src/scenes/gameover.js   # restart
+src/entities/player.js
+assets/sprites/
+assets/audio/
+```
+
+## Skeleton
+
+```js
+import Phaser from 'phaser';
+
+class PlayScene extends Phaser.Scene {
+  constructor() { super('Play'); }
+
+  preload() {
+    this.load.image('paddle', 'assets/sprites/paddle.png');
+    this.load.audio('hit', 'assets/audio/hit.wav');
+  }
+
+  create() {
+    this.paddle = this.physics.add.sprite(400, 550, 'paddle');
+    this.paddle.setCollideWorldBounds(true);
+    this.cursors = this.input.keyboard.createCursorKeys();
+  }
+
+  update(time, dt) {
+    const speed = window.__game.params.paddle_speed ?? 320;
+    if (this.cursors.left.isDown) this.paddle.setVelocityX(-speed);
+    else if (this.cursors.right.isDown) this.paddle.setVelocityX(speed);
+    else this.paddle.setVelocityX(0);
+  }
+}
+
+const game = new Phaser.Game({
+  type: Phaser.AUTO,
+  parent: 'game',
+  width: 800,
+  height: 600,
+  backgroundColor: '#0b0b0e',
+  physics: { default: 'arcade', arcade: { gravity: { y: 0 } } },
+  scene: [PlayScene],
+});
+```
+
+## Hard rules (validator enforces)
+
+- Every asset key used in `this.add.image(x, y, 'key')` / `this.add.sprite(...)` MUST be loaded earlier in `preload()` via `this.load.image('key', 'path')` / `this.load.spritesheet` / `this.load.atlas`. Orphan keys throw a "missing texture" warning at runtime that blanks the sprite.
+- Using `this.physics.add.*` requires `physics: { default: 'arcade' | 'matter' }` in the `Phaser.Game` config. Without it the call throws "physics is undefined."
+- Scenes declare at least one of `preload` / `create` / `update`. A scene with only a constructor is dead code.
+- Phaser version pin: `phaser@3.88.x` only.
+- No `eval` / `new Function`.
+
+## Common patterns
+
+- **Tweens**: `this.tweens.add({ targets: this.paddle, scale: 1.2, duration: 100, yoyo: true })` for hit-pause juice.
+- **Particles**: `this.add.particles(x, y, 'spark', { speed: 100, lifespan: 400, quantity: 8 })`.
+- **Camera shake**: `this.cameras.main.shake(120, 0.005)` — keep amplitude tiny (≤0.01).
+- **Audio**: `this.sound.add('hit').play({ volume: 0.4 })`. Respect `window.__game.config.startMuted` — gate playback until first user input.
+- **Tilemaps**: load via `this.load.tilemapTiledJSON` + `this.add.tilemap`.
+- **Scene transitions**: `this.scene.start('GameOver', { score })`. Pass data via the second arg.
+
+## Tweak parameters
+
+Read live tweaks via `window.__game.params.<key>` inside `update`. Declare via `declare_tweak_schema` with `kind: 'param'`. Common Phaser knobs: `paddle_speed`, `gravity`, `jump_velocity`, `enemy_spawn_rate`.
+
+## Performance
+
+- Target 60 fps. Phaser's render loop runs as fast as the browser allows.
+- Pool bullets / projectiles via `this.physics.add.group({ maxSize: 32 })` — don't `add.sprite` per shot.
+- Atlas your sprites when shipping more than ~8 textures.
+- Camera follow with lerp: `this.cameras.main.startFollow(this.player, true, 0.1, 0.1)`.
+
+## Forbidden
+
+- Phaser 4.x URLs (different APIs).
+- Loading Phaser from anywhere other than `cdn.jsdelivr.net/npm/phaser@3.88.0/dist/phaser.esm.js`.
+- Calling `add.*` on assets that were never `load.*`-ed.
+- Frame-rate-dependent movement without `delta`.

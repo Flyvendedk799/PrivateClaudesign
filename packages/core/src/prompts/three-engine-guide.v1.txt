@@ -1,0 +1,101 @@
+# Three.js engine guide (pinned to three@0.170.0)
+
+Three.js is loaded as ESM from a pinned `cdn.jsdelivr.net` URL via `<script type="importmap">`. The starter `index.html` already wires this; the agent should **not** rewrite the importmap to a different version or bundler.
+
+## File layout (single-screen)
+
+```
+index.html          # provided by the engine starter — base href + importmap + __game shim
+src/main.js         # scene, camera, renderer, RAF loop
+assets/             # sprites, textures, audio (optional)
+```
+
+## File layout (multi-scene)
+
+```
+index.html
+src/main.js         # entry — boots the first scene
+src/scenes/play.js  # one file per scene
+src/entities/       # one file per entity / system
+assets/textures/
+assets/audio/
+```
+
+## Lifecycle skeleton
+
+```js
+import * as THREE from 'three';
+
+const canvas = document.querySelector('#game');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+renderer.setPixelRatio(window.devicePixelRatio);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.1, 100);
+camera.position.set(0, 1.6, 4);
+
+// Add lights, meshes, etc.
+
+function tick(t) {
+  // Per-frame state updates here. Read tweaks live: window.__game.params.player_speed
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+window.addEventListener('resize', () => {
+  renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+  camera.aspect = canvas.clientWidth / canvas.clientHeight;
+  camera.updateProjectionMatrix();
+});
+
+window.addEventListener('beforeunload', () => renderer.dispose());
+```
+
+## Input
+
+- Keyboard: `window.addEventListener('keydown' / 'keyup', e => …)`.
+- Mouse / pointer: `canvas.addEventListener('pointerdown' / 'pointermove' / 'pointerup', …)`.
+- Gamepad: `navigator.getGamepads()` polled in the RAF loop.
+- Pointer lock (FPS-style): `canvas.requestPointerLock()` on user gesture; the iframe sandbox already permits this.
+
+## Asset loading
+
+```js
+const tex = new THREE.TextureLoader().load('assets/textures/player.png');
+tex.colorSpace = THREE.SRGBColorSpace;
+const mat = new THREE.MeshBasicMaterial({ map: tex });
+```
+
+GLTF / GLB models load via `import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'` (the addons importmap entry is pre-wired).
+
+## Audio
+
+Use the Web Audio API directly — `new AudioContext()`, decode an `ArrayBuffer` from `fetch('assets/audio/jump.wav')`. If `window.__game.config.startMuted` is true, gate playback until first user input (autoplay policy).
+
+## Performance
+
+- One renderer per page. Re-create on engine swap, not on every resume.
+- `InstancedMesh` for hundreds of identical objects (particles, repeated tiles).
+- Dispose textures and geometries when removing entities (`tex.dispose()`, `geom.dispose()`).
+- Target 60 fps; if you ship 30 you've shipped a stutter.
+
+## Tweak parameters
+
+Read live tweaks via `window.__game.params.<key>` per frame, or subscribe once:
+
+```js
+window.addEventListener('game:params-changed', (e) => {
+  // e.detail = { player_speed: 5 }
+});
+```
+
+Declare the schema via `declare_tweak_schema` with `kind: 'param'`, `key: 'player_speed'`, `default: 5`, `min: 1`, `max: 20`, `step: 0.5`.
+
+## Forbidden
+
+- Loading Three.js from any URL other than the pinned `cdn.jsdelivr.net/npm/three@0.170.0/...`.
+- `eval` / `new Function` — the iframe sandbox CSP rejects these anyway.
+- Frame-rate-dependent movement. Always scale by delta-time: `pos += speed * dt`.
+- Shipping without a `dispose()` somewhere on shutdown.

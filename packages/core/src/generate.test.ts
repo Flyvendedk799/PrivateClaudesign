@@ -1768,6 +1768,70 @@ describe('ANTI_SLOP palette anchor rotation (plan0305 P1.2)', () => {
   });
 });
 
+describe('game-mode composeSystemPrompt (gameplan §A4)', () => {
+  it('routes through composeGame when artifactType === "game"', () => {
+    const prompt = composeSystemPrompt({ mode: 'create', artifactType: 'game' });
+    expect(prompt).toContain('Game-builder workflow');
+    expect(prompt).toContain('Game anti-slop');
+    expect(prompt).toContain('Game multi-file authoring guide');
+    // Design-mode bits stay out
+    expect(prompt).not.toContain('Design workflow');
+    expect(prompt).not.toContain('Artifact wrapper (chat mode)');
+    expect(prompt).not.toContain('Visual taste guidelines (anti-slop)');
+  });
+
+  it('omits the engine guide when no engine is set yet (model calls choose_engine first)', () => {
+    const prompt = composeSystemPrompt({ mode: 'create', artifactType: 'game' });
+    expect(prompt).not.toContain('Three.js engine guide');
+    expect(prompt).not.toContain('Phaser engine guide');
+  });
+
+  it('includes Three.js guide when engine = "three"', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'three',
+    });
+    expect(prompt).toContain('Three.js engine guide (pinned to three@0.170.0)');
+    expect(prompt).not.toContain('Phaser engine guide');
+  });
+
+  it('includes Phaser guide when engine = "phaser"', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'phaser',
+    });
+    expect(prompt).toContain('Phaser engine guide (pinned to phaser@3.88.0)');
+    expect(prompt).not.toContain('Three.js engine guide');
+  });
+
+  it('mentions choose_engine + the four engine ids in the workflow section', () => {
+    const prompt = composeSystemPrompt({ mode: 'create', artifactType: 'game' });
+    expect(prompt).toContain('`choose_engine`');
+    expect(prompt).toContain("'three' | 'phaser' | 'pygame' | 'godot'");
+  });
+
+  it('inherits SAFETY at the tail', () => {
+    const prompt = composeSystemPrompt({ mode: 'create', artifactType: 'game' });
+    // SAFETY's leading heading is sufficient as a presence check.
+    expect(prompt).toContain('# Safety and scope');
+  });
+
+  it('design-mode runs do not pull in the game prompts (regression guard)', () => {
+    const prompt = composeSystemPrompt({ mode: 'create' });
+    expect(prompt).not.toContain('Game-builder workflow');
+    expect(prompt).not.toContain('Three.js engine guide');
+    expect(prompt).not.toContain('Phaser engine guide');
+    expect(prompt).not.toContain('Game multi-file authoring');
+  });
+
+  it('IDENTITY mentions game-builder mode (extension paragraph)', () => {
+    const prompt = composeSystemPrompt({ mode: 'create' });
+    expect(prompt).toContain('When the user asks for a game (artifactType:');
+  });
+});
+
 describe('reasoningForModel', () => {
   it('returns undefined for Claude 4 under anthropic provider (adaptive default)', () => {
     expect(

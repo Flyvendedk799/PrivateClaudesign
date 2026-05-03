@@ -1,0 +1,122 @@
+# Game multi-file authoring guide
+
+Multi-file projects are first-class in game-builder mode. The agent persists every file via `text_editor`, and the privileged `game-files://designs/{designId}/` protocol serves them into the preview iframe. Snapshots capture the full bundle so restore recovers the entire project tree, not just the entry point.
+
+## When to split (use multi-file)
+
+Use multi-file authoring when *any* of these hold:
+
+- ≥ 3 scenes (boot / menu / play / gameover, or a level-per-screen platformer)
+- ≥ 300 LOC in any one file
+- ≥ 2 entity types with substantive behaviour (player + enemy + projectile)
+- An asset bundle (sprites, tilemaps, audio) that wants its own folder
+- The user asked for "a real game / a real engine / a Godot project"
+
+## When to stay single-file
+
+Stay single-file (`index.html` only, no `src/`) when:
+
+- Jam-scale ≤ 200 LOC
+- One mechanic, one screen, one entity type
+- The brief says "quick", "minimal", "the simplest version of …"
+
+A single-file Phaser game with one Scene is fine. Don't pre-split for the sake of looking professional — readability wins.
+
+## Recommended layouts per engine
+
+### Three.js / Phaser (multi-scene)
+
+```
+index.html                # entry — provided by engine starter
+src/main.js               # boot: Phaser.Game / Three.js scene mount
+src/scenes/
+  boot.js                 # preload globals
+  menu.js
+  play.js
+  gameover.js
+src/entities/
+  player.js
+  enemy.js
+  projectile.js
+src/systems/
+  audio.js                # SFX wrapper around the engine's audio API
+  input.js                # uniform keyboard/mouse/gamepad
+assets/
+  sprites/
+  audio/
+  tilemaps/
+```
+
+### Pygame (Phase C)
+
+```
+main.py                   # entry — pygame.init, main loop, scene dispatch
+scenes/
+  __init__.py             # empty
+  play.py
+  gameover.py
+entities/
+  player.py
+  enemy.py
+assets/
+  sprites/
+  sounds/
+requirements.txt          # pygame-ce==2.5.5
+README.md                 # how to run locally
+```
+
+### Godot (Phase B)
+
+```
+project.godot             # Godot project descriptor
+main.tscn                 # root scene
+scenes/
+  player.tscn
+  enemy.tscn
+  ui.tscn
+scripts/
+  player.gd
+  enemy.gd
+  game_manager.gd
+assets/
+  sprites/
+  audio/
+README.md                 # "open in Godot 4.3 → run main.tscn"
+```
+
+## Path conventions
+
+- POSIX-style relative paths only. No leading slash. No Windows backslashes.
+- Lowercase + hyphen-or-underscore for filenames. No spaces.
+- Group by *role* (`scenes/`, `entities/`, `systems/`) when multi-scene; group by *type* (`assets/sprites/`, `assets/audio/`) for static content.
+- `index.html` lives at the project root for JS engines. The base href in the iframe resolves all other paths relative to it.
+
+## Asset paths
+
+- Inside JS: `this.load.image('player', 'assets/sprites/player.png')` — relative path from the project root, resolved by `<base href>`.
+- Inside Python: `pygame.image.load('assets/sprites/player.png')` — Pyodide mounts the project at the working dir.
+- Inside GDScript: `preload('res://assets/sprites/player.png')` — Godot resolves `res://` to the project root.
+
+## Per-extension byte caps (gameplan §4 / Q5)
+
+`text_editor.create` enforces these per-extension caps:
+
+- `.html` → 12 KB (skeleton-only — fill via `str_replace`)
+- `.tscn` → 32 KB (Godot scenes can legitimately be large)
+- `.gd`   → 16 KB (per-script ceiling; split big scripts into subscenes)
+- `.py`   → 16 KB
+- other game-mode files → 16 KB
+
+If you hit a cap, the right move is *not* to compress — it's to split the responsibility into a second file.
+
+## Snapshot semantics
+
+Every successful `done` snapshots the full project tree into `design_snapshot_files`. Restore recovers exactly what was on disk at snapshot time. This is the contract behind "rewind to v3" buttons in the UI.
+
+## Forbidden
+
+- Absolute paths (`/Users/...`, `C:\...`, `/var/...`).
+- `..` traversal in any path.
+- Filenames containing spaces or special characters.
+- Files outside the project root.
+- Splitting a 50-line script into 5 files for the sake of "cleanliness."

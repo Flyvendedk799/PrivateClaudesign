@@ -1,0 +1,52 @@
+# Game anti-slop (forbidden patterns)
+
+Every item below is a hard fail in production play-testing. The validator catches some via lint; the rest are caught only by you reading your own code before `done`.
+
+## Core mechanic
+
+- **No fail state.** A game without a way to lose is a sandbox, not a game. Even infinite-runners need a fail (collision = restart).
+- **No restart binding.** R or Space rebinds restart. Forcing a page reload = the player loses score, time, and trust.
+- **Instant fail on first input.** A jump that kills the player on frame 2 reads as broken. Tutorialise the failure mode (warning, slow ramp, telegraph).
+- **No win state on completable games.** Pong needs a score cap; a platformer needs a flag. Without a win the player exits feeling cheated.
+- **Invisible hitboxes.** Hitbox must visually align with the sprite. Don't ship a 32×32 collision box on a 12×12 visual — the player can't reason about the rules.
+
+## Feedback (every action gets one within 100 ms)
+
+- **No audio cue on hit.** Silent collisions feel broken. At minimum: a 50 ms sine pop on player damage, coin pickup, score increment.
+- **No visual feedback on input.** Pressing a button must produce *something* — flash, scale pop, particle burst, screen shake (≤4 px).
+- **No respawn animation.** Snap-respawn reads as a glitch. Half-second fade or scale-from-zero is enough.
+- **No score increment animation.** Numbers should pop on change (scale 1→1.3→1, 150 ms).
+
+## Physics + math
+
+- **Frame-rate-dependent movement.** `pos += speed` runs differently at 30 vs 60 fps. Always `pos += speed * dt`.
+- **Velocity overflow.** Capping max velocity is required for any free-falling body. Without cap, hitting the ground at frame N produces tunneling and the player falls through.
+- **No coyote time on platformers.** Real games allow ~80–120 ms of grace after walking off a ledge. Without it the controls feel sticky.
+- **Sprite atlas without padding.** Texture bleed = player sees a strip of the wrong sprite at high zoom. Always pad atlas cells by 1–2 px.
+- **Z-fighting.** Two coplanar meshes flicker. Offset by ≥0.001.
+
+## Loop / progression
+
+- **No scaling difficulty.** A 30-second wave that never gets harder reads as a tech demo. Spawn rate, speed, or HP must drift over time.
+- **Infinite resources without progression.** Bullets that never run out + enemies that never adapt = no tension.
+- **No telegraph on enemy attacks.** A boss that one-shots without a tell is unfair. Wind-up animation, telegraph zone, audio cue.
+
+## Performance
+
+- **`addEventListener` in `update`.** Registering a listener per frame leaks memory and crashes the iframe in 30 s. Listeners belong in `create` / on mount.
+- **`new` per frame.** Allocating Vector3 / Vec2 / new Audio() per tick triggers GC stutter. Pool / reuse.
+- **Synchronous network calls.** `fetch` in the render loop blocks. Pre-load in `preload` / `create`.
+
+## Engine-specific
+
+- **Three.js**: shipping without `renderer.dispose()` on unmount; using bare `<script src>` instead of the ESM importmap; missing `addEventListener('resize')`.
+- **Phaser**: `this.add.image('key')` where the key was never `load.image`-ed; `this.physics.add.*` without a `physics:` block in the Game config; mixing Phaser 3 and 4 APIs.
+- **Pygame** (Phase C): missing `pygame.display.flip()`; `while True` without a `QUIT` handler; using `pygame` instead of `pygame-ce` in the import.
+- **Godot** (Phase B): `[ext_resource path]` referencing files that don't exist; `print()` inside `_process` (perf hit and log spam).
+
+## Visual taste (game UI/HUD specifically)
+
+- **All-black or all-flat backgrounds.** Even a near-black with a subtle radial highlight reads as deliberate. Pure black reads as "I forgot the background."
+- **Default Tailwind blue / purple-on-white HUD.** The plan0305 palette diversification rules apply — pick a palette appropriate to the game's mood, not the cosmic default.
+- **Score counter in 12 px text.** HUD numbers are display-tier (≥24 px). Players check them at a glance, not via squinting.
+- **No font choice.** System sans = "I forgot to think about typography." Pick one display font (e.g. `Press Start 2P` for arcade, `Bebas Neue` for action) loaded from Google Fonts.
