@@ -15,18 +15,24 @@ export const EXPORTER_FORMATS = [
   'pptx',
   'zip',
   'markdown',
-  // gameplan §A7 — game-mode exporters. Take a different input shape
+  // gameplan §A7 / §B2 — game-mode exporters. Take a different input shape
   // (multi-file bundle), so they bypass `exportArtifact` and have their
   // own `exportGameArtifact` entry point below.
   'game-html',
   'game-zip',
+  'game-godot-project',
 ] as const;
 export type ExporterFormat = (typeof EXPORTER_FORMATS)[number];
 
 /** Format groups by intended artifact type. The renderer's export menu
  *  uses these to hide non-applicable formats (e.g. PDF on a game). */
 export const DESIGN_EXPORTER_FORMATS = ['html', 'pdf', 'pptx', 'zip', 'markdown'] as const;
-export const GAME_EXPORTER_FORMATS = ['game-html', 'game-zip', 'markdown'] as const;
+export const GAME_EXPORTER_FORMATS = [
+  'game-html',
+  'game-zip',
+  'game-godot-project',
+  'markdown',
+] as const;
 export type DesignExporterFormat = (typeof DESIGN_EXPORTER_FORMATS)[number];
 export type GameExporterFormat = (typeof GAME_EXPORTER_FORMATS)[number];
 
@@ -51,6 +57,7 @@ export type { ExportZipOptions, ZipAsset } from './zip';
 export type { ExportMarkdownOptions, MarkdownMeta } from './markdown';
 export type { ExportGameZipOptions } from './game-zip';
 export type { ExportGameHtmlOptions } from './game-html';
+export type { ExportGameGodotProjectOptions } from './game-godot-project';
 export { htmlToMarkdown } from './markdown';
 
 export async function exportHtml(
@@ -103,7 +110,7 @@ export async function exportArtifact(
     const mod = await import('./markdown');
     return mod.exportMarkdown(htmlContent, destinationPath);
   }
-  if (format === 'game-html' || format === 'game-zip') {
+  if (format === 'game-html' || format === 'game-zip' || format === 'game-godot-project') {
     throw new CodesignError(
       `Format "${format}" is a game-mode exporter — call exportGameArtifact() with the multi-file bundle instead of exportArtifact() with one HTML string.`,
       ERROR_CODES.EXPORTER_FORMAT_REJECTED,
@@ -154,6 +161,21 @@ export async function exportGameArtifact(
       engine: opts.engine,
       ...(opts.engineVersion !== undefined ? { engineVersion: opts.engineVersion } : {}),
     });
+  }
+  if (format === 'game-godot-project') {
+    if (opts.engine !== 'godot' && opts.engine !== undefined) {
+      throw new CodesignError(
+        `game-godot-project requires engine='godot' (got "${opts.engine}"). Use game-html / game-zip for the JS engines.`,
+        ERROR_CODES.EXPORTER_FORMAT_REJECTED,
+      );
+    }
+    const mod = await import('./game-godot-project');
+    const godotOpts: import('./game-godot-project').ExportGameGodotProjectOptions = {
+      files: opts.files,
+    };
+    if (opts.designName !== undefined) godotOpts.designName = opts.designName;
+    if (opts.engineVersion !== undefined) godotOpts.engineVersion = opts.engineVersion;
+    return mod.exportGameGodotProject(destinationPath, godotOpts);
   }
   if (format === 'markdown') {
     const mod = await import('./markdown');
