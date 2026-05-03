@@ -686,7 +686,10 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
             key={entry.id === currentDesignId ? `${entry.id}::r${previewReloadTick}` : entry.id}
             designId={entry.id}
             html={entry.html}
-            srcUrl={resolveGameSrc(entry.id, currentDesignEngine, godotPreviewByDesign)}
+            {...(() => {
+              const url = resolveGameSrc(entry.id, currentDesignEngine, godotPreviewByDesign);
+              return url !== undefined ? { srcUrl: url } : {};
+            })()}
             active={entry.id === currentDesignId}
             viewport={previewViewport}
             {...(currentDesignEngine !== null ? { gameAspect } : {})}

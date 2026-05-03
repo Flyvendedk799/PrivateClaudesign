@@ -11,6 +11,14 @@ const FORMAT_FILTERS: Record<ExporterFormat, Electron.FileFilter[]> = {
   pptx: [{ name: 'PowerPoint', extensions: ['pptx'] }],
   zip: [{ name: 'ZIP archive', extensions: ['zip'] }],
   markdown: [{ name: 'Markdown', extensions: ['md'] }],
+  // gameplan game-mode exporters. Game-html / game-pyodide-html ship a
+  // single shareable HTML file; the others zip a project tree.
+  'game-html': [{ name: 'HTML (single file)', extensions: ['html'] }],
+  'game-pyodide-html': [{ name: 'HTML (single file)', extensions: ['html'] }],
+  'game-zip': [{ name: 'ZIP archive', extensions: ['zip'] }],
+  'game-godot-project': [{ name: 'Godot project (zip)', extensions: ['zip'] }],
+  'game-godot-web': [{ name: 'Godot web build (zip)', extensions: ['zip'] }],
+  'game-py': [{ name: 'Pygame project (zip)', extensions: ['zip'] }],
 };
 
 export interface ExportRequest {

@@ -55,7 +55,7 @@ export function defaultGodotCliDeps(): GodotCliDeps {
     : [...DEFAULT_CANDIDATES];
   return {
     candidateNames: candidates,
-    pathEnv: process.env.PATH ?? '',
+    pathEnv: process.env['PATH'] ?? '',
     exists: (p) => existsSync(p),
     runWithVersion: async (bin) => {
       const { stdout } = await execFileAsync(bin, ['--version'], { timeout: 4000 });
