@@ -161,6 +161,50 @@ describe('resolveGameFilesRequest', () => {
     expect(res.crossOriginIsolated).toBe(true);
   });
 
+  it('falls through to the synthesizer when no design_files row exists', () => {
+    const db = initInMemoryDb();
+    const d = createDesign(db);
+    const synthesize = (designId: string, path: string) =>
+      designId === d.id && path === 'index.html'
+        ? { contentType: 'text/html', body: new TextEncoder().encode('<synth/>') }
+        : null;
+    const res = resolveGameFilesRequest({
+      rawUrl: `game-files://designs/${d.id}/index.html`,
+      db,
+      synthesize,
+    });
+    expect(res.status).toBe(200);
+    expect(res.contentType).toBe('text/html');
+    expect(decode(res.body)).toBe('<synth/>');
+  });
+
+  it('skips the synthesizer when an authored row already exists (DB wins)', () => {
+    const db = initInMemoryDb();
+    const d = createDesign(db);
+    upsertDesignFile(db, d.id, 'index.html', '<authored/>');
+    const synthesize = () => ({
+      contentType: 'text/html',
+      body: new TextEncoder().encode('<synth/>'),
+    });
+    const res = resolveGameFilesRequest({
+      rawUrl: `game-files://designs/${d.id}/index.html`,
+      db,
+      synthesize,
+    });
+    expect(decode(res.body)).toBe('<authored/>');
+  });
+
+  it('returns 404 when neither the DB nor the synthesizer have a hit', () => {
+    const db = initInMemoryDb();
+    const d = createDesign(db);
+    const res = resolveGameFilesRequest({
+      rawUrl: `game-files://designs/${d.id}/missing.html`,
+      db,
+      synthesize: () => null,
+    });
+    expect(res.status).toBe(404);
+  });
+
   it('cannot read another design even when the URL claims a different designId', () => {
     // The (designId, path) primary key on design_files is the actual
     // authorisation boundary — a URL claiming designId B never resolves a

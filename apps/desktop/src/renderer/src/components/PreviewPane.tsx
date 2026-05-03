@@ -146,14 +146,15 @@ const COMMENT_HINT_CLASS =
  *  shows the agent-authored source via srcDoc as a (non-runnable)
  *  preview. Three.js / Phaser designs always use the game-files://
  *  origin so module imports + asset lookups resolve through the
- *  protocol handler. Pygame is deferred — needs a bootstrap-injection
- *  IPC, tracked as a follow-up. */
+ *  protocol handler. Pygame uses the same shape — the protocol layer's
+ *  synthesizer fills in the missing index.html (Pyodide bootstrap) and
+ *  manifest.json on demand from the registered runtime adapter. */
 export function resolveGameSrc(
   designId: string,
   engine: 'three' | 'phaser' | 'pygame' | 'godot' | null,
   godotPreviewByDesign: Record<string, 'project' | 'build'>,
 ): string | undefined {
-  if (engine === 'three' || engine === 'phaser') {
+  if (engine === 'three' || engine === 'phaser' || engine === 'pygame') {
     return `game-files://designs/${designId}/index.html`;
   }
   if (engine === 'godot' && godotPreviewByDesign[designId] === 'build') {

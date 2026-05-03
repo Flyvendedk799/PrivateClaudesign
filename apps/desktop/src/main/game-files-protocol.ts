@@ -111,11 +111,23 @@ const NOT_FOUND: GameFilesResolved = {
   crossOriginIsolated: false,
 };
 
+/** Synthesizer for paths the design didn't author but that the engine
+ *  needs to boot. Returns null when there's nothing to synthesize.
+ *  Production wiring: pygame designs get an index.html via
+ *  `pygameAdapter.bootstrap()` + a manifest.json listing every .py /
+ *  asset file in design_files. The agent never authors these, so
+ *  the protocol fills them in transparently. */
+export type GameFilesSynthesize = (
+  designId: string,
+  path: string,
+) => { contentType: string; body: Uint8Array } | null;
+
 /** Pure resolver — Vitest-testable. The protocol handler shim wraps this
  *  with electron's `Response` constructor. */
 export function resolveGameFilesRequest(input: {
   rawUrl: string;
   db: Database.Database;
+  synthesize?: GameFilesSynthesize;
 }): GameFilesResolved {
   const parsed = parseGameFilesUrl(input.rawUrl);
   if (parsed === null) return NOT_FOUND;
@@ -135,7 +147,22 @@ export function resolveGameFilesRequest(input: {
   const row = input.db
     .prepare('SELECT content FROM design_files WHERE design_id = ? AND path = ?')
     .get(parsed.designId, parsed.path) as { content: string } | undefined;
-  if (row === undefined) return NOT_FOUND;
+  if (row === undefined) {
+    // Fall through to the synthesizer — pygame's index.html / manifest.json
+    // have no design_files row but are needed at preview time.
+    if (input.synthesize) {
+      const synth = input.synthesize(parsed.designId, parsed.path);
+      if (synth !== null) {
+        return {
+          status: 200,
+          contentType: synth.contentType,
+          body: synth.body,
+          crossOriginIsolated: false,
+        };
+      }
+    }
+    return NOT_FOUND;
+  }
 
   const contentType = contentTypeFromPath(parsed.path);
   if (row.content.startsWith(SENTINEL_BASE64)) {

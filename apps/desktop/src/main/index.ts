@@ -69,6 +69,7 @@ import {
   resolveGameFilesBuildRequest,
   resolveGameFilesRequest,
 } from './game-files-protocol';
+import { makeGameFilesSynthesizer } from './game-files-synthesize';
 import { findInFlightDuplicate, generateDedupKey, hashContentKey } from './generate-dedup';
 import {
   armGenerationTimeout,
@@ -2274,6 +2275,7 @@ if (!IS_VITEST) {
         // protocol issues surface in diagnostics rather than crashing the
         // iframe load.
         const gameFilesLog = getLogger('game-files');
+        const gameFilesSynthesize = makeGameFilesSynthesizer(dbResult.db);
         protocol.handle(GAME_FILES_SCHEME, async (request) => {
           try {
             const parsed = parseGameFilesUrl(request.url);
@@ -2291,6 +2293,7 @@ if (!IS_VITEST) {
             const resolved = resolveGameFilesRequest({
               rawUrl: request.url,
               db: dbResult.db,
+              synthesize: gameFilesSynthesize,
             });
             return new Response(resolved.body, {
               status: resolved.status,
