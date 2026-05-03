@@ -27,16 +27,23 @@ import {
   type AgentEvent,
   type AgentMessage,
   type AgentTool,
+  type StreamFn,
 } from '@mariozechner/pi-agent-core';
-import type { Message as PiAiMessage, Model as PiAiModel } from '@mariozechner/pi-ai';
+import {
+  type Message as PiAiMessage,
+  type Model as PiAiModel,
+  stream as piStream,
+} from '@mariozechner/pi-ai';
 import { type ArtifactEvent, createArtifactParser } from '@open-codesign/artifacts';
 import type { RetryDecision, RetryReason } from '@open-codesign/providers';
 import {
   classifyError,
   claudeCodeIdentityHeaders,
+  errorCodeForUpstreamType,
   filterActive,
   formatSkillsForPrompt,
   looksLikeClaudeOAuthToken,
+  parseUpstreamErrorMessage,
   shouldForceClaudeCodeIdentity,
   withBackoff,
 } from '@open-codesign/providers';
@@ -62,13 +69,15 @@ import type {
 import { reasoningForModel } from './index.js';
 import { type CoreLogger, NOOP_LOGGER } from './logger.js';
 import { composeSystemPrompt } from './prompts/index.js';
+// gameplan §A5 — game-builder tools (registered when deps.gameMode is set).
+import { type ChooseEngineFn, makeChooseEngineTool } from './tools/choose-engine.js';
 import { makeDeclareTweakSchemaTool } from './tools/declare-tweak-schema.js';
 import {
   makeListDesignSkillsTool,
   makeViewDesignSkillTool,
   makeViewFrameTool,
 } from './tools/design-library.js';
-import { type DoneRuntimeVerifier, makeDoneTool } from './tools/done.js';
+import { type DoneRuntimeVerifier, makeDoneTool, makeVerifyArtifactTool } from './tools/done.js';
 import {
   type GenerateImageAssetFn,
   makeGenerateImageAssetTool,
@@ -79,6 +88,11 @@ import { makeReadUrlTool } from './tools/read-url.js';
 import { type RenderPreviewer, makeRenderPreviewTool } from './tools/render-preview.js';
 import { makeSetTodosTool } from './tools/set-todos.js';
 import { type TextEditorFsCallbacks, makeTextEditorTool } from './tools/text-editor.js';
+import {
+  type ValidateEngine,
+  type ValidateGameSceneFn,
+  makeValidateGameSceneTool,
+} from './tools/validate-game-scene.js';
 
 /** Local mirror of the assistant message shape that pi-agent-core emits (via
  *  pi-ai). Declared here so this file does not take a direct dependency on
@@ -806,6 +820,25 @@ export interface GenerateViaAgentDeps {
    * are available for this run. See backlog-2 #7.
    */
   userSkills?: ReadonlyArray<readonly [name: string, source: string]> | undefined;
+  /**
+   * gameplan §A5 — when present, the run is in game-builder mode. The
+   * default toolset gains `choose_engine` (always) and `validate_game_scene`
+   * (when `fs` is also set). `read_design_system` and `view_frame` are
+   * dropped from the game toolset because their guidance does not apply.
+   */
+  gameMode?:
+    | {
+        /** Persists the agent's `choose_engine` decision into the per-run
+         *  mutable so the next snapshot writer reads it back. */
+        setEngine: ChooseEngineFn;
+        /** Returns the engine pinned for this run (latest `choose_engine`
+         *  value, or the user's pre-pick from the New-design dialog). */
+        getCurrentEngine(): ValidateEngine | null;
+        /** Engine-specific validator dispatch — host imports the runtime
+         *  adapter and invokes its `validate(files)` method. */
+        validate: ValidateGameSceneFn;
+      }
+    | undefined;
 }
 
 /**
@@ -859,6 +892,7 @@ export async function generateViaAgent(
     composeSystemPrompt({
       mode: 'create',
       userPrompt: input.prompt,
+      agentMode: true,
       ...(skillResult.blobs.length > 0 ? { skills: skillResult.blobs } : {}),
     });
 
@@ -878,6 +912,7 @@ export async function generateViaAgent(
   //   - read_design_system (always — closes over the caller's designSystem)
   //   - text_editor + list_files + done (when fs callbacks are provided)
   const defaultTools: AgentTool<TSchema, unknown>[] = [];
+  const isGameMode = deps.gameMode !== undefined;
   defaultTools.push(makeSetTodosTool() as unknown as AgentTool<TSchema, unknown>);
   defaultTools.push(makeReadUrlTool() as unknown as AgentTool<TSchema, unknown>);
   // Design library — both `list_design_skills` + `view_*` lookup tools.
@@ -888,13 +923,26 @@ export async function generateViaAgent(
   defaultTools.push(
     makeViewDesignSkillTool(deps.userSkills) as unknown as AgentTool<TSchema, unknown>,
   );
-  defaultTools.push(makeViewFrameTool() as unknown as AgentTool<TSchema, unknown>);
-  defaultTools.push(
-    makeReadDesignSystemTool(() => input.designSystem ?? null) as unknown as AgentTool<
-      TSchema,
-      unknown
-    >,
-  );
+  // gameplan §A5 — view_frame and read_design_system are design-mode-only.
+  // The game-mode toolset omits them (their guidance does not apply to
+  // canvas/WebGL/Python/.gd projects). Keep them on the design path.
+  if (!isGameMode) {
+    defaultTools.push(makeViewFrameTool() as unknown as AgentTool<TSchema, unknown>);
+    defaultTools.push(
+      makeReadDesignSystemTool(() => input.designSystem ?? null) as unknown as AgentTool<
+        TSchema,
+        unknown
+      >,
+    );
+  }
+  // gameplan §A5 — choose_engine ships always for game-mode runs (no fs
+  // dependency). The agent's first call in a game run; persists the
+  // engine choice through the host-supplied setter.
+  if (isGameMode && deps.gameMode !== undefined) {
+    defaultTools.push(
+      makeChooseEngineTool(deps.gameMode.setEngine) as unknown as AgentTool<TSchema, unknown>,
+    );
+  }
   if (deps.fs) {
     defaultTools.push(makeTextEditorTool(deps.fs) as unknown as AgentTool<TSchema, unknown>);
     defaultTools.push(makeListFilesTool(deps.fs) as unknown as AgentTool<TSchema, unknown>);
@@ -913,8 +961,24 @@ export async function generateViaAgent(
       );
     }
     defaultTools.push(
+      makeVerifyArtifactTool(deps.fs, deps.runtimeVerify) as unknown as AgentTool<TSchema, unknown>,
+    );
+    defaultTools.push(
       makeDoneTool(deps.fs, deps.runtimeVerify, log) as unknown as AgentTool<TSchema, unknown>,
     );
+    // gameplan §A5 — validate_game_scene needs both fs (to read the bundle)
+    // and the host's engine-aware validator dispatch. Lazy-loaded
+    // adapters live in the host (apps/desktop/src/main); the tool here is
+    // a thin wrapper that walks the fs and calls deps.gameMode.validate.
+    if (isGameMode && deps.gameMode !== undefined) {
+      defaultTools.push(
+        makeValidateGameSceneTool({
+          fs: deps.fs,
+          getCurrentEngine: deps.gameMode.getCurrentEngine,
+          validate: deps.gameMode.validate,
+        }) as unknown as AgentTool<TSchema, unknown>,
+      );
+    }
   }
   if (deps.generateImageAsset) {
     defaultTools.push(
@@ -969,6 +1033,78 @@ export async function generateViaAgent(
   // original lets the post-agent branch rethrow it as-is, so the renderer
   // sees the same code the initial IPC-level resolution would emit.
   let capturedGetApiKeyError: unknown = null;
+  // Force tool use on every turn. Sonnet 4.6 + adaptive thinking + a long
+  // create prompt otherwise burns the entire output budget on reasoning and
+  // emits a closing text block ("Done.") with zero tool calls — see the
+  // 2026-04-28 traces (output=32000, tools=0). With tool_choice="any" the
+  // model MUST call a tool, so the loop progresses through set_todos →
+  // text_editor.create → done instead of getting stuck in a thinking spiral.
+  // Done is itself a tool, so this works for terminal turns too.
+  // Build a custom streamFn that bypasses pi-ai's `streamSimple` allow-list
+  // (which silently STRIPS `toolChoice` via buildBaseOptions). We translate
+  // `reasoning='medium'` → `{thinkingEnabled, effort}` ourselves and forward
+  // a turn-aware `toolChoice` so Anthropic's `tool_choice: { type: 'any' }`
+  // lands in the FIRST request — kick-starts the agent loop instead of
+  // letting Sonnet 4.6 burn the output budget on adaptive thinking and
+  // emit a closing "Done." text block (see 2026-04-28 traces, output=32000,
+  // tools=0).
+  //
+  // Strategy:
+  //   - Turn 1: tool_choice='any', thinkingEnabled=false. Model MUST call
+  //     a tool, so it can't ramble in text. (Anthropic rejects thinking +
+  //     tool_choice=any with "Thinking may not be enabled when tool_choice
+  //     forces tool use.")
+  //   - Turn 2+: tool_choice='auto', thinkingEnabled=user's reasoning level
+  //     (default medium). Once the agent has started, the model can think
+  //     about tool results and decide when to call `done`. Without this
+  //     relaxation the model is forced to keep calling tools forever and
+  //     never converges (101+ turns observed in testing — see 2026-04-28
+  //     log /tmp/agent-live-4.log).
+  //
+  // We also bump maxTokens above pi-ai's hardcoded 32000 cap so adaptive
+  // thinking on later turns doesn't run out of room.
+  let agentTurnIndex = 0;
+  const forcedToolStreamFn: StreamFn = (model, context, options) => {
+    const isAnthropic = model.api === 'anthropic-messages';
+    const turn = agentTurnIndex;
+    agentTurnIndex += 1;
+    const forceTools = turn === 0;
+    const reasoning = (options as { reasoning?: string } | undefined)?.reasoning;
+    // Single per-turn diagnostic line. Includes turn index, reasoning level,
+    // and forceTools flag — enough to debug "agent stuck not calling tools"
+    // regressions without spamming three lines per turn.
+    log.info('[agent] turn.send', {
+      turn,
+      api: model.api,
+      tools: context.tools?.length ?? 0,
+      reasoning,
+      forceTools,
+    });
+    const lowered: Record<string, unknown> = {
+      apiKey: options?.apiKey,
+      signal: options?.signal,
+      headers: options?.headers,
+      cacheRetention: options?.cacheRetention,
+      sessionId: options?.sessionId,
+      maxRetryDelayMs: options?.maxRetryDelayMs,
+      metadata: options?.metadata,
+      maxTokens: options?.maxTokens ?? 65_536,
+    };
+    if (isAnthropic) {
+      if (forceTools) {
+        lowered['toolChoice'] = 'any';
+        lowered['thinkingEnabled'] = false;
+      } else if (reasoning) {
+        // After the agent is unstuck, re-enable adaptive thinking so the
+        // model can reason about tool results and converge on `done`.
+        lowered['thinkingEnabled'] = true;
+        lowered['effort'] = reasoning;
+      } else {
+        lowered['thinkingEnabled'] = false;
+      }
+    }
+    return piStream(model, context, lowered);
+  };
   const agent = new Agent({
     initialState: {
       systemPrompt: augmentedSystemPrompt,
@@ -977,6 +1113,7 @@ export async function generateViaAgent(
       tools,
       thinkingLevel,
     },
+    streamFn: forcedToolStreamFn,
     convertToLlm: (messages) =>
       messages.filter(
         (m): m is PiAiMessage =>
@@ -1166,6 +1303,37 @@ export async function generateViaAgent(
         throw tagged;
       }
       throw err;
+    }
+    // pi-agent-core swallows stream-level upstream failures (Anthropic 529 /
+    // 429 etc.) and surfaces them as a final assistant message with
+    // stopReason='error' instead of throwing. To make the retry layer
+    // engage on transient classes we lift those back into thrown errors.
+    // Only safe when the lone newly-added message is the error itself —
+    // any other side effect (tool calls, partial assistant turns) means a
+    // retry would replay tool effects and is RETRY_BLOCKED.
+    //
+    // Skip when capturedGetApiKeyError is set: the post-withBackoff branch
+    // surfaces that original CodesignError verbatim (preserving its
+    // structured code, e.g. CODEX_TOKEN_NOT_LOGGED_IN). Re-wrapping it as
+    // PROVIDER_ERROR would lose the renderer's auth-recovery routing.
+    if (capturedGetApiKeyError !== null) return;
+    const added = agent.state.messages.slice(preLen);
+    if (added.length === 1 && added[0]?.role === 'assistant' && added[0]?.stopReason === 'error') {
+      const errorMessage = added[0].errorMessage ?? 'Provider returned an error';
+      const upstream = parseUpstreamErrorMessage(errorMessage);
+      const code =
+        upstream !== undefined ? errorCodeForUpstreamType(upstream.type) : 'PROVIDER_ERROR';
+      const userFacing = upstream
+        ? `${upstream.providerMessage ?? upstream.type}${upstream.requestId ? ` (request id: ${upstream.requestId})` : ''}`
+        : errorMessage;
+      const lifted = new CodesignError(userFacing, code) as Error & { status?: number };
+      if (upstream !== undefined) lifted.status = upstream.status;
+      // Drop the error-stopReason message so a retry starts from clean state.
+      // pi-agent-core treats agent.state.messages as the live transcript;
+      // re-prompting with a residual error message would corrupt the next
+      // turn's conversation history.
+      agent.state.messages.length = preLen;
+      throw lifted;
     }
   };
   try {

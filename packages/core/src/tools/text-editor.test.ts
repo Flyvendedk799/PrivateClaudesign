@@ -318,6 +318,61 @@ describe('text-editor per-call size guards', () => {
     expect(msg).toMatch(/Sidecar files/);
   });
 
+  it('gameplan A5 — Godot scenes (.tscn) accept up to 32 KB per create', async () => {
+    const tool = makeTextEditorTool(makeFs());
+    const scene = `[gd_scene format=3]\n${'[node name="N"]\n'.repeat(2000)}`;
+    expect(scene.length).toBeGreaterThan(20_000);
+    expect(scene.length).toBeLessThan(32_768);
+    const res = await tool.execute('id-tscn-ok', {
+      command: 'create',
+      path: 'main.tscn',
+      file_text: scene,
+    });
+    expect((res.content[0] as { text: string }).text).toMatch(/Created main\.tscn/);
+  });
+
+  it('gameplan A5 — Godot scenes throw with split-into-subscene guidance past 32 KB', async () => {
+    const tool = makeTextEditorTool(makeFs());
+    const huge = `[gd_scene]\n${'[node]\n'.repeat(5000)}`;
+    const msg = await runAndCatch(() =>
+      tool.execute('id-tscn-too-big', {
+        command: 'create',
+        path: 'main.tscn',
+        file_text: huge,
+      }),
+    );
+    expect(msg).toMatch(/exceeds the 32768-byte cap/);
+    expect(msg).toMatch(/Godot scenes/);
+    expect(msg).toMatch(/split the scene into a parent .tscn/);
+  });
+
+  it('gameplan A5 — game scripts (.gd / .py) accept up to 16 KB per create', async () => {
+    const tool = makeTextEditorTool(makeFs());
+    const script = `extends Node\n${'# pad\n'.repeat(2000)}`;
+    expect(script.length).toBeLessThan(16_384);
+    const res = await tool.execute('id-gd-ok', {
+      command: 'create',
+      path: 'player.gd',
+      file_text: script,
+    });
+    expect((res.content[0] as { text: string }).text).toMatch(/Created player\.gd/);
+  });
+
+  it('gameplan A5 — Python scripts throw with split-by-responsibility guidance past 16 KB', async () => {
+    const tool = makeTextEditorTool(makeFs());
+    const huge = `import pygame\n${'# pad\n'.repeat(3000)}`;
+    const msg = await runAndCatch(() =>
+      tool.execute('id-py-too-big', {
+        command: 'create',
+        path: 'main.py',
+        file_text: huge,
+      }),
+    );
+    expect(msg).toMatch(/exceeds the 16384-byte cap/);
+    expect(msg).toMatch(/Game scripts/);
+    expect(msg).toMatch(/split the script by responsibility/);
+  });
+
   it('lets a generously-sized skeleton through create', async () => {
     const tool = makeTextEditorTool(makeFs());
     // 4 KB skeleton — clearly under the 8 KB cap.

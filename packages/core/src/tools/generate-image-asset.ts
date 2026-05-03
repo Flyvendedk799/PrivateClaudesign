@@ -12,6 +12,10 @@ const GenerateImageAssetParams = Type.Object({
     Type.Literal('background'),
     Type.Literal('illustration'),
     Type.Literal('logo'),
+    // gameplan §A5 — game-mode purposes. The provider gets transparency /
+    // power-of-two / seamless-edge hints derived from these values.
+    Type.Literal('sprite'),
+    Type.Literal('tile'),
     Type.Literal('other'),
   ]),
   filenameHint: Type.Optional(Type.String()),
@@ -34,6 +38,8 @@ export type ImageAssetPurpose =
   | 'background'
   | 'illustration'
   | 'logo'
+  | 'sprite'
+  | 'tile'
   | 'other';
 
 export interface GenerateImageAssetRequest {
@@ -89,6 +95,14 @@ const PURPOSE_STYLE_SUFFIX: Record<ImageAssetPurpose, string> = {
     'Logo-style mark: centered composition on neutral background, clean vector-like silhouette, ' +
     'limited palette, square aspect, no surrounding context, no embedded text unless the prompt ' +
     'explicitly lists the wordmark.',
+  sprite:
+    'Game sprite: subject filling the frame on a TRANSPARENT BACKGROUND (alpha channel — no ' +
+    'background fill, no shadow underneath unless asked), pixel-clean silhouette, power-of-two ' +
+    'dimensions preferred, single-pose front-facing or side-on, no ambient scenery, no embedded text.',
+  tile:
+    'Seamless game tile: must tile in BOTH x AND y axes without visible seams, neutral lighting, ' +
+    'consistent perspective across the whole tile, no horizon line, no center-of-attention focal ' +
+    'point, no embedded text. Power-of-two square preferred.',
   other: '',
 };
 
