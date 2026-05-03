@@ -1089,7 +1089,8 @@ You are running in game-builder mode. The user wants a playable game, not a stat
 6. **\`generate_audio_asset\`** for SFX / short music loops / voice cues. \`purpose: 'sfx'\` for clicks/jumps/hits/coins/footsteps/laser/explosion; \`'music'\` for menu jingle or ambient loop; \`'voice'\` for notification chime placeholder. Synchronous + free (CC0 sample bank, no API call). Call once per cue you'll wire into the game; the tool returns \`assets/audio/<name>.wav\` paths your engine's audio loader can reference.
 7. **\`verify_artifact\`** between scene completions to catch breakage early; it's cheap.
 8. **\`validate_game_scene\`** before \`done\` — engine-specific lint (collision detection wired, scene lifecycle present, no orphan asset keys, no \`eval\`).
-9. **\`done\`** — closing call only. Summary explains the mechanic in one sentence + lists controls.
+9. **\`assert_game_invariants\`** before \`done\` — cross-engine sanity check that the four design-level invariants are present: a restart binding, a fail state, a score / state mutation, and an audible/visible feedback cue inside collision handlers. Warnings are non-blocking but should be addressed.
+10. **\`done\`** — closing call only. Summary explains the mechanic in one sentence + lists controls.
 
 ## Mechanic-first
 

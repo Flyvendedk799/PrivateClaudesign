@@ -69,6 +69,7 @@ import type {
 import { reasoningForModel } from './index.js';
 import { type CoreLogger, NOOP_LOGGER } from './logger.js';
 import { composeSystemPrompt } from './prompts/index.js';
+import { makeAssertGameInvariantsTool } from './tools/assert-game-invariants.js';
 // gameplan §A5 — game-builder tools (registered when deps.gameMode is set).
 import { type ChooseEngineFn, makeChooseEngineTool } from './tools/choose-engine.js';
 import { makeDeclareTweakSchemaTool } from './tools/declare-tweak-schema.js';
@@ -994,6 +995,49 @@ export async function generateViaAgent(
     if (isGameMode) {
       defaultTools.push(
         makeGenerateAudioAssetTool(deps.fs, log) as unknown as AgentTool<TSchema, unknown>,
+      );
+    }
+    // gameplan §E2 — assert_game_invariants is the cross-engine
+    // pre-`done` sanity check (restart binding, fail state, score, on-
+    // hit feedback). Static-analysis only; walks the project tree via
+    // the shared fs.listDir + fs.view idiom (same pattern
+    // validate_game_scene uses).
+    if (isGameMode && deps.fs !== undefined) {
+      const fs = deps.fs;
+      defaultTools.push(
+        makeAssertGameInvariantsTool({
+          listFiles: () => {
+            const out: Array<{ path: string; content: string }> = [];
+            const queue: string[] = [''];
+            const visited = new Set<string>();
+            while (queue.length > 0) {
+              const dir = queue.shift();
+              if (dir === undefined) break;
+              if (visited.has(dir)) continue;
+              visited.add(dir);
+              let entries: string[] = [];
+              try {
+                entries = fs.listDir(dir);
+              } catch {
+                continue;
+              }
+              for (const entry of entries) {
+                const rel = entry.startsWith(dir)
+                  ? entry
+                  : dir.length > 0
+                    ? `${dir}/${entry}`
+                    : entry;
+                const file = fs.view(rel);
+                if (file !== null) {
+                  out.push({ path: rel, content: file.content });
+                } else if (!visited.has(rel)) {
+                  queue.push(rel);
+                }
+              }
+            }
+            return out;
+          },
+        }) as unknown as AgentTool<TSchema, unknown>,
       );
     }
   }
