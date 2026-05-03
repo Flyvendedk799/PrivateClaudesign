@@ -257,6 +257,70 @@ function throwOversizedInsert(path: string, byteLen: number, cap: number): never
  * errors in `content`": the message becomes the tool-result the model sees,
  * with isError=true wired by the runtime.
  */
+/** Collapse all runs of whitespace to a single space and trim. Used when
+ *  attempting a fuzzy match — the model's most common str_replace miss
+ *  is whitespace drift (mixed tabs/spaces, trailing spaces, line-ending
+ *  differences). When the fuzzy match succeeds we tell the agent
+ *  exactly where the whitespace differs so the next attempt can succeed
+ *  with an exact anchor. */
+function normaliseWhitespace(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/** Find the byte offset of a near-whitespace-match for old_str inside
+ *  fileContent. Returns null if no whitespace-flexible match exists.
+ *  The returned span is the slice in the FILE that matched, useful for
+ *  showing the agent the literal bytes it would need. */
+function findFuzzyWhitespaceMatch(
+  oldStr: string,
+  fileContent: string,
+): { offset: number; literal: string } | null {
+  const targetNorm = normaliseWhitespace(oldStr);
+  if (targetNorm.length < 8) return null; // anchor too short to fuzzy-match safely
+  // Sliding-window scan: at each candidate start position (where the
+  // first non-whitespace token of oldStr appears in the file), expand
+  // until the normalised slice matches targetNorm.
+  const firstToken = (oldStr.match(/\S+/) ?? [''])[0];
+  if (firstToken === undefined || firstToken.length === 0) return null;
+  let searchFrom = 0;
+  while (true) {
+    const idx = fileContent.indexOf(firstToken, searchFrom);
+    if (idx < 0) return null;
+    // Try lengths from oldStr.length-20 to oldStr.length+20 (whitespace
+    // can shrink or grow but rarely by more than a few chars per line).
+    const minLen = Math.max(firstToken.length, oldStr.length - 20);
+    const maxLen = oldStr.length + 20;
+    for (let len = minLen; len <= maxLen && idx + len <= fileContent.length; len += 1) {
+      const slice = fileContent.slice(idx, idx + len);
+      if (normaliseWhitespace(slice) === targetNorm) {
+        return { offset: idx, literal: slice };
+      }
+    }
+    searchFrom = idx + 1;
+  }
+}
+
+/** Diff two short strings and produce a one-line description of where
+ *  they first differ. Used to point the agent at the exact char that's
+ *  off — usually a whitespace difference. */
+function describeFirstDiff(expected: string, actual: string): string {
+  const lim = Math.min(expected.length, actual.length);
+  for (let i = 0; i < lim; i += 1) {
+    if (expected.charCodeAt(i) !== actual.charCodeAt(i)) {
+      const before = JSON.stringify(actual.slice(Math.max(0, i - 8), i));
+      const got = JSON.stringify(actual.slice(i, i + 4));
+      const want = JSON.stringify(expected.slice(i, i + 4));
+      return `at char ${i}: file has ${got} after ${before}, your old_str expected ${want}`;
+    }
+  }
+  if (expected.length !== actual.length) {
+    return expected.length < actual.length
+      ? `your old_str is ${actual.length - expected.length} chars shorter than the actual file slice`
+      : `your old_str is ${expected.length - actual.length} chars longer than the actual file slice`;
+  }
+  return 'no character difference (this should not happen)';
+}
+
 function throwStrReplaceMiss(path: string, oldStr: string, fileContent: string): never {
   const firstLine = (oldStr.split('\n').find((ln) => ln.trim().length > 0) ?? '').trim();
   const lines = fileContent.split('\n');
@@ -268,6 +332,23 @@ function throwStrReplaceMiss(path: string, oldStr: string, fileContent: string):
     }
   }
   const firstLineSnippet = `${firstLine.slice(0, 60)}${firstLine.length > 60 ? '…' : ''}`;
+
+  // Gameimprove §2 — when the miss looks like whitespace drift, surface
+  // the exact bytes the file has + the first char that differs. Saves
+  // the agent the multi-round-trip guess-and-check loop.
+  const fuzzyMatch = findFuzzyWhitespaceMatch(oldStr, fileContent);
+  if (fuzzyMatch !== null) {
+    const lineNumber = fileContent.slice(0, fuzzyMatch.offset).split('\n').length;
+    const diffHint = describeFirstDiff(oldStr, fuzzyMatch.literal);
+    const literalSnippet =
+      fuzzyMatch.literal.length > 200
+        ? `${fuzzyMatch.literal.slice(0, 200)}…(${fuzzyMatch.literal.length} chars)`
+        : fuzzyMatch.literal;
+    throw new Error(
+      `old_str not found in ${path}, but a near-match exists at line ${lineNumber} that differs only in whitespace.\n\nDiff: ${diffHint}\n\nThe literal bytes the file has at that position:\n${JSON.stringify(literalSnippet)}\n\nUse those exact bytes as old_str and retry. Do NOT guess at another approximation — the difference is whitespace and your previous old_str will fail the same way.`,
+    );
+  }
+
   const head =
     candidateLines.length > 0
       ? `old_str not found in ${path}. The first non-empty line of your old_str ("${firstLineSnippet}") appears at line(s): ${candidateLines.join(', ')}.`

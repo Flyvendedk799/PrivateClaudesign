@@ -127,6 +127,38 @@ describe('text-editor str_replace miss handling', () => {
     expect(msg).toMatch(/Do NOT guess/);
   });
 
+  it('Gameimprove §2 — surfaces the literal bytes when the miss is whitespace drift', async () => {
+    // File has tabs, agent's old_str has spaces. Same content, different
+    // whitespace. The error should surface the actual literal bytes so
+    // the agent can copy-paste them on retry.
+    const fileWithTabs = [
+      'function startWave() {',
+      '\tfor (let i = 0; i < count; i++) {',
+      '\t\tspawn(i);',
+      '\t}',
+      '\tshowAnnounce("WAVE " + wave, 0x6366f1);',
+      '}',
+    ].join('\n');
+    const tool = makeTextEditorTool(makeFs({ 'index.html': fileWithTabs }));
+    const msg = await runAndCatch(() =>
+      tool.execute('id4', {
+        command: 'str_replace',
+        path: 'index.html',
+        // 4-space indent instead of tabs — same logical content
+        old_str: 'for (let i = 0; i < count; i++) {\n    spawn(i);\n}',
+        new_str: 'for (let i = 0; i < count; i++) { spawn(i); }',
+      }),
+    );
+    expect(msg).toMatch(/near-match exists at line/i);
+    expect(msg).toMatch(/differs only in whitespace/i);
+    // The literal bytes the file has — agent can copy these directly.
+    expect(msg).toMatch(/literal bytes/i);
+    // Diff hint pointing at the first differing char.
+    expect(msg).toMatch(/at char \d+/);
+    // Strong guidance to NOT keep guessing.
+    expect(msg).toMatch(/Do NOT guess/);
+  });
+
   it('successful str_replace returns ok payload', async () => {
     const tool = makeTextEditorTool(makeFs({ 'index.html': '<h1>Hi</h1>' }));
     const res = await tool.execute('id4', {
