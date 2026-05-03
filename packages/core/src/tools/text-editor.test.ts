@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { createCameraGuard } from './camera-pin.js';
+import { createEditBudget } from './edit-budget.js';
 import { type TextEditorFsCallbacks, makeTextEditorTool } from './text-editor.js';
 
 function makeFs(initial: Record<string, string> = {}): TextEditorFsCallbacks {
@@ -562,5 +564,175 @@ describe('text-editor view by symbol (backlog-2 #2)', () => {
     );
     expect(msg).toMatch(/declared 2 times/);
     expect(msg).toMatch(/line\(s\): 1, 2/);
+  });
+});
+
+describe('text-editor str_replace edit-budget warning (game-mode Sequence 3)', () => {
+  function buildFile(): string {
+    return Array.from({ length: 30 }, (_, i) => `<p>line ${i + 1}</p>`).join('\n');
+  }
+
+  it('does NOT append a warning when no editBudget is wired (design-mode regression guard)', async () => {
+    const fs = makeFs({ 'index.html': buildFile() });
+    const tool = makeTextEditorTool(fs);
+    for (let i = 0; i < 8; i += 1) {
+      const before = `<p>line ${i + 1}</p>`;
+      const after = `<p>edited ${i + 1}</p>`;
+      const res = (await tool.execute(`id-${i}`, {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: before,
+        new_str: after,
+      })) as { content: Array<{ text: string }> };
+      expect(res.content[0]?.text ?? '').not.toContain('[edit-budget]');
+    }
+  });
+
+  it('appends [edit-budget] once the 5th consecutive str_replace lands without a verify', async () => {
+    const fs = makeFs({ 'index.html': buildFile() });
+    const budget = createEditBudget(5);
+    const tool = makeTextEditorTool(fs, budget);
+    const messages: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const res = (await tool.execute(`id-${i}`, {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: `<p>line ${i + 1}</p>`,
+        new_str: `<p>edited ${i + 1}</p>`,
+      })) as { content: Array<{ text: string }> };
+      messages.push(res.content[0]?.text ?? '');
+    }
+    for (let i = 0; i < 4; i += 1) {
+      expect(messages[i] ?? '').not.toContain('[edit-budget]');
+    }
+    expect(messages[4]).toContain('[edit-budget]');
+    expect(messages[4]).toContain('5 consecutive str_replace calls against index.html');
+    expect(messages[4]).toContain('comment anchor');
+  });
+
+  it('reset() clears the warning so the next 4 edits are clean again', async () => {
+    const fs = makeFs({ 'index.html': buildFile() });
+    const budget = createEditBudget(5);
+    const tool = makeTextEditorTool(fs, budget);
+    for (let i = 0; i < 5; i += 1) {
+      await tool.execute(`id-${i}`, {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: `<p>line ${i + 1}</p>`,
+        new_str: `<p>edited ${i + 1}</p>`,
+      });
+    }
+    budget.reset();
+    const res = (await tool.execute('id-after-reset', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: '<p>line 6</p>',
+      new_str: '<p>edited 6</p>',
+    })) as { content: Array<{ text: string }> };
+    expect(res.content[0]?.text ?? '').not.toContain('[edit-budget]');
+  });
+
+  it('counts each path independently (a flood on a.js does not flag b.js)', async () => {
+    const fs = makeFs({
+      'a.js': "console.log('a');",
+      'b.js': "console.log('b');",
+    });
+    const budget = createEditBudget(3);
+    const tool = makeTextEditorTool(fs, budget);
+    const aRes: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const res = (await tool.execute(`a-${i}`, {
+        command: 'str_replace',
+        path: 'a.js',
+        old_str: `console.log('a${i === 0 ? '' : i}');`,
+        new_str: `console.log('a${i + 1}');`,
+      })) as { content: Array<{ text: string }> };
+      aRes.push(res.content[0]?.text ?? '');
+    }
+    const bRes = (await tool.execute('b-0', {
+      command: 'str_replace',
+      path: 'b.js',
+      old_str: "console.log('b');",
+      new_str: "console.log('b1');",
+    })) as { content: Array<{ text: string }> };
+    expect(aRes[2]).toContain('[edit-budget]');
+    expect(bRes.content[0]?.text ?? '').not.toContain('[edit-budget]');
+  });
+});
+
+describe('text-editor camera-pin enforcement (game-mode Sequence 5)', () => {
+  const persp =
+    'const camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 100);\ncamera.position.set(0, 1.6, 4);';
+  const ortho = 'const camera = new THREE.OrthographicCamera(-w, w, h, -h, 0.1, 200);';
+
+  it('refuses a Perspective → Orthographic swap when the user prompt does not name the camera', async () => {
+    const fs = makeFs({ 'index.html': `<script>${persp}</script>` });
+    const guard = createCameraGuard({
+      gameMode: true,
+      editMode: true,
+      userPrompt: 'aim and hitbox should correlate',
+    });
+    const tool = makeTextEditorTool(fs, undefined, guard);
+    const msg = await runAndCatch(() =>
+      tool.execute('cam-1', {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: persp,
+        new_str: ortho,
+      }),
+    );
+    expect(msg).toMatch(/\[camera-pin\]/);
+    expect(msg).toMatch(/PerspectiveCamera → OrthographicCamera/);
+  });
+
+  it('allows a same-class FOV tweak through (only swaps are blocked)', async () => {
+    const fs = makeFs({ 'index.html': `<script>${persp}</script>` });
+    const guard = createCameraGuard({
+      gameMode: true,
+      editMode: true,
+      userPrompt: 'feels too narrow',
+    });
+    const tool = makeTextEditorTool(fs, undefined, guard);
+    await tool.execute('cam-2', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: 'PerspectiveCamera(60, w / h, 0.1, 100)',
+      new_str: 'PerspectiveCamera(75, w / h, 0.1, 100)',
+    });
+    expect(fs.view('index.html')?.content).toContain('PerspectiveCamera(75, w / h, 0.1, 100)');
+  });
+
+  it('allows the swap when the user prompt mentions the camera explicitly', async () => {
+    const fs = makeFs({ 'index.html': `<script>${persp}</script>` });
+    const guard = createCameraGuard({
+      gameMode: true,
+      editMode: true,
+      userPrompt: 'change the camera to a 3rd-person follow cam',
+    });
+    const tool = makeTextEditorTool(fs, undefined, guard);
+    await tool.execute('cam-3', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: persp,
+      new_str: ortho,
+    });
+    expect(fs.view('index.html')?.content).toContain('OrthographicCamera');
+  });
+
+  it('design-mode runs are never blocked (regression guard for non-game artifacts)', async () => {
+    const fs = makeFs({ 'index.html': `<script>${persp}</script>` });
+    const guard = createCameraGuard({
+      gameMode: false,
+      editMode: true,
+      userPrompt: 'just iterate',
+    });
+    const tool = makeTextEditorTool(fs, undefined, guard);
+    await tool.execute('cam-4', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: persp,
+      new_str: ortho,
+    });
+    expect(fs.view('index.html')?.content).toContain('OrthographicCamera');
   });
 });

@@ -1883,6 +1883,53 @@ describe('Godot engine guide composition (gameplan §B1)', () => {
   });
 });
 
+describe('GAME_WORKFLOW mechanic spec / camera-lock / edit-budget directives', () => {
+  const prompt = composeSystemPrompt({ mode: 'create', artifactType: 'game' });
+
+  it('requires a Mechanic spec block as step 2 with the canonical fields', () => {
+    expect(prompt).toContain('Mechanic spec block');
+    expect(prompt).toContain('Genre: <brawler');
+    expect(prompt).toContain('Reference:');
+    expect(prompt).toContain('Camera: <orthographic-top');
+    expect(prompt).toContain('Inputs:');
+    expect(prompt).toContain('Win:');
+    expect(prompt).toContain('Lose:');
+  });
+
+  it('cites the c44763af regression so future agents know why genre vocabulary matters', () => {
+    expect(prompt).toContain('c44763af');
+    expect(prompt).toContain('topview');
+    expect(prompt).toContain('Jab vs Cross');
+  });
+
+  it('exempts the Mechanic spec block from the no-inter-tool-text rule', () => {
+    expect(prompt).toContain('ONE allowed exception is the **Mechanic spec block**');
+  });
+
+  it('locks the camera type in edit mode unless the user names it', () => {
+    expect(prompt).toContain('Edit-mode camera lock');
+    expect(prompt).toContain('OrthographicCamera ↔ PerspectiveCamera');
+    expect(prompt).toContain('`camera`, `perspective`, `view`, `zoom`, `angle`');
+  });
+
+  it('publishes the 5-call str_replace edit budget the host enforces', () => {
+    expect(prompt).toContain('Edit budget');
+    expect(prompt).toContain('≥ 5 consecutive `str_replace`');
+    expect(prompt).toContain('[edit-budget]');
+  });
+
+  it('lists playtest_game as a required pre-`done` step', () => {
+    expect(prompt).toContain('`playtest_game`');
+    expect(prompt).toContain('`window.__game.debug`');
+  });
+
+  it('includes assert_game_invariants and notes its genre-aware extension', () => {
+    expect(prompt).toContain('`assert_game_invariants`');
+    expect(prompt).toContain('Genre-aware');
+    expect(prompt).toContain('combo + hitstop + per-attack-limb + aim/hitbox parity');
+  });
+});
+
 describe('Pygame engine guide composition (gameplan §C1)', () => {
   it('includes the Pygame guide when engine = "pygame"', () => {
     const prompt = composeSystemPrompt({

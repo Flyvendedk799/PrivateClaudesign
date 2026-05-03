@@ -433,6 +433,9 @@ export type {
 export { SkillFrontmatterV1 } from './skills';
 export type { LoadedSkill } from './skills';
 
+export { summarizeSnapshotDiff } from './snapshot-diff';
+export type { SnapshotDiffOptions } from './snapshot-diff';
+
 export { diagnose, diagnoseGenerateFailure, looksLikeTruncatedStream } from './diagnostics';
 export type {
   DiagnosticHypothesis,

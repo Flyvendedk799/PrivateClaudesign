@@ -1,7 +1,8 @@
 import { useT } from '@open-codesign/i18n';
-import type { LocalInputFile, OnboardingState } from '@open-codesign/shared';
+import type { DesignSnapshot, LocalInputFile, OnboardingState } from '@open-codesign/shared';
+import { summarizeSnapshotDiff } from '@open-codesign/shared';
 import { FolderOpen, Link2, Paperclip, X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgentStream } from '../hooks/useAgentStream';
 import { useCodesignStore } from '../store';
 import { ModelSwitcher } from './ModelSwitcher';
@@ -129,6 +130,50 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
     config?.hasKey && config.modelPrimary ? config.modelPrimary : t('sidebar.chat.noModel');
   const lastTokens = lastUsage ? lastUsage.inputTokens + lastUsage.outputTokens : null;
 
+  // Sequence-7 (game-mode guardrails) — load snapshots for the current
+  // design so we can compute per-snapshot "what changed" diff lines and
+  // surface them next to the artifact_delivered tile in the chat.
+  // chatMessages.length / isGenerating trigger a refresh when a new
+  // artifact_delivered row lands or generation finishes — they're not
+  // used inside the body, so Biome flags them; the suppression is
+  // intentional (trigger-only deps).
+  const [designSnapshots, setDesignSnapshots] = useState<ReadonlyArray<DesignSnapshot>>([]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: trigger-only deps for snapshot refresh
+  useEffect(() => {
+    if (!currentDesignId) {
+      setDesignSnapshots([]);
+      return;
+    }
+    const codesign = window.codesign;
+    if (codesign === undefined) return;
+    let cancelled = false;
+    void codesign.snapshots
+      .list(currentDesignId)
+      .then((snaps: ReadonlyArray<DesignSnapshot>) => {
+        if (cancelled) return;
+        setDesignSnapshots(snaps);
+      })
+      .catch(() => {
+        // Decorative — empty list silently disables the diff badge.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentDesignId, chatMessages.length, isGenerating]);
+
+  const snapshotDiffsBySnapshotId = useMemo(() => {
+    if (designSnapshots.length === 0) return null;
+    const byId = new Map<string, DesignSnapshot>();
+    for (const s of designSnapshots) byId.set(s.id, s);
+    const out: Record<string, ReadonlyArray<string>> = {};
+    for (const snap of designSnapshots) {
+      const parent = snap.parentId !== null ? (byId.get(snap.parentId) ?? null) : null;
+      const lines = summarizeSnapshotDiff(parent?.artifactSource ?? null, snap.artifactSource);
+      if (lines.length > 0) out[snap.id] = lines;
+    }
+    return out;
+  }, [designSnapshots]);
+
   // plan0305 P3.2 — running design total ("$0.34 across 4 runs"). Re-fetched
   // when the active design changes or a generation just completed; bypassed
   // during streaming so we don't churn the renderer on every token.
@@ -170,6 +215,7 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
             loading={!chatLoaded}
             isGenerating={isGenerating}
             pendingToolCalls={pendingToolCalls}
+            snapshotDiffsBySnapshotId={snapshotDiffsBySnapshotId}
             streamingText={
               streamingAssistantText && streamingAssistantText.designId === currentDesignId
                 ? streamingAssistantText.text

@@ -213,3 +213,125 @@ describe('makeAssertGameInvariantsTool', () => {
     expect(result.details?.ok).toBe(true);
   });
 });
+
+describe('assertGameInvariants brawler-specific checks (Sequence 6)', () => {
+  const baseFour = `
+    let score = 0;
+    function onCollision() { score += 1; new Audio().play(); }
+    function onGameOver() {}
+    window.addEventListener('keydown', (e) => { if (e.code === 'KeyR') score = 0; });
+  `;
+
+  it('flags missing combo, hitstop, limbs on a bare brawler skeleton (and tags genre)', () => {
+    const result = assertGameInvariants(deps([{ path: 'src/main.js', content: baseFour }]), {
+      genre: 'brawler',
+    });
+    const ids = result.issues.map((i) => i.invariant);
+    expect(ids).toContain('brawler-combo');
+    expect(ids).toContain('brawler-hitstop');
+    expect(ids).toContain('brawler-per-attack-limb');
+    expect(result.checked).toContain('brawler-combo');
+    expect(result.genre).toBe('brawler');
+  });
+
+  it('passes the brawler combo check when combo / multiplier / lastAttack are wired', () => {
+    const result = assertGameInvariants(
+      deps([
+        {
+          path: 'src/main.js',
+          content: `${baseFour}\nlet combo = 0; let multiplier = 1; const lastAttack = null;`,
+        },
+      ]),
+      { genre: 'brawler' },
+    );
+    expect(result.issues.map((i) => i.invariant)).not.toContain('brawler-combo');
+  });
+
+  it('passes hitstop when any of the wake-words appear', () => {
+    const result = assertGameInvariants(
+      deps([
+        {
+          path: 'src/main.js',
+          content: `${baseFour}\nfunction applyHitstop() { staggerFrames = 6; }`,
+        },
+      ]),
+      { genre: 'brawler' },
+    );
+    expect(result.issues.map((i) => i.invariant)).not.toContain('brawler-hitstop');
+  });
+
+  it('passes per-attack-limb when at least two limb identifiers are present', () => {
+    const result = assertGameInvariants(
+      deps([
+        {
+          path: 'src/main.js',
+          content: `${baseFour}\nconst leftArm = mesh; const rightFist = mesh; jab();`,
+        },
+      ]),
+      { genre: 'brawler' },
+    );
+    expect(result.issues.map((i) => i.invariant)).not.toContain('brawler-per-attack-limb');
+  });
+
+  it('flags the c44763af `rotation.y = -playerAngle` bug as an aim/hitbox parity violation', () => {
+    const result = assertGameInvariants(
+      deps([
+        {
+          path: 'src/main.js',
+          content: `${baseFour}\nplayerGroup.rotation.y = -playerAngle;`,
+        },
+      ]),
+      { genre: 'brawler' },
+    );
+    const issue = result.issues.find((i) => i.invariant === 'brawler-aim-hitbox-parity');
+    expect(issue).toBeDefined();
+    expect(issue?.message).toMatch(/c44763af/);
+  });
+
+  it('does NOT flag aim/hitbox parity on the corrected `rotation.y = playerAngle`', () => {
+    const result = assertGameInvariants(
+      deps([
+        {
+          path: 'src/main.js',
+          content: `${baseFour}\nplayerGroup.rotation.y = playerAngle;`,
+        },
+      ]),
+      { genre: 'brawler' },
+    );
+    expect(result.issues.map((i) => i.invariant)).not.toContain('brawler-aim-hitbox-parity');
+  });
+
+  it('does NOT add brawler checks when genre is not "brawler" (e.g. puzzle game)', () => {
+    const result = assertGameInvariants(
+      deps([{ path: 'src/main.js', content: `${baseFour}\nrotation.y = -playerAngle;` }]),
+      { genre: 'puzzle' },
+    );
+    expect(result.issues.map((i) => i.invariant)).not.toContain('brawler-combo');
+    expect(result.issues.map((i) => i.invariant)).not.toContain('brawler-aim-hitbox-parity');
+    expect(result.checked).not.toContain('brawler-combo');
+  });
+
+  it('design-mode (no genre) keeps the original four-check behaviour unchanged', () => {
+    const result = assertGameInvariants(
+      deps([{ path: 'src/main.js', content: `${baseFour}\nrotation.y = -playerAngle;` }]),
+    );
+    expect(result.issues.map((i) => i.invariant)).not.toContain('brawler-aim-hitbox-parity');
+    expect(result.checked).toEqual(['restart', 'fail-state', 'score-or-state', 'feedback']);
+    expect(result.genre).toBeNull();
+  });
+});
+
+describe('assert_game_invariants tool (genre param wiring)', () => {
+  it('forwards the genre arg into assertGameInvariants', async () => {
+    const tool = makeAssertGameInvariantsTool({
+      listFiles: () => [{ path: 'src/main.js', content: 'rotation.y = -playerAngle;' }],
+    });
+    const result = await tool.execute('call-x', { genre: 'brawler' });
+    const details = result.details as {
+      issues: Array<{ invariant: string }>;
+      genre: string | null;
+    };
+    expect(details.genre).toBe('brawler');
+    expect(details.issues.map((i) => i.invariant)).toContain('brawler-aim-hitbox-parity');
+  });
+});

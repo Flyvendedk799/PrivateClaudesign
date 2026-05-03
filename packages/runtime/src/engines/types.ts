@@ -71,8 +71,15 @@ export interface GameEngineAdapter {
 }
 
 /** Snippet shared by all JS-engine bootstraps — sets up `window.__game` with
- *  the cross-engine tweak bridge described in gameplan §7.3. Receives
- *  encoded JSON of the engine id + initial params + startMuted hint. */
+ *  the cross-engine tweak bridge described in gameplan §7.3 and the playtest
+ *  debug contract used by `playtest_game`. Receives encoded JSON of the
+ *  engine id + initial params + startMuted hint.
+ *
+ *  The `__game.debug.snapshot()` default returns `null`; agents are expected
+ *  to override with a small getter that exposes whatever fields the
+ *  playtest scenario asserts on (player position, angle, hp, score, …).
+ *  Keeping the default in the bootstrap means `playtest_game` never throws
+ *  on missing-symbol — it surfaces a `no_debug_contract` outcome instead. */
 export function gameGlobalSetupSnippet(opts: {
   engine: GameEngineId;
   initialParams: Record<string, unknown>;
@@ -85,6 +92,7 @@ window.__game = window.__game || {};
 window.__game.engine = ${JSON.stringify(opts.engine)};
 window.__game.params = ${params};
 window.__game.config = ${config};
+window.__game.debug = window.__game.debug || { snapshot: function () { return null; } };
 window.addEventListener('message', function (e) {
   if (e && e.data && e.data.type === 'game:setParams' && e.data.params) {
     Object.assign(window.__game.params, e.data.params);

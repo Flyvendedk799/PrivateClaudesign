@@ -73,6 +73,16 @@ export {
   type RenderPreviewDetails,
   type RenderPreviewViewport,
 } from './tools/render-preview.js';
+export {
+  makePlaytestGameTool,
+  type Playtester,
+  type PlaytesterInput,
+  type PlaytesterOutput,
+  type PlaytestStep,
+  type PlaytestStepResult,
+  type PlaytestGameDetails,
+  type PlaytestViewport,
+} from './tools/playtest-game.js';
 
 export interface AttachmentContext {
   name: string;

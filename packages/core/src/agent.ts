@@ -68,8 +68,10 @@ import type {
 } from './index.js';
 import { reasoningForModel } from './index.js';
 import { type CoreLogger, NOOP_LOGGER } from './logger.js';
+import { createNarrationDetector } from './narration-detector.js';
 import { composeSystemPrompt } from './prompts/index.js';
 import { makeAssertGameInvariantsTool } from './tools/assert-game-invariants.js';
+import { createCameraGuard } from './tools/camera-pin.js';
 // gameplan §A5 — game-builder tools (registered when deps.gameMode is set).
 import { type ChooseEngineFn, makeChooseEngineTool } from './tools/choose-engine.js';
 import { makeDeclareTweakSchemaTool } from './tools/declare-tweak-schema.js';
@@ -79,12 +81,14 @@ import {
   makeViewFrameTool,
 } from './tools/design-library.js';
 import { type DoneRuntimeVerifier, makeDoneTool, makeVerifyArtifactTool } from './tools/done.js';
+import { createEditBudget } from './tools/edit-budget.js';
 import { makeGenerateAudioAssetTool } from './tools/generate-audio-asset.js';
 import {
   type GenerateImageAssetFn,
   makeGenerateImageAssetTool,
 } from './tools/generate-image-asset.js';
 import { makeListFilesTool } from './tools/list-files.js';
+import { type Playtester, makePlaytestGameTool } from './tools/playtest-game.js';
 import { makeReadDesignSystemTool } from './tools/read-design-system.js';
 import { makeReadUrlTool } from './tools/read-url.js';
 import { type RenderPreviewer, makeRenderPreviewTool } from './tools/render-preview.js';
@@ -839,6 +843,14 @@ export interface GenerateViaAgentDeps {
         /** Engine-specific validator dispatch — host imports the runtime
          *  adapter and invokes its `validate(files)` method. */
         validate: ValidateGameSceneFn;
+        /** Optional host-injected synthetic-input playtester. When provided,
+         *  the toolset gains `playtest_game` so the agent can assert
+         *  input → state mapping (KeyD moves +x, mouseDown damages target)
+         *  before `done`. Implementation lives in apps/desktop/src/main —
+         *  same hidden-BrowserWindow infrastructure as render_preview, but
+         *  drives synthetic events and reads `window.__game.debug.snapshot()`
+         *  between them. Headless / vitest runs simply omit it. */
+        playtester?: Playtester | undefined;
       }
     | undefined;
 }
@@ -953,7 +965,18 @@ export async function generateViaAgent(
     );
   }
   if (deps.fs) {
-    defaultTools.push(makeTextEditorTool(deps.fs) as unknown as AgentTool<TSchema, unknown>);
+    const editBudget = createEditBudget();
+    const cameraGuard = createCameraGuard({
+      gameMode: isGameMode,
+      editMode: input.history.length > 0,
+      userPrompt: input.prompt,
+    });
+    defaultTools.push(
+      makeTextEditorTool(deps.fs, editBudget, cameraGuard) as unknown as AgentTool<
+        TSchema,
+        unknown
+      >,
+    );
     defaultTools.push(makeListFilesTool(deps.fs) as unknown as AgentTool<TSchema, unknown>);
     defaultTools.push(
       makeDeclareTweakSchemaTool(deps.fs) as unknown as AgentTool<TSchema, unknown>,
@@ -970,7 +993,10 @@ export async function generateViaAgent(
       );
     }
     defaultTools.push(
-      makeVerifyArtifactTool(deps.fs, deps.runtimeVerify) as unknown as AgentTool<TSchema, unknown>,
+      makeVerifyArtifactTool(deps.fs, deps.runtimeVerify, editBudget) as unknown as AgentTool<
+        TSchema,
+        unknown
+      >,
     );
     defaultTools.push(
       makeDoneTool(deps.fs, deps.runtimeVerify, log) as unknown as AgentTool<TSchema, unknown>,
@@ -1038,6 +1064,18 @@ export async function generateViaAgent(
             return out;
           },
         }) as unknown as AgentTool<TSchema, unknown>,
+      );
+    }
+    // Sequence-2 (game-mode guardrails) — host-driven synthetic-input
+    // playtest. Only registers when both an fs and a host playtester are
+    // wired; vitest runs omit the playtester so the tool catalog drops
+    // it cleanly without a stub.
+    if (isGameMode && deps.gameMode !== undefined && deps.gameMode.playtester !== undefined) {
+      defaultTools.push(
+        makePlaytestGameTool(deps.fs, deps.gameMode.playtester) as unknown as AgentTool<
+          TSchema,
+          unknown
+        >,
       );
     }
   }
@@ -1211,6 +1249,67 @@ export async function generateViaAgent(
     const listener = deps.onEvent;
     agent.subscribe((event) => {
       listener(event);
+    });
+  }
+
+  // Sequence-4 (game-mode guardrails) — detect inter-tool narration in
+  // game runs and emit a single mid-run system reminder via agent.steer
+  // after the SECOND offense. The renderer-side P2.1 filter already
+  // hides these from the user's chat; this hook closes the loop on the
+  // model side so it stops paying tokens to write narration that nobody
+  // sees. We only steer in game mode + only once per run + only after
+  // 2 offenses, so the existing rule "single-session execution... mid-
+  // run synthetic user messages confuse the conversation flow" stays
+  // honoured for the common case. The Mechanic spec block (Sequence 1)
+  // is emitted BEFORE the first tool_use, so it falls outside the
+  // "inter-tool" classification by construction.
+  const NARRATION_OFFENSE_THRESHOLD = 2;
+  const isGameModeRun = isGameMode;
+  let narrationSteerEmitted = false;
+  let narrationTurnIndex = -1;
+  if (isGameModeRun) {
+    const detector = createNarrationDetector();
+    agent.subscribe((event) => {
+      if (event.type === 'turn_start') {
+        narrationTurnIndex += 1;
+        return;
+      }
+      if (event.type === 'message_update') {
+        const ame = event.assistantMessageEvent as
+          | { type: 'text_delta'; delta?: string; text?: string }
+          | { type: string };
+        if (ame.type === 'text_delta') {
+          const delta =
+            (ame as { delta?: string; text?: string }).delta ??
+            (ame as { delta?: string; text?: string }).text ??
+            '';
+          if (delta.length > 0) detector.observeTextDelta(delta);
+        }
+        return;
+      }
+      if (event.type === 'tool_execution_start') {
+        detector.observeToolStart();
+        return;
+      }
+      if (event.type === 'turn_end') {
+        const result = detector.endTurn();
+        if (result.narrations.length === 0) return;
+        log.warn('[generate] step=narration_violation', {
+          ...ctx,
+          turn: narrationTurnIndex,
+          offensesThisTurn: result.narrations.length,
+          offensesThisRun: result.totalOffenses,
+          sample: result.narrations[0]?.slice(0, 120) ?? '',
+        });
+        if (!narrationSteerEmitted && result.totalOffenses >= NARRATION_OFFENSE_THRESHOLD) {
+          narrationSteerEmitted = true;
+          agent.steer({
+            role: 'user',
+            content: `[system-reminder] Inter-tool assistant text detected (${result.totalOffenses} offenses this run). Per game-workflow §"Cadence", emit ZERO text between tool_use blocks. The Mechanic spec block at step 2 is the only allowed inter-tool text for the whole run. Resume with the next tool call directly.`,
+            timestamp: Date.now(),
+          });
+        }
+      }
     });
   }
 

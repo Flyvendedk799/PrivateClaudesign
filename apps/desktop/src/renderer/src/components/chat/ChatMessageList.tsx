@@ -23,6 +23,12 @@ interface ChatMessageListProps {
    *  thinking ending and the runtime emitting tool_call_start. */
   streamingToolDraft?: { toolName: string; bytes: number } | null;
   pendingToolCalls?: ChatToolCallPayload[];
+  /** Sequence-7 (game-mode guardrails) — a precomputed lookup from
+   *  snapshotId → 1-3 short "what changed" lines. The artifact_delivered
+   *  row renders these next to the file label when its snapshotId hits
+   *  the map. Computation lives in the parent (Sidebar) so this
+   *  component stays a pure renderer. Pass `null`/`undefined` to disable. */
+  snapshotDiffsBySnapshotId?: Record<string, ReadonlyArray<string>> | null;
 }
 
 interface RenderItem {
@@ -90,6 +96,7 @@ export function ChatMessageList({
   streamingThinking,
   streamingToolDraft,
   pendingToolCalls,
+  snapshotDiffsBySnapshotId,
 }: ChatMessageListProps) {
   const t = useT();
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -218,20 +225,35 @@ export function ChatMessageList({
     } else if (msg.kind === 'artifact_delivered') {
       const p = msg.payload as { filename?: string; createdAt?: string };
       const label = p?.filename ?? t('sidebar.chat.artifactDefaultLabel');
+      const diffLines =
+        msg.snapshotId !== null && snapshotDiffsBySnapshotId
+          ? snapshotDiffsBySnapshotId[msg.snapshotId]
+          : undefined;
       items.push({
         key: `art-${msg.seq}`,
         node: (
-          <div className="flex items-center gap-[var(--space-2)] rounded-[var(--radius-md)] border border-[var(--color-border-muted)] bg-[var(--color-surface)] px-[var(--space-3)] py-[var(--space-2)]">
-            <FileText
-              className="w-[14px] h-[14px] text-[var(--color-text-secondary)] shrink-0"
-              aria-hidden
-            />
-            <span className="text-[12.5px] font-[ui-monospace,Menlo,monospace] text-[var(--color-text-primary)] truncate">
-              {label}
-            </span>
-            <span className="ml-auto text-[11px] text-[var(--color-text-muted)]">
-              {t('sidebar.chat.artifactDelivered')}
-            </span>
+          <div className="flex flex-col gap-[var(--space-1)] rounded-[var(--radius-md)] border border-[var(--color-border-muted)] bg-[var(--color-surface)] px-[var(--space-3)] py-[var(--space-2)]">
+            <div className="flex items-center gap-[var(--space-2)]">
+              <FileText
+                className="w-[14px] h-[14px] text-[var(--color-text-secondary)] shrink-0"
+                aria-hidden
+              />
+              <span className="text-[12.5px] font-[ui-monospace,Menlo,monospace] text-[var(--color-text-primary)] truncate">
+                {label}
+              </span>
+              <span className="ml-auto text-[11px] text-[var(--color-text-muted)]">
+                {t('sidebar.chat.artifactDelivered')}
+              </span>
+            </div>
+            {diffLines && diffLines.length > 0 && (
+              <ul className="mt-[var(--space-1)] flex flex-col gap-[2px] pl-[20px] text-[11.5px] font-[ui-monospace,Menlo,monospace] text-[var(--color-text-muted)]">
+                {diffLines.map((line) => (
+                  <li key={line} className="truncate">
+                    {line}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         ),
       });

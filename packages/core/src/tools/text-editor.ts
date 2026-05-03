@@ -12,6 +12,8 @@
 
 import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
 import { Type } from '@sinclair/typebox';
+import type { CameraGuard } from './camera-pin.js';
+import type { EditBudget } from './edit-budget.js';
 import { extractJsxSymbol, offsetsToLines, rangeToLineSpan } from './symbol-extractor.js';
 
 /**
@@ -378,6 +380,8 @@ function throwStrReplaceAmbiguous(oldStr: string, fileContent: string, originalM
 
 export function makeTextEditorTool(
   fs: TextEditorFsCallbacks,
+  editBudget?: EditBudget,
+  cameraGuard?: CameraGuard,
 ): AgentTool<typeof TextEditorParams, TextEditorDetails> {
   // Per-run view budget: the full content of a file is returned on the FIRST
   // view of each path; subsequent views collapse to a short summary (line
@@ -573,11 +577,17 @@ export function makeTextEditorTool(
           if (newBytes > replaceCap) {
             throwOversizedStrReplace(path, newBytes, replaceCap);
           }
+          const cameraRefusal = cameraGuard?.check(oldStr, newStr) ?? null;
+          if (cameraRefusal !== null) {
+            throw new Error(cameraRefusal);
+          }
           try {
             const result = await fs.strReplace(path, oldStr, newStr);
             const sizeAfter = fs.view(path)?.content.length ?? 0;
             lastMutationByPath.set(path, { tick, size: sizeAfter });
-            return ok(formatEditOk('Edited', result, newStr.length === 0), {
+            const budgetWarning = editBudget?.recordEdit(path) ?? null;
+            const message = formatEditOk('Edited', result, newStr.length === 0);
+            return ok(budgetWarning !== null ? `${message}${budgetWarning}` : message, {
               command: 'str_replace',
               path,
               result,

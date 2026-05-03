@@ -26,6 +26,7 @@ import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
 import { Type } from '@sinclair/typebox';
 import { type CoreLogger, NOOP_LOGGER } from '../logger.js';
 import { HEURISTIC_ADVISORY_SOURCES, runHeuristics } from './done-heuristics.js';
+import type { EditBudget } from './edit-budget.js';
 import type { TextEditorFsCallbacks } from './text-editor.js';
 
 const DoneParams = Type.Object({
@@ -313,6 +314,7 @@ export interface VerifyDetails {
 export function makeVerifyArtifactTool(
   fs: TextEditorFsCallbacks,
   runtimeVerify?: DoneRuntimeVerifier,
+  editBudget?: EditBudget,
 ): AgentTool<typeof VerifyParams, VerifyDetails> {
   return {
     name: 'verify_artifact',
@@ -331,6 +333,7 @@ export function makeVerifyArtifactTool(
       const result = await runArtifactChecks(fs, runtimeVerify, path);
       const fatal = result.errors.filter((e) => !ADVISORY_SOURCES.has(e.source ?? ''));
       const status: VerifyDetails['status'] = fatal.length === 0 ? 'ok' : 'has_errors';
+      if (status === 'ok' && editBudget !== undefined) editBudget.reset();
       const summary =
         status === 'ok'
           ? result.found

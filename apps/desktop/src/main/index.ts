@@ -96,6 +96,7 @@ import {
   setDesignSystem,
 } from './onboarding-ipc';
 import { isAllowedExternalUrl } from './open-external';
+import { makePlaytester } from './playtest-game';
 import { readPersisted as readPreferences, registerPreferencesIpc } from './preferences-ipc';
 import { preparePromptContext } from './prompt-context';
 import { createProviderContextStore } from './provider-context';
@@ -777,6 +778,7 @@ function registerIpcHandlers(db: Database | null): void {
     const toolStartedAt = new Map<string, number>();
     const runtimeVerify = makeRuntimeVerifier();
     const renderPreview = makeRenderPreviewer();
+    const playtester = makePlaytester();
     const { fs, fsMap } = createRuntimeTextEditorFs({
       db,
       designId,
@@ -937,6 +939,7 @@ function registerIpcHandlers(db: Database | null): void {
             ? { ok: true, engine, issues: [] }
             : { ok: false, engine, issues: result.issues };
         },
+        playtester,
       };
     })();
     return generateViaAgent(input, {

@@ -52,6 +52,12 @@ describe('phaserAdapter.bootstrap (gameplan §3 + §7.3)', () => {
     expect(html).toContain('<div id="game">');
     expect(html).toContain('<script type="module" src="src/main.js">');
   });
+
+  it('declares the playtest debug contract with a default snapshot getter', () => {
+    const html = phaserAdapter.bootstrap(opts);
+    expect(html).toContain('window.__game.debug');
+    expect(html).toContain('snapshot: function () { return null; }');
+  });
 });
 
 describe('phaserAdapter.validate (gameplan §7.6)', () => {
