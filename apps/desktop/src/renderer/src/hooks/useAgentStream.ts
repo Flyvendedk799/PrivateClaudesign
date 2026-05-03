@@ -421,12 +421,19 @@ export function useAgentStream(): void {
       pending.resolved = true;
       const result = event.result;
       const durationMs = event.durationMs;
+      // plan0305 P3.1 — when pi-agent-core flagged the call with isError,
+      // persist status='error' instead of 'done' so the chat history shows
+      // failed attempts in red and downstream code can distinguish "this
+      // tool actually executed" from "this tool was rejected/threw". Pre-
+      // plan0305 (chat_messages schema_version=1) rows always wrote 'done'
+      // regardless of outcome — see migrateChatMessageRow for the bump.
+      const persistedStatus: 'done' | 'error' = event.isFailure === true ? 'error' : 'done';
       void pending.seqPromise.then((seq) => {
         if (seq === null) return;
         void updateChatToolStatus({
           designId,
           seq,
-          status: 'done',
+          status: persistedStatus,
           ...(result !== undefined ? { result } : {}),
           ...(durationMs !== undefined ? { durationMs } : {}),
         });

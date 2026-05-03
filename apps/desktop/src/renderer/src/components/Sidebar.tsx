@@ -1,7 +1,7 @@
 import { useT } from '@open-codesign/i18n';
 import type { LocalInputFile, OnboardingState } from '@open-codesign/shared';
 import { FolderOpen, Link2, Paperclip, X } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAgentStream } from '../hooks/useAgentStream';
 import { useCodesignStore } from '../store';
 import { ModelSwitcher } from './ModelSwitcher';
@@ -95,6 +95,8 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
   const chatMessages = useCodesignStore((s) => s.chatMessages);
   const chatLoaded = useCodesignStore((s) => s.chatLoaded);
   const streamingAssistantText = useCodesignStore((s) => s.streamingAssistantText);
+  const streamingThinking = useCodesignStore((s) => s.streamingThinking);
+  const streamingToolDraft = useCodesignStore((s) => s.streamingToolDraft);
   const pendingToolCalls = useCodesignStore((s) => s.pendingToolCalls);
   const loadChatForCurrentDesign = useCodesignStore((s) => s.loadChatForCurrentDesign);
   const currentDesignId = useCodesignStore((s) => s.currentDesignId);
@@ -127,6 +129,29 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
     config?.hasKey && config.modelPrimary ? config.modelPrimary : t('sidebar.chat.noModel');
   const lastTokens = lastUsage ? lastUsage.inputTokens + lastUsage.outputTokens : null;
 
+  // plan0305 P3.2 — running design total ("$0.34 across 4 runs"). Re-fetched
+  // when the active design changes or a generation just completed; bypassed
+  // during streaming so we don't churn the renderer on every token.
+  const [designCostUsd, setDesignCostUsd] = useState<{ total: number; runs: number } | null>(null);
+  useEffect(() => {
+    if (!currentDesignId || isGenerating) return;
+    const codesign = window.codesign;
+    if (codesign === undefined) return;
+    let cancelled = false;
+    void codesign
+      .getDesignUsage(currentDesignId)
+      .then((u: { costUsd: number; runs: number }) => {
+        if (cancelled) return;
+        setDesignCostUsd(u.runs > 0 ? { total: u.costUsd, runs: u.runs } : null);
+      })
+      .catch(() => {
+        // Silent — the footer is decorative, not load-bearing.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentDesignId, isGenerating]);
+
   return (
     <aside
       className="flex flex-col h-full overflow-x-hidden border-r border-[var(--color-border)] bg-[var(--color-background-secondary)]"
@@ -148,6 +173,16 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
             streamingText={
               streamingAssistantText && streamingAssistantText.designId === currentDesignId
                 ? streamingAssistantText.text
+                : null
+            }
+            streamingThinking={
+              streamingThinking && streamingThinking.designId === currentDesignId
+                ? streamingThinking.text
+                : null
+            }
+            streamingToolDraft={
+              streamingToolDraft && streamingToolDraft.designId === currentDesignId
+                ? { toolName: streamingToolDraft.toolName, bytes: streamingToolDraft.bytes }
                 : null
             }
             empty={<EmptyState onPickStarter={handlePickStarter} />}
@@ -234,14 +269,19 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
           />
           <div className="flex items-center justify-between gap-[var(--space-2)] px-[2px]">
             <ModelSwitcher variant="sidebar" />
-            {lastTokens !== null ? (
-              <span
-                className="shrink-0 tabular-nums text-[10.5px] text-[var(--color-text-muted)]"
-                style={{ fontFamily: 'var(--font-mono)' }}
-              >
-                {t('sidebar.chat.tokensLine', { count: lastTokens })}
-              </span>
-            ) : null}
+            <div
+              className="flex shrink-0 items-center gap-[var(--space-2)] tabular-nums text-[10.5px] text-[var(--color-text-muted)]"
+              style={{ fontFamily: 'var(--font-mono)' }}
+            >
+              {lastTokens !== null ? (
+                <span>{t('sidebar.chat.tokensLine', { count: lastTokens })}</span>
+              ) : null}
+              {designCostUsd !== null ? (
+                <span title={t('sidebar.chat.designCostTooltip', { runs: designCostUsd.runs })}>
+                  {`$${designCostUsd.total < 0.01 ? designCostUsd.total.toFixed(4) : designCostUsd.total.toFixed(2)}`}
+                </span>
+              ) : null}
+            </div>
           </div>
         </div>
       </>

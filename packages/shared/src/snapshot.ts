@@ -70,7 +70,12 @@ export type ChatMessageKind = z.infer<typeof ChatMessageKind>;
  * emits user / assistant_text / artifact_delivered.
  */
 export const ChatMessageRowV1 = z.object({
-  schemaVersion: z.literal(1).default(1),
+  // Accepts both v1 and v2 — the on-disk shape is identical at the row
+  // level (only the semantic of `payload.status` for tool_call rows
+  // changed in v2). Renamed schema would require a coordinated rename
+  // across many call sites; keeping `ChatMessageRowV1` as the supported
+  // reader for both versions is the lower-friction path.
+  schemaVersion: z.union([z.literal(1), z.literal(2)]).default(2),
   id: z.number().int(),
   designId: z.string().min(1),
   seq: z.number().int().nonnegative(),
@@ -82,8 +87,18 @@ export const ChatMessageRowV1 = z.object({
 export type ChatMessageRow = z.infer<typeof ChatMessageRowV1>;
 
 /** Current on-disk schema version for `chat_messages` rows. Bump together
- *  with `migrateChatMessageRow` in the main process when shapes change. */
-export const CHAT_MESSAGE_SCHEMA_VERSION = 1 as const;
+ *  with `migrateChatMessageRow` in the main process when shapes change.
+ *
+ *  Version history:
+ *  - v1 — initial. tool_call payloads always landed with `status: 'done'`
+ *         regardless of actual outcome; failed executions were
+ *         indistinguishable from successful ones in the chat history.
+ *  - v2 (plan0305 P3.1) — tool_call payloads now record `status: 'error'`
+ *         when the runtime flagged the call as a failure. Forward-migration
+ *         of v1 rows is identity (they keep `status: 'done'` meaning
+ *         "outcome unknown — assume done"). Renderer treats both as valid.
+ */
+export const CHAT_MESSAGE_SCHEMA_VERSION = 2 as const;
 
 export interface ChatAppendInput {
   designId: string;

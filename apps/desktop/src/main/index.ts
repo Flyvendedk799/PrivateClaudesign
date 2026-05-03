@@ -86,11 +86,13 @@ import { resolveUseAgentRuntime } from './runtime-flag';
 import { registerSkillsIpc, registerSkillsUnavailableIpc } from './skills-ipc';
 import {
   getDesign,
+  getDesignUsageTotals,
   listChatMessages,
   listUserSkills,
   normalizeDesignFilePath,
   pruneDiagnosticEvents,
   recordDiagnosticEvent,
+  recordRunUsage,
   safeInitSnapshotsDb,
   upsertDesignFile,
 } from './snapshots-db';
@@ -1619,6 +1621,32 @@ function registerIpcHandlers(db: Database | null): void {
           totalCachedInputTokens: totals.totalCachedInputTokens,
           totalCostUsd: totals.totalCostUsd,
         });
+        // plan0305 P3.2 — persist per-run token + cost telemetry. Aggregated
+        // across all auto-continue chunks; keyed by generationId so a retry
+        // overwrites rather than duplicating. Read by the chat status header
+        // ("this design cost $X.XX") and any future cost dashboards.
+        if (db !== null) {
+          try {
+            recordRunUsage(db, {
+              generationId: id,
+              designId: payload.designId ?? null,
+              inputTokens: totals.totalInputTokens,
+              outputTokens: totals.totalOutputTokens,
+              cachedInputTokens: totals.totalCachedInputTokens,
+              cacheCreationInputTokens: totals.totalCacheCreationInputTokens,
+              costUsd: totals.totalCostUsd,
+              totalChunks: totals.chunks,
+              totalMs: Date.now() - t0,
+              provider: active.model.provider,
+              modelId: active.model.modelId,
+            });
+          } catch (err) {
+            logIpc.warn('run_usage.persist.fail', {
+              generationId: id,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
         // Surface aggregate metrics on the returned result so the renderer
         // shows total tokens (across all chunks), not just the last one.
         return {
@@ -1825,6 +1853,30 @@ function registerIpcHandlers(db: Database | null): void {
   ipcMain.handle('codesign:v1:cancel-generation', (_e, raw: unknown) => {
     const { generationId } = CancelGenerationPayloadV1.parse(raw);
     cancelGenerationRequest(generationId, inFlight, logIpc);
+  });
+
+  /**
+   * plan0305 P3.2 — return aggregated token + cost totals for a design,
+   * summed across all `run_usage` rows. Renderer reads this for the
+   * "this design cost $X.XX" footer and to render usage charts later.
+   */
+  ipcMain.handle('codesign:v1:design-usage', (_e, raw: unknown) => {
+    const obj = raw as { designId?: unknown } | null;
+    const designId = obj?.designId;
+    if (typeof designId !== 'string' || designId.length === 0) {
+      throw new CodesignError('design-usage expects { designId: string }', 'IPC_BAD_INPUT');
+    }
+    if (db === null) {
+      return {
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        costUsd: 0,
+        runs: 0,
+      };
+    }
+    return getDesignUsageTotals(db, designId);
   });
 
   /**

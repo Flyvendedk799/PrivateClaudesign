@@ -13,11 +13,13 @@ import {
   deleteSnapshot,
   duplicateDesign,
   getDesign,
+  getDesignUsageTotals,
   getSnapshot,
   initInMemoryDb,
   listChatMessages,
   listDesigns,
   listSnapshots,
+  recordRunUsage,
   renameDesign,
   setDesignPromptAssistMetadata,
   setDesignThumbnail,
@@ -838,16 +840,16 @@ describe('setDesignPromptAssistMetadata (backlog-1 #9)', () => {
 });
 
 describe('chat_messages schema_version validation', () => {
-  it('writes schemaVersion=1 on insert and reads it back', () => {
+  it('writes the current writer schemaVersion on insert and reads it back (plan0305 P3.1 — now v2)', () => {
     const db = makeDb();
     const d = createDesign(db);
     appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'hi' } });
     const raw = db
       .prepare('SELECT schema_version FROM chat_messages WHERE design_id = ?')
       .all(d.id) as Array<{ schema_version: number }>;
-    expect(raw[0]?.schema_version).toBe(1);
+    expect(raw[0]?.schema_version).toBe(2);
     const list = listChatMessages(db, d.id);
-    expect(list[0]?.schemaVersion).toBe(1);
+    expect(list[0]?.schemaVersion).toBe(2);
   });
 
   it('skips rows with a future schema_version and returns the rest', () => {
@@ -861,12 +863,168 @@ describe('chat_messages schema_version validation', () => {
     expect((list[0]?.payload as { text: string }).text).toBe('two');
   });
 
-  it('rows backfilled by the additive migration default to schema_version=1', () => {
+  it('reads back v1 rows with their original schemaVersion preserved (plan0305 P3.1)', () => {
+    // Simulate a row written before the v2 bump — same column-level shape,
+    // just schema_version=1. The reader must surface that on the way back
+    // so callers can distinguish "outcome unknown (v1 done)" from "explicit
+    // success (v2 done)".
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'legacy' } });
+    db.prepare('UPDATE chat_messages SET schema_version = 1 WHERE design_id = ?').run(d.id);
+    const list = listChatMessages(db, d.id);
+    expect(list).toHaveLength(1);
+    expect(list[0]?.schemaVersion).toBe(1);
+  });
+
+  it('rows backfilled by the additive migration default to schema_version=2 (current writer)', () => {
     const db = makeDb();
     const d = createDesign(db);
     appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'legacy' } });
     const list = listChatMessages(db, d.id);
     expect(list).toHaveLength(1);
-    expect(list[0]?.schemaVersion).toBe(1);
+    expect(list[0]?.schemaVersion).toBe(2);
+  });
+});
+
+describe('run_usage telemetry (plan0305 P3.2)', () => {
+  it('returns zeroed totals for a design with no runs recorded', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    expect(getDesignUsageTotals(db, d.id)).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      costUsd: 0,
+      runs: 0,
+    });
+  });
+
+  it('records a single run and returns the totals via getDesignUsageTotals', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    recordRunUsage(db, {
+      generationId: 'gen-A',
+      designId: d.id,
+      inputTokens: 1200,
+      outputTokens: 350,
+      cachedInputTokens: 800,
+      cacheCreationInputTokens: 50,
+      costUsd: 0.0123,
+      totalChunks: 1,
+      totalMs: 4200,
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-4-6',
+    });
+    const totals = getDesignUsageTotals(db, d.id);
+    expect(totals.inputTokens).toBe(1200);
+    expect(totals.outputTokens).toBe(350);
+    expect(totals.cachedInputTokens).toBe(800);
+    expect(totals.cacheCreationInputTokens).toBe(50);
+    expect(totals.costUsd).toBeCloseTo(0.0123);
+    expect(totals.runs).toBe(1);
+  });
+
+  it('aggregates across multiple runs of the same design', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    recordRunUsage(db, {
+      generationId: 'gen-A',
+      designId: d.id,
+      inputTokens: 1000,
+      outputTokens: 200,
+      cachedInputTokens: 500,
+      cacheCreationInputTokens: 0,
+      costUsd: 0.01,
+      totalChunks: 1,
+      totalMs: 2000,
+    });
+    recordRunUsage(db, {
+      generationId: 'gen-B',
+      designId: d.id,
+      inputTokens: 500,
+      outputTokens: 100,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      costUsd: 0.005,
+      totalChunks: 1,
+      totalMs: 1500,
+    });
+    const totals = getDesignUsageTotals(db, d.id);
+    expect(totals.inputTokens).toBe(1500);
+    expect(totals.outputTokens).toBe(300);
+    expect(totals.cachedInputTokens).toBe(500);
+    expect(totals.costUsd).toBeCloseTo(0.015);
+    expect(totals.runs).toBe(2);
+  });
+
+  it('idempotently overwrites a re-recorded generationId rather than duplicating', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    recordRunUsage(db, {
+      generationId: 'gen-A',
+      designId: d.id,
+      inputTokens: 100,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      costUsd: 0.001,
+      totalChunks: 1,
+      totalMs: 100,
+    });
+    recordRunUsage(db, {
+      generationId: 'gen-A',
+      designId: d.id,
+      inputTokens: 700,
+      outputTokens: 50,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      costUsd: 0.007,
+      totalChunks: 2,
+      totalMs: 800,
+    });
+    const totals = getDesignUsageTotals(db, d.id);
+    expect(totals.inputTokens).toBe(700);
+    expect(totals.outputTokens).toBe(50);
+    expect(totals.runs).toBe(1);
+  });
+
+  it('skips persistence when every value is zero (no point cluttering the table)', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    recordRunUsage(db, {
+      generationId: 'gen-empty',
+      designId: d.id,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      costUsd: 0,
+      totalChunks: 0,
+      totalMs: 0,
+    });
+    expect(getDesignUsageTotals(db, d.id).runs).toBe(0);
+  });
+
+  it('cascades on design delete', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    recordRunUsage(db, {
+      generationId: 'gen-A',
+      designId: d.id,
+      inputTokens: 100,
+      outputTokens: 50,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      costUsd: 0.001,
+      totalChunks: 1,
+      totalMs: 100,
+    });
+    // Hard delete via DELETE FROM designs (test uses raw SQL — softDeleteDesign
+    // is the user-facing soft delete which preserves the row, so cascade
+    // doesn't fire for that path).
+    db.prepare('DELETE FROM designs WHERE id = ?').run(d.id);
+    expect(getDesignUsageTotals(db, d.id).runs).toBe(0);
   });
 });

@@ -193,6 +193,23 @@ function applySchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_diag_events_ts          ON diagnostic_events(ts DESC);
     CREATE INDEX IF NOT EXISTS idx_diag_events_fingerprint ON diagnostic_events(fingerprint);
 
+    CREATE TABLE IF NOT EXISTS run_usage (
+      generation_id              TEXT PRIMARY KEY,
+      schema_version             INTEGER NOT NULL DEFAULT 1,
+      design_id                  TEXT REFERENCES designs(id) ON DELETE CASCADE,
+      input_tokens               INTEGER NOT NULL DEFAULT 0,
+      output_tokens              INTEGER NOT NULL DEFAULT 0,
+      cached_input_tokens        INTEGER NOT NULL DEFAULT 0,
+      cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_usd                   REAL NOT NULL DEFAULT 0,
+      total_chunks               INTEGER NOT NULL DEFAULT 0,
+      total_ms                   INTEGER NOT NULL DEFAULT 0,
+      provider                   TEXT,
+      model_id                   TEXT,
+      created_at                 TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_run_usage_design ON run_usage(design_id, created_at);
+
     CREATE TABLE IF NOT EXISTS user_skills (
       id                 TEXT PRIMARY KEY,
       schema_version     INTEGER NOT NULL DEFAULT 1,
@@ -704,15 +721,20 @@ interface ChatMessageRowDb {
 }
 
 /** Forward-migrate a chat_messages row read from disk to the current writer
- *  shape. Currently only schema 1 exists, so this is an identity function for
- *  v1 rows; bumping the writer version lands a new branch here. Throws
- *  `SchemaMismatchError` when `fromVersion` is newer than the writer can
- *  understand. */
+ *  shape. v1 → v2 is identity at the column level — v2 only changes the
+ *  semantic of `payload.status` for tool_call rows: v1 wrote 'done' for
+ *  every outcome, v2 writes 'error' when the runtime flagged a failure.
+ *  Old v1 rows keep their 'done' status (interpreted as "outcome unknown").
+ *
+ *  Throws `SchemaMismatchError` when `fromVersion` is newer than the writer
+ *  can understand (forward-incompatible).
+ */
 function migrateChatMessageRow(row: ChatMessageRowDb, fromVersion: number): ChatMessageRowDb {
   if (fromVersion === CHAT_MESSAGE_SCHEMA_VERSION) return row;
   if (fromVersion < CHAT_MESSAGE_SCHEMA_VERSION) {
-    // Future: switch on fromVersion to walk through 1→2, 2→3, etc. For now
-    // there is only v1, so nothing to migrate.
+    // v1 → v2 — semantic-only change to tool_call payloads' status field;
+    // no column-level migration needed. The renderer treats 'done' on a v1
+    // row the same as 'done' on a v2 row (both mean "the call settled").
     return row;
   }
   throw new SchemaMismatchError('chat_messages', fromVersion, CHAT_MESSAGE_SCHEMA_VERSION);
@@ -730,8 +752,13 @@ function rowToChatMessage(row: ChatMessageRowDb): ChatMessageRow {
   } catch {
     payload = { _raw: migrated.payload };
   }
+  // Surface the on-disk version so callers can distinguish v1 rows
+  // (status='done' for everything, outcome unknown) from v2 rows
+  // (status='error' set on failed tool calls). Coerced to one of the
+  // supported literals so downstream type-narrowing works.
+  const reportedVersion: 1 | 2 = persistedVersion === 1 ? 1 : 2;
   return {
-    schemaVersion: CHAT_MESSAGE_SCHEMA_VERSION,
+    schemaVersion: reportedVersion,
     id: migrated.id,
     designId: migrated.design_id,
     seq: migrated.seq,
@@ -1471,4 +1498,117 @@ export function updateUserSkill(
 
 export function deleteUserSkill(db: Database, id: string): void {
   db.prepare('DELETE FROM user_skills WHERE id = ?').run(id);
+}
+
+// ---------------------------------------------------------------------------
+// Run usage (plan0305 P3.2 — per-run token + cost telemetry)
+//
+// One row per generation, keyed by the renderer-supplied generationId. Lets
+// the BYOK user see "this design cost $X.XX" by aggregating across runs for
+// a given designId, and lets us reason about cost trends without inferring
+// from byte counts (which under-count cache writes).
+// ---------------------------------------------------------------------------
+
+export const RUN_USAGE_SCHEMA_VERSION = 1;
+
+export interface RunUsageInput {
+  generationId: string;
+  designId: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationInputTokens: number;
+  costUsd: number;
+  totalChunks: number;
+  totalMs: number;
+  provider?: string | undefined;
+  modelId?: string | undefined;
+}
+
+export interface RunUsageRow extends RunUsageInput {
+  schemaVersion: number;
+  createdAt: string;
+}
+
+export interface DesignUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationInputTokens: number;
+  costUsd: number;
+  runs: number;
+}
+
+/** Idempotent insert keyed by generationId — a retry of the same run
+ *  overwrites rather than duplicating. Emits nothing if the input is
+ *  zero across the board (no point cluttering the table with empty rows
+ *  e.g. when an aborted run never got far enough to consume tokens). */
+export function recordRunUsage(db: Database, input: RunUsageInput): void {
+  const allZero =
+    input.inputTokens === 0 &&
+    input.outputTokens === 0 &&
+    input.cachedInputTokens === 0 &&
+    input.cacheCreationInputTokens === 0 &&
+    input.costUsd === 0;
+  if (allZero) return;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO run_usage (
+       generation_id, schema_version, design_id,
+       input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
+       cost_usd, total_chunks, total_ms, provider, model_id, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(generation_id) DO UPDATE SET
+       input_tokens                = excluded.input_tokens,
+       output_tokens               = excluded.output_tokens,
+       cached_input_tokens         = excluded.cached_input_tokens,
+       cache_creation_input_tokens = excluded.cache_creation_input_tokens,
+       cost_usd                    = excluded.cost_usd,
+       total_chunks                = excluded.total_chunks,
+       total_ms                    = excluded.total_ms,
+       provider                    = excluded.provider,
+       model_id                    = excluded.model_id`,
+  ).run(
+    input.generationId,
+    RUN_USAGE_SCHEMA_VERSION,
+    input.designId,
+    input.inputTokens,
+    input.outputTokens,
+    input.cachedInputTokens,
+    input.cacheCreationInputTokens,
+    input.costUsd,
+    input.totalChunks,
+    input.totalMs,
+    input.provider ?? null,
+    input.modelId ?? null,
+    now,
+  );
+}
+
+/** Sum of all run_usage rows belonging to one design. Returns zeroes when
+ *  no usage has been recorded yet for the design. */
+export function getDesignUsageTotals(db: Database, designId: string): DesignUsageTotals {
+  const row = db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(input_tokens), 0)               AS inputTokens,
+         COALESCE(SUM(output_tokens), 0)              AS outputTokens,
+         COALESCE(SUM(cached_input_tokens), 0)        AS cachedInputTokens,
+         COALESCE(SUM(cache_creation_input_tokens), 0) AS cacheCreationInputTokens,
+         COALESCE(SUM(cost_usd), 0)                   AS costUsd,
+         COUNT(*)                                     AS runs
+       FROM run_usage
+       WHERE design_id = ?`,
+    )
+    .get(designId) as DesignUsageTotals | undefined;
+  return (
+    row ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      costUsd: 0,
+      runs: 0,
+    }
+  );
 }

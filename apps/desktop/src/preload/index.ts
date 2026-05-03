@@ -254,6 +254,18 @@ const api = {
     }>,
   generateTitle: (prompt: string) =>
     ipcRenderer.invoke('codesign:v1:generate-title', { prompt }) as Promise<string>,
+  /** plan0305 P3.2 — aggregate token + cost totals for one design, summed
+   *  across all run_usage rows. Returns zeros when no telemetry has been
+   *  recorded yet. */
+  getDesignUsage: (designId: string) =>
+    ipcRenderer.invoke('codesign:v1:design-usage', { designId }) as Promise<{
+      inputTokens: number;
+      outputTokens: number;
+      cachedInputTokens: number;
+      cacheCreationInputTokens: number;
+      costUsd: number;
+      runs: number;
+    }>,
   applyComment: (payload: {
     html: string;
     comment: string;

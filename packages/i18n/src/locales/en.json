@@ -110,6 +110,9 @@
       "desktop": "Desktop preview",
       "tablet": "Tablet preview",
       "mobile": "Mobile preview"
+    },
+    "refresh": {
+      "label": "Reload preview"
     }
   },
   "tweaks": {
@@ -164,6 +167,7 @@
       "thinking": "Thinking",
       "streamingLabel": "Assistant is typing",
       "tokensLine": "~{{count}} tokens",
+      "designCostTooltip": "Total API cost across {{runs}} run(s) on this design",
       "artifactDelivered": "delivered",
       "artifactDefaultLabel": "design.html",
       "tool": {
@@ -656,6 +660,12 @@
     "designSystemCleared": "Design system cleared",
     "clearDesignSystemFailed": "Unable to clear design system",
     "generationFailed": "Generation failed",
+    "transientRetryTitle": "Connection blip — retrying",
+    "transientRetryBody": "The provider's stream was cut before any work landed. Reissuing the same prompt automatically.",
+    "oauthExpiringTitle": "Auth token expiring soon",
+    "oauthExpiringBody": "Your provider's OAuth token expires in {{minutes}} min. Long runs may be cut short — re-import in Settings if you can.",
+    "oauthExpiredTitle": "Auth token has expired",
+    "oauthExpiredBody": "The provider's OAuth token expired. The run will likely fail with a 401 unless an auto-refresh succeeds. Re-import in Settings.",
     "generationFailedApplyFix": "Apply fix",
     "generationFailedBaseUrlUpdated": "Base URL updated. Try the request again.",
     "generationFailedFixUnavailable": "Auto-fix unavailable",
@@ -932,6 +942,7 @@
       "openaiResponsesMisconfigured": "The endpoint rejected the request shape. The wire may be wrong — try switching to openai-chat.",
       "relayStreamingBug": "The gateway may mishandle OpenAI Responses API SSE events (older sub2api / claude2api / anyrouter builds cut the stream short).",
       "serverError": "Upstream server error. May be transient — try again.",
+      "transientStreamCut": "The provider's streaming connection was cut mid-response. Usually transient — retrying the same prompt almost always works. No work was lost; the partial chat history is intact.",
       "unknown": "Unknown error — check the full log for details."
     },
     "fix": {

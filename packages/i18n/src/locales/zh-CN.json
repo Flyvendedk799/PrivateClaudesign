@@ -110,6 +110,9 @@
       "desktop": "桌面预览",
       "tablet": "平板预览",
       "mobile": "手机预览"
+    },
+    "refresh": {
+      "label": "重新加载预览"
     }
   },
   "tweaks": {
@@ -164,6 +167,7 @@
       "thinking": "正在思考",
       "streamingLabel": "助手正在回复",
       "tokensLine": "约 {{count}} tokens",
+      "designCostTooltip": "本设计共 {{runs}} 次运行的 API 费用合计",
       "artifactDelivered": "已生成",
       "artifactDefaultLabel": "design.html",
       "tool": {
@@ -645,6 +649,12 @@
     "designSystemCleared": "设计系统已清除",
     "clearDesignSystemFailed": "无法清除设计系统",
     "generationFailed": "生成失败",
+    "transientRetryTitle": "连接抖动——正在重试",
+    "transientRetryBody": "在任何工作落地之前，服务提供商的流被切断。正在自动重发相同提示。",
+    "oauthExpiringTitle": "授权令牌即将过期",
+    "oauthExpiringBody": "服务提供商的 OAuth 令牌将在 {{minutes}} 分钟后过期。长时间运行可能会被中断——如有可能请到设置中重新导入。",
+    "oauthExpiredTitle": "授权令牌已过期",
+    "oauthExpiredBody": "服务提供商的 OAuth 令牌已过期。除非自动刷新成功，否则运行可能会因 401 错误而失败。请到设置中重新导入。",
     "generationFailedApplyFix": "应用修复",
     "generationFailedBaseUrlUpdated": "Base URL 已更新，请重试。",
     "generationFailedFixUnavailable": "自动修复不可用",
@@ -917,6 +927,7 @@
       "openaiResponsesMisconfigured": "端点拒绝了请求格式。wire 可能配错了——尝试切换到 openai-chat。",
       "relayStreamingBug": "网关可能错误处理了 OpenAI Responses API 的 SSE 事件（老版本 sub2api / claude2api / anyrouter 会把流提前截断）。",
       "serverError": "上游服务错误。可能是暂时性的，稍后重试。",
+      "transientStreamCut": "服务提供商的流式连接被中途切断。通常是暂时性的——重试同一提示词几乎总是有效。没有任何工作丢失，部分聊天记录仍然保留。",
       "unknown": "未知错误——请查看完整日志以获取详情。"
     },
     "fix": {

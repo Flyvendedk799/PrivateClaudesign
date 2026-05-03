@@ -110,6 +110,9 @@
       "desktop": "Pré-visualização desktop",
       "tablet": "Pré-visualização tablet",
       "mobile": "Pré-visualização mobile"
+    },
+    "refresh": {
+      "label": "Recarregar pré-visualização"
     }
   },
   "tweaks": {
@@ -160,6 +163,7 @@
       "noModel": "Nenhum modelo selecionado",
       "thinking": "Pensando",
       "tokensLine": "~{{count}} tokens",
+      "designCostTooltip": "Custo total de API ao longo de {{runs}} execuções deste design",
       "artifactDelivered": "entregue",
       "artifactDefaultLabel": "design.html",
       "tool": {
@@ -610,6 +614,12 @@
     "designSystemCleared": "Design system removido",
     "clearDesignSystemFailed": "Não foi possível remover o design system",
     "generationFailed": "Falha na geração",
+    "transientRetryTitle": "Falha de conexão — tentando novamente",
+    "transientRetryBody": "O stream do provedor foi cortado antes que qualquer trabalho fosse concluído. Reemitindo automaticamente o mesmo prompt.",
+    "oauthExpiringTitle": "Token de autenticação expirando",
+    "oauthExpiringBody": "O token OAuth do provedor expira em {{minutes}} min. Execuções longas podem ser interrompidas — reimporte em Configurações se possível.",
+    "oauthExpiredTitle": "Token de autenticação expirado",
+    "oauthExpiredBody": "O token OAuth do provedor expirou. A execução provavelmente falhará com 401 a menos que um refresh automático funcione. Reimporte em Configurações.",
     "cancellationFailed": "Falha no cancelamento",
     "inlineCommentFailed": "Falha no comentário inline",
     "commentNeedsSnapshot": "Gere um design antes de deixar um comentário",
