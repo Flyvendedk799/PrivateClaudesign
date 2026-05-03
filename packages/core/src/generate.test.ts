@@ -1529,9 +1529,16 @@ describe('composeSystemPrompt() — progressive disclosure', () => {
     expect(p).toContain('Single-page structure ladder');
   });
 
-  it('regression guard: matched dashboard prompt stays under 25 KB', () => {
+  it('regression guard: matched dashboard prompt stays under 36 KB', () => {
+    // Bumped from 25 → 36 KB on 2026-04-28 when ARTIFACT_TYPES (the
+    // classification protocol + density floors + content/effect ratio
+    // rule) joined LAYER_1. Before that, the agent path silently shipped
+    // without those rules and produced 90/10 effect/content artifacts
+    // (drone-portfolio trace). 36 KB ≈ 9K tokens of always-on prefix —
+    // well under Claude Code / Cursor system-prompt sizes. Still bounded
+    // so unbounded growth is caught by this guard.
     const p = composeSystemPrompt({ mode: 'create', userPrompt: '做个数据看板' });
-    expect(p.length).toBeLessThan(25_000);
+    expect(p.length).toBeLessThan(36_000);
   });
 
   it('mode tweak ignores userPrompt and returns the full tweak prompt', () => {
@@ -1630,6 +1637,83 @@ describe('prompt section .txt vs TS drift', () => {
       expect((tsConstant as string).trim()).toBe(txtContent.trim());
     });
   }
+});
+
+describe('AGENT_WORKFLOW anti-narration directives (plan0305 P1.1)', () => {
+  const agentPrompt = composeSystemPrompt({ mode: 'create', agentMode: true });
+
+  it('does not contain the old contradictory "Cadence:" sentence', () => {
+    expect(agentPrompt).not.toContain('Cadence: write 2-3 sections');
+  });
+
+  it('explicitly forbids assistant text between tool calls', () => {
+    expect(agentPrompt).toContain('Emit no assistant text between tool calls.');
+  });
+
+  it('lists short transitional prose as a forbidden pattern', () => {
+    expect(agentPrompt).toContain('Short transitional prose between tool batches');
+    expect(agentPrompt).toContain('Now let me');
+    expect(agentPrompt).toContain('Let me try');
+  });
+});
+
+describe('AGENT_WORKFLOW bounded probe protocol (plan0305 P1.4)', () => {
+  const agentPrompt = composeSystemPrompt({ mode: 'create', agentMode: true });
+
+  it('describes the bounded probe protocol heading', () => {
+    expect(agentPrompt).toContain('When `str_replace` fails — bounded probe protocol');
+  });
+
+  it('caps probes at one re-view + one retry + one alternate anchor', () => {
+    expect(agentPrompt).toContain('Do **not** improvise more probes');
+    expect(agentPrompt).toContain('Do not call `view` again on the same region');
+  });
+
+  it('forbids chained view-range probes and lists the a64f trace as cautionary', () => {
+    expect(agentPrompt).toContain('chained `view` / `view_range` probes');
+    expect(agentPrompt).toContain('a64f burned 23 probe round-trips');
+  });
+});
+
+describe('CRAFT_DIRECTIVES industry-aware palette steer (plan0305 P1.3)', () => {
+  it('ships the palette-must-match-subject rule on full-prompt path (no keyword)', () => {
+    const noMatch = composeSystemPrompt({ mode: 'create', userPrompt: '随便做点东西' });
+    expect(noMatch).toContain('Palette must match the subject');
+    expect(noMatch).toContain('Danish carpenter is not cyberpunk');
+  });
+
+  it('ships the palette-must-match-subject rule on dashboard keyword path', () => {
+    const dashboard = composeSystemPrompt({ mode: 'create', userPrompt: '做个数据看板' });
+    expect(dashboard).toContain('Palette must match the subject');
+  });
+
+  it('ships the rule on agent-mode runs', () => {
+    const agent = composeSystemPrompt({ mode: 'create', agentMode: true });
+    expect(agent).toContain('Palette must match the subject');
+  });
+});
+
+describe('ANTI_SLOP palette anchor rotation (plan0305 P1.2)', () => {
+  const chatPrompt = composeSystemPrompt({ mode: 'create' });
+
+  it('lists warm amber as the first oklch accent example, not blue-violet', () => {
+    const idxAmber = chatPrompt.indexOf('oklch(72% 0.18 40)');
+    const idxBlueViolet = chatPrompt.indexOf('oklch(62% 0.22 265)');
+    expect(idxAmber).toBeGreaterThan(-1);
+    expect(idxBlueViolet).toBeGreaterThan(-1);
+    expect(idxAmber).toBeLessThan(idxBlueViolet);
+  });
+
+  it('marks blue-violet as a tech/sci-fi/gaming-only choice', () => {
+    expect(chatPrompt).toMatch(/blue-violet[^.]*pick last[^.]*tech\/sci-fi\/gaming/);
+  });
+
+  it('offers warm/mossy/terracotta dark variants alongside cool dark', () => {
+    expect(chatPrompt).toContain('warm dark');
+    expect(chatPrompt).toContain('mossy dark');
+    expect(chatPrompt).toContain('terracotta dark');
+    expect(chatPrompt).toContain('cool dark (tech, gaming, sci-fi only)');
+  });
 });
 
 describe('reasoningForModel', () => {

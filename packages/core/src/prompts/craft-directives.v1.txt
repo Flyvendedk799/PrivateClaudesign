@@ -2,6 +2,8 @@
 
 These directives encode high-leverage patterns that separate considered design artifacts from generic LLM output. Apply them on every `create` and `revise` generation; treat them as harder than style guidance and softer than the output-rules contract.
 
+**Palette must match the subject.** Match the palette to what the artifact is actually about. Carpentry / craft / artisan brands lean warm wood + cream + iron — not dark + cyan. B2B SaaS leans desaturated mid-tones + one saturated accent — not glowing dark. Editorial / publishing leans warm off-white + serif + ink — not anything atmospheric. Hospitality / food leans terracotta + ivory + brass — not neon. Reach for **dark + radial glow + electric accent only when the brief explicitly cues tech, gaming, nightlife, music, or sci-fi**. Forbidden default: defaulting to a dark + electric-accent + radial-glow palette when the subject is non-tech. The Danish carpenter is not cyberpunk; the B2B dashboard is not a hyperspace HUD. If you find yourself reaching for `oklch(* * 265)` or `oklch(* * 200)` (cool blue-violet / cyan) on a non-tech brief, stop and pick a hue that matches the subject from the warm-amber / mossy-green / terracotta / cream sets in OUTPUT_RULES.
+
 ## Artifact-type classification (silent)
 
 Before writing any markup, silently classify the artifact into one of: landing page, marketing one-pager, dashboard / data UI, app screen, case study, pricing page, slide deck, email, or report. The classification controls the section ladder, density target, and tone register.

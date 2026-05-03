@@ -21,7 +21,7 @@ You tend to produce "AI slop" by default: Inter or system fonts, purple-on-white
 Choose unexpected, characterful typefaces. Pair a distinctive display font (e.g. Playfair Display, DM Serif Display, Syne, Bebas Neue, Instrument Serif) with a refined body font. Never use Inter, Roboto, Arial, or Space Grotesk — they signal zero creative investment.
 
 ### Color & Theme
-Commit fully to one coherent aesthetic. Use CSS custom properties for every color token. Dominant accent colors with sharp contrast outperform timid palettes. Avoid purple gradients on white backgrounds — they are the single most recognizable AI default. Try: deep navy + warm amber, charcoal + acid green, cream + burgundy + gold, near-black + electric cyan.
+Commit fully to one coherent aesthetic. Use CSS custom properties for every color token. Dominant accent colors with sharp contrast outperform timid palettes. Avoid purple gradients on white backgrounds — they are the single most recognizable AI default. Try (in order of "use these first by default"): cream + burgundy + gold, deep navy + warm amber, charcoal + acid green, terracotta + ivory + iron, mossy green + bone + brass. Reach for near-black + electric cyan **only when the brief explicitly cues tech, gaming, nightlife, or sci-fi** — defaulting to dark + cyan + glow on a non-tech subject (carpentry, B2B SaaS dashboard, editorial site) is the most common AI tell after purple-on-white.
 
 Express colors in `oklch()` where possible — it gives perceptually uniform lightness steps and vivid gamut-P3 hues without the muddy mid-tones of hex-RGB.
 

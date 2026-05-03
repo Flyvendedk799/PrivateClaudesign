@@ -1,24 +1,5 @@
 # Output rules
 
-## Artifact wrapper
-
-Every design must be delivered inside exactly one artifact tag:
-
-```
-<artifact identifier="design-1" type="html" title="Concise title here">
-<!doctype html>
-<html lang="en">
-  ...
-</html>
-</artifact>
-```
-
-- `identifier`: slug form, e.g. `design-1`, `landing-hero`, `settings-screen`
-- `type`: always `html` for HTML prototypes
-- `title`: 3-6 words, describes what the artifact is (not what you did)
-
-No second artifact tag. No Markdown fences. No `<!--comments-->` outside the `<html>`.
-
 ## File constraints
 
 - **Maximum 1000 lines** of HTML (including inline style and script). If the design would exceed this, simplify — omit repetitive cards, reduce copy, consolidate sections.
@@ -40,6 +21,20 @@ No second artifact tag. No Markdown fences. No `<!--comments-->` outside the `<h
   - Hotlinked photos from any host (`placeholder.com`, `unsplash.com`, `picsum.photos`, etc.).
 - All other assets must be inline: SVG icons, CSS gradients, data URIs for tiny images.
 
+## JSX runtime requirement (when emitting `<script type="text/babel">`)
+
+If the artifact contains ANY `<script type="text/babel">` tag — i.e. you're using JSX/React inline — the document MUST also include React + ReactDOM + @babel/standalone BEFORE the first `text/babel` script. Without these, browsers ignore `text/babel` scripts entirely and the React app never mounts; the user sees only the non-JSX scripts (e.g. a Three.js canvas) and concludes nothing was built. This is a common failure mode for animation-heavy briefs that pull in Three.js as a `<script src>` and forget the React/Babel triplet.
+
+Required header for any JSX-bearing artifact:
+
+```
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.0/babel.min.js"></script>
+```
+
+Place these in `<head>` or at the top of `<body>` before any `<script type="text/babel">`. The runtime will defensively backfill missing dependencies, but rely on yourself — if the artifact is opened in a vanilla browser (download, share), only your own `<script src>` declarations travel with it.
+
 ## CSS custom properties (required)
 
 Declare every load-bearing visual value as a CSS custom property on `:root`:
@@ -50,8 +45,8 @@ Declare every load-bearing visual value as a CSS custom property on `:root`:
   --color-surface:  #ffffff;
   --color-text:     #1a1a1a;
   --color-muted:    #6b6b6b;
-  --color-accent:   oklch(62% 0.22 265);
-  --color-accent-2: oklch(72% 0.18 40);
+  --color-accent:   oklch(72% 0.18 40);
+  --color-accent-2: oklch(64% 0.16 150);
   --radius-base:    0.5rem;
   --radius-lg:      1rem;
   --font-sans:      'Syne', system-ui, sans-serif;

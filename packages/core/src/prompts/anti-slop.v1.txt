@@ -29,8 +29,8 @@ Typography rules:
 ## Color
 
 - Use oklch color space for accent colors. oklch gives perceptually uniform chroma — a color and its 20% lighter variant will feel proportionally related, unlike hex math.
-  - Example: `oklch(62% 0.22 265)` (blue-violet), `oklch(72% 0.18 40)` (warm amber)
-- Avoid pure black (`#000`) for text. Use near-black with a slight hue cast: `oklch(12% 0.01 265)`.
+  - Examples, varied across the hue wheel so no single hue dominates: `oklch(72% 0.18 40)` (warm amber), `oklch(64% 0.16 150)` (deep moss), `oklch(58% 0.18 25)` (terracotta), `oklch(62% 0.22 265)` (blue-violet — pick last, only if the brief actually cues tech/sci-fi/gaming).
+- Avoid pure black (`#000`) for text. Use near-black with a slight hue cast — pick a hue that matches the design's accent rather than reflexively reaching for hue 265: warm `oklch(12% 0.012 60)`, mossy `oklch(12% 0.012 150)`, terracotta `oklch(12% 0.012 25)`, or cool `oklch(12% 0.01 265)`.
 - Do not use the default Tailwind blue (`#3b82f6`). It signals "this is an uncustomized Tailwind design."
 - Do not lean on default Tailwind grays (`gray-50`…`gray-900`) as the entire neutral scale. Tilt them warm (oklch hue 60–90) or cool (oklch hue 240–270) so the surface has a temperature.
 - Accent palette: one primary accent, optionally one complementary plus one positive / success tone. Three or more accent colors indicates lack of restraint.
@@ -40,10 +40,14 @@ Typography rules:
 
 Dark does not mean monotone. A dark design that is one near-black plus one accent reads as a default Tailwind dark mode and is the canonical sparse-LLM look. Required when the brief asks for dark:
 
-- At least three distinct surface tones: page bg (`oklch(14% 0.01 265)`), elevated surface (`oklch(18% 0.01 265)`), inset surface or hairline divider tone.
+- At least three distinct surface tones, with the hue chosen to match the subject rather than defaulting to cool blue-violet. Pick one tilt and stay consistent across page bg / elevated / inset:
+  - warm dark (artisan, hospitality, editorial): page `oklch(14% 0.012 60)`, elevated `oklch(18% 0.012 60)`
+  - mossy dark (outdoor, sustainability, nature): page `oklch(14% 0.012 150)`, elevated `oklch(18% 0.012 150)`
+  - terracotta dark (food, craft, earthy brands): page `oklch(14% 0.012 25)`, elevated `oklch(18% 0.012 25)`
+  - cool dark (tech, gaming, sci-fi only): page `oklch(14% 0.01 265)`, elevated `oklch(18% 0.01 265)`
 - A subtle gradient or radial glow on the hero or one feature panel — never a flat fill end-to-end.
 - Two accents minimum: one primary (saturated), one positive / data-positive (e.g. cyan, lime, or warm amber for delta indicators).
-- Borders rendered as `1px solid oklch(28% 0.01 265)` or similar, never `border-gray-800`.
+- Borders rendered as `1px solid oklch(28% 0.012 <same-hue-as-page>)` or similar, never `border-gray-800`.
 
 ## Layout
 

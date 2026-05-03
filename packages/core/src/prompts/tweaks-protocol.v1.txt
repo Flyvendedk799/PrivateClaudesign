@@ -14,7 +14,7 @@ The EDITMODE block is a JS object literal wrapped in marker comments, placed ins
 <script>
 /*EDITMODE-BEGIN*/
 {
-  "color-accent":   "oklch(62% 0.22 265)",
+  "color-accent":   "oklch(72% 0.18 40)",
   "color-bg":       "#f8f5f0",
   "radius-base":    "0.5rem",
   "font-sans":      "'Syne', system-ui, sans-serif",
