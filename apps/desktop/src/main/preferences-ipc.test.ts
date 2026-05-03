@@ -54,6 +54,7 @@ describe('readPersisted()', () => {
       checkForUpdatesOnStartup: true,
       dismissedUpdateVersion: '',
       diagnosticsLastReadTs: 0,
+      lastPickedMode: 'design',
     });
   });
 

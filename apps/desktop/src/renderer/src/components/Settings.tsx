@@ -1519,7 +1519,7 @@ function ModelsTab() {
         });
         setCpaDetection('unavailable');
       });
-  }, [cpaDetection, loading, rows, pushToast, reportableErrorToast, t]);
+  }, [cpaDetection, loading, rows, reportableErrorToast, t]);
 
   async function reloadRows() {
     if (!window.codesign) return;
@@ -2616,6 +2616,7 @@ function AdvancedTab() {
     checkForUpdatesOnStartup: true,
     dismissedUpdateVersion: '',
     diagnosticsLastReadTs: 0,
+    lastPickedMode: 'design',
   });
 
   useEffect(() => {

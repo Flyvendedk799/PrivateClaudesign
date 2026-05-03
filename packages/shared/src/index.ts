@@ -163,6 +163,15 @@ export const GeneratePayloadV1 = z.object({
    *  most callers). `'vanilla'` = multi-source-file HTML+CSS+JS matching
    *  Claude Design exports. Forwarded to GenerateInput.pattern. */
   pattern: z.enum(['jsx', 'vanilla']).optional(),
+  /** gameplan §A6 — game-mode discriminator. When 'game', the IPC handler
+   *  routes through the game-builder agent flow (gameMode deps wired,
+   *  game-mode prompts composed via composeSystemPrompt). Defaults to
+   *  'design' for back-compat with existing clients. */
+  artifactMode: z.enum(['design', 'game']).optional(),
+  /** Game-mode engine pin from the New-design dialog. When undefined and
+   *  artifactMode === 'game', the agent's first tool call is
+   *  `choose_engine` and the engine lands on the snapshot from there. */
+  gameEngine: GameEngine.optional(),
 });
 export type GeneratePayloadV1 = z.infer<typeof GeneratePayloadV1>;
 

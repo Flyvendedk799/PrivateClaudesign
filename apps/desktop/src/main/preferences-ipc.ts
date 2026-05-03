@@ -53,6 +53,9 @@ export interface Preferences {
    *  Persisted so the unread-error badge doesn't flash every historical
    *  error after a restart. */
   diagnosticsLastReadTs: number;
+  /** gameplan §A6 / Q2 — the last mode picked in the New-design dialog.
+   *  The dialog opens to this tab on next launch. Defaults to 'design'. */
+  lastPickedMode: 'design' | 'game';
 }
 
 interface PreferencesFile extends Preferences {
@@ -70,6 +73,7 @@ const DEFAULTS: Preferences = {
   checkForUpdatesOnStartup: true,
   dismissedUpdateVersion: '',
   diagnosticsLastReadTs: 0,
+  lastPickedMode: 'design',
 };
 
 /** Deterministic parse of the on-disk preferences file. No clock reads: the
@@ -107,6 +111,10 @@ function parsePersistedFile(parsed: Partial<PreferencesFile>): Preferences {
       typeof parsed.diagnosticsLastReadTs === 'number' && parsed.diagnosticsLastReadTs >= 0
         ? parsed.diagnosticsLastReadTs
         : DEFAULTS.diagnosticsLastReadTs,
+    lastPickedMode:
+      parsed.lastPickedMode === 'design' || parsed.lastPickedMode === 'game'
+        ? parsed.lastPickedMode
+        : DEFAULTS.lastPickedMode,
   };
 }
 

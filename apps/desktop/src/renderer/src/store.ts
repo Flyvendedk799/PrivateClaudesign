@@ -302,6 +302,16 @@ interface CodesignState {
   newDesignDialogOpen: boolean;
   designToDelete: Design | null;
   designToRename: Design | null;
+  /** gameplan §A6 — mode/engine carried from the New-design dialog into the
+   *  next generate request. The dialog writes these on submit; the next
+   *  payload construction reads + clears them. Last-picked mode also
+   *  persists to preferences.json so the dialog opens to the right tab.
+   */
+  pendingArtifactMode: 'design' | 'game' | null;
+  pendingGameEngine: 'three' | 'phaser' | 'pygame' | 'godot' | null;
+  /** Last-picked mode in the New-design dialog. Hydrated from preferences.json
+   *  at boot; updated on every dialog submit. Defaults to 'design'. */
+  lastPickedMode: 'design' | 'game';
   /** Workspace rebind confirmation state: { design, newPath } when user picks a different folder */
   workspaceRebindPending: { design: Design; newPath: string } | null;
 
@@ -523,6 +533,13 @@ interface CodesignState {
   ensureCurrentDesign: () => Promise<void>;
   openNewDesignDialog: () => void;
   closeNewDesignDialog: () => void;
+  /** gameplan §A6 — set by the New-design dialog on submit; consumed by
+   *  the next runGenerate payload construction. */
+  setPendingGameSelection: (
+    mode: 'design' | 'game',
+    engine: 'three' | 'phaser' | 'pygame' | 'godot' | null,
+  ) => void;
+  clearPendingGameSelection: () => void;
   createNewDesign: (workspacePath?: string | null) => Promise<Design | null>;
   switchDesign: (id: string) => Promise<void>;
   renameCurrentDesign: (name: string) => Promise<void>;
@@ -1611,6 +1628,9 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   designsLoaded: false,
   designsViewOpen: false,
   newDesignDialogOpen: false,
+  pendingArtifactMode: null,
+  pendingGameEngine: null,
+  lastPickedMode: 'design',
   designToDelete: null,
   designToRename: null,
   workspaceRebindPending: null,
@@ -1959,6 +1979,12 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     });
 
     try {
+      // gameplan §A6 — pull and clear the pending mode/engine the dialog
+      // staged. They route into the IPC payload so the main process
+      // composes the game-mode prompt + wires deps.gameMode.
+      const pendingMode = get().pendingArtifactMode;
+      const pendingEngine = get().pendingGameEngine;
+      get().clearPendingGameSelection();
       await runGenerate(
         get,
         set,
@@ -1973,6 +1999,8 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           ...(designIdAtStart ? { designId: designIdAtStart } : {}),
           ...(get().previewHtml ? { previousHtml: get().previewHtml as string } : {}),
           ...(requestedPattern ? { pattern: requestedPattern } : {}),
+          ...(pendingMode !== null ? { artifactMode: pendingMode } : {}),
+          ...(pendingEngine !== null ? { gameEngine: pendingEngine } : {}),
         },
         designIdAtStart,
       );
@@ -2766,6 +2794,20 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   openNewDesignDialog() {
     set({ newDesignDialogOpen: true });
   },
+  setPendingGameSelection(mode, engine) {
+    set({
+      pendingArtifactMode: mode,
+      pendingGameEngine: mode === 'game' ? engine : null,
+      lastPickedMode: mode,
+    });
+    // Persist last-picked mode so the dialog opens to the right tab
+    // next launch. preferences.update is fire-and-forget; the in-memory
+    // state above is what drives the next generate.
+    void window.codesign?.preferences?.update?.({ lastPickedMode: mode })?.catch(() => undefined);
+  },
+  clearPendingGameSelection() {
+    set({ pendingArtifactMode: null, pendingGameEngine: null });
+  },
   closeNewDesignDialog() {
     set({ newDesignDialogOpen: false });
   },
@@ -3337,12 +3379,17 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     if (!api?.listEvents) return;
     // Hydrate the persisted lastReadTs once per session so the unread badge
     // survives a restart instead of counting every historical error as new.
+    // gameplan §A6 — also hydrates lastPickedMode so the New-design dialog
+    // opens to the user's last-picked tab.
     if (!get().diagnosticsPrefsHydrated) {
       try {
         const prefs = await window.codesign?.preferences?.get?.();
         const persisted = prefs?.diagnosticsLastReadTs;
         if (typeof persisted === 'number' && persisted > 0) {
           set({ lastReadTs: persisted });
+        }
+        if (prefs?.lastPickedMode === 'design' || prefs?.lastPickedMode === 'game') {
+          set({ lastPickedMode: prefs.lastPickedMode });
         }
       } catch {
         // Non-fatal: fall back to default 0.

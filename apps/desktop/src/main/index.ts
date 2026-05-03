@@ -15,6 +15,7 @@ import {
   generateTitle,
   generateViaAgent,
 } from '@open-codesign/core';
+import type { GenerateViaAgentDeps } from '@open-codesign/core';
 import {
   detectProviderFromKey,
   generateImage,
@@ -25,6 +26,7 @@ import {
   BRAND,
   CancelGenerationPayloadV1,
   CodesignError,
+  type GameEngine,
   GeneratePayload,
   GeneratePayloadV1,
 } from '@open-codesign/shared';
@@ -892,11 +894,51 @@ function registerIpcHandlers(db: Database | null): void {
       return '';
     };
 
+    // gameplan §A5 + §A6 — wire game-mode tools when the IPC payload
+    // requested it. The engine is captured into a per-run mutable that
+    // choose_engine writes to; validate_game_scene reads from the same
+    // mutable to dispatch into the runtime adapter registry. The runtime
+    // import is lazy so design-mode runs pay nothing.
+    type GameModeDeps = NonNullable<GenerateViaAgentDeps['gameMode']>;
+    const gameMode: GameModeDeps | undefined = ((): GameModeDeps | undefined => {
+      const isGameRun = input.artifactType === 'game';
+      if (!isGameRun) return undefined;
+      let currentEngine: GameEngine | null =
+        input.engine !== undefined ? (input.engine as GameEngine) : null;
+      return {
+        setEngine(engine) {
+          currentEngine = engine as GameEngine;
+        },
+        getCurrentEngine: () => currentEngine,
+        validate: async (engine, files) => {
+          const { getEngineAdapter } = await import('@open-codesign/runtime');
+          const adapter = getEngineAdapter(engine as GameEngine);
+          if (adapter === null) {
+            return {
+              ok: false,
+              engine,
+              issues: [
+                {
+                  path: '',
+                  message: `Engine "${engine}" has no adapter registered yet (Phase A ships three + phaser; Phase B/C add godot + pygame).`,
+                  severity: 'error' as const,
+                },
+              ],
+            };
+          }
+          const result = adapter.validate(files);
+          return result.ok
+            ? { ok: true, engine, issues: [] }
+            : { ok: false, engine, issues: result.issues };
+        },
+      };
+    })();
     return generateViaAgent(input, {
       fs,
       runtimeVerify,
       renderPreview,
       userSkills,
+      ...(gameMode !== undefined ? { gameMode } : {}),
       ...(generateImageAsset !== undefined ? { generateImageAsset } : {}),
       onEvent: (event: AgentEvent) => {
         // High-signal only. Skip per-token deltas and inner message_*
@@ -1499,6 +1541,10 @@ function registerIpcHandlers(db: Database | null): void {
               // /jsx /vanilla and forwards via the IPC payload). Defaults
               // to undefined → JSX guidance in agent.ts.
               ...(payload.pattern !== undefined ? { pattern: payload.pattern } : {}),
+              // gameplan §A6 — when the New-design dialog picked Game,
+              // route through the game-builder prompt + tool stack.
+              ...(payload.artifactMode !== undefined ? { artifactType: payload.artifactMode } : {}),
+              ...(payload.gameEngine !== undefined ? { engine: payload.gameEngine } : {}),
               // Read prompt-assist constraints from the design so the system
               // prompt can render them as load-bearing scope guidance. Only
               // available when the design has metadata (long prompts skip

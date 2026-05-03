@@ -4,6 +4,7 @@ import {
   type RetryReason,
   complete,
   completeWithRetry,
+  extractHttpStatus,
   filterActive,
   formatSkillsForPrompt,
 } from '@open-codesign/providers';
@@ -58,8 +59,10 @@ export {
 } from './tools/read-design-system.js';
 export {
   makeDoneTool,
+  makeVerifyArtifactTool,
   type DoneDetails,
   type DoneError,
+  type VerifyDetails,
   type DoneRuntimeVerifier,
 } from './tools/done.js';
 export {
@@ -129,6 +132,13 @@ export interface GenerateInput {
    * Use `applyComment()` for `'revise'`; `'tweak'` has no public entry point yet.
    */
   mode?: Extract<PromptComposeOptions['mode'], 'create'> | undefined;
+  /** gameplan §A6 — when 'game', composeSystemPrompt composes the
+   *  game-builder layered prompt and the agent layer wires deps.gameMode. */
+  artifactType?: 'design' | 'game' | undefined;
+  /** gameplan §A6 — engine pin for game-mode runs (set by the New-design
+   *  dialog or carried from a prior snapshot). When omitted on a game run
+   *  the agent calls `choose_engine` first. */
+  engine?: 'three' | 'phaser' | 'pygame' | 'godot' | undefined;
   signal?: AbortSignal | undefined;
   onRetry?: ((info: RetryReason) => void) | undefined;
   /**
@@ -545,18 +555,10 @@ async function runModel(input: ModelRunInput): Promise<GenerateOutput> {
   }
 }
 
-function extractStatus(err: unknown): number | undefined {
-  if (typeof err !== 'object' || err === null) return undefined;
-  const candidates = [
-    (err as { status?: unknown }).status,
-    (err as { statusCode?: unknown }).statusCode,
-    (err as { response?: { status?: unknown } }).response?.status,
-  ];
-  for (const c of candidates) {
-    if (typeof c === 'number' && Number.isFinite(c)) return c;
-  }
-  return undefined;
-}
+// Single source of truth for HTTP status extraction lives in
+// @open-codesign/providers. Aliased here so the existing call site
+// `extractStatus(err)` stays tidy.
+const extractStatus = extractHttpStatus;
 
 /** Detect upstream-error messages that indicate a reasoning-knob mismatch.
  *  Phrases vary across upstreams (OpenRouter, Anthropic, OpenAI, Vertex, etc.),

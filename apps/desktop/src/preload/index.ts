@@ -122,6 +122,8 @@ export interface Preferences {
   checkForUpdatesOnStartup: boolean;
   dismissedUpdateVersion: string;
   diagnosticsLastReadTs: number;
+  /** gameplan §A6 / Q2 — last-picked mode in the New-design dialog. */
+  lastPickedMode: 'design' | 'game';
 }
 
 /**
@@ -235,6 +237,10 @@ const api = {
      *  ('jsx'). 'vanilla' selects the multi-source-file guidance + the
      *  vanilla preview inliner. */
     pattern?: 'jsx' | 'vanilla';
+    /** gameplan §A6 — game-mode discriminator from the New-design dialog. */
+    artifactMode?: 'design' | 'game';
+    /** gameplan §A6 — engine pin (when artifactMode='game'). */
+    gameEngine?: 'three' | 'phaser' | 'pygame' | 'godot';
   }) =>
     ipcRenderer.invoke('codesign:v1:generate', {
       schemaVersion: 1,

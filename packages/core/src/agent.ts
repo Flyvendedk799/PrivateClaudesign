@@ -887,6 +887,11 @@ export async function generateViaAgent(
   const skillResult = input.systemPrompt
     ? { blobs: [] as string[], warnings: [] as string[] }
     : await collectSkills(log, input.model.provider);
+  // gameplan §A6 — game-mode runs flip composeSystemPrompt to compose the
+  // game-builder layered prompt (game-workflow + engine guide + game-anti-slop
+  // + multi-file guide). Engine optionality is handled inside composeGame —
+  // when undefined, the prompt instructs the agent to call choose_engine.
+  const isGameRun = input.artifactType === 'game';
   const systemPrompt =
     input.systemPrompt ??
     composeSystemPrompt({
@@ -894,6 +899,8 @@ export async function generateViaAgent(
       userPrompt: input.prompt,
       agentMode: true,
       ...(skillResult.blobs.length > 0 ? { skills: skillResult.blobs } : {}),
+      ...(isGameRun ? { artifactType: 'game' as const } : {}),
+      ...(isGameRun && input.engine !== undefined ? { engine: input.engine } : {}),
     });
 
   const userContent = buildUserPromptWithContext(
