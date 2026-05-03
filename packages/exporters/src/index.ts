@@ -21,6 +21,7 @@ export const EXPORTER_FORMATS = [
   'game-html',
   'game-zip',
   'game-godot-project',
+  'game-godot-web',
   'game-py',
   'game-pyodide-html',
 ] as const;
@@ -33,6 +34,7 @@ export const GAME_EXPORTER_FORMATS = [
   'game-html',
   'game-zip',
   'game-godot-project',
+  'game-godot-web',
   'game-py',
   'game-pyodide-html',
   'markdown',
@@ -62,6 +64,7 @@ export type { ExportMarkdownOptions, MarkdownMeta } from './markdown';
 export type { ExportGameZipOptions } from './game-zip';
 export type { ExportGameHtmlOptions } from './game-html';
 export type { ExportGameGodotProjectOptions } from './game-godot-project';
+export type { ExportGameGodotWebOptions } from './game-godot-web';
 export type { ExportGamePyOptions } from './game-py';
 export type { ExportGamePyodideHtmlOptions } from './game-pyodide-html';
 export { htmlToMarkdown } from './markdown';
@@ -120,6 +123,7 @@ export async function exportArtifact(
     format === 'game-html' ||
     format === 'game-zip' ||
     format === 'game-godot-project' ||
+    format === 'game-godot-web' ||
     format === 'game-py' ||
     format === 'game-pyodide-html'
   ) {
@@ -188,6 +192,19 @@ export async function exportGameArtifact(
     if (opts.designName !== undefined) godotOpts.designName = opts.designName;
     if (opts.engineVersion !== undefined) godotOpts.engineVersion = opts.engineVersion;
     return mod.exportGameGodotProject(destinationPath, godotOpts);
+  }
+  if (format === 'game-godot-web') {
+    if (opts.engine !== 'godot' && opts.engine !== undefined) {
+      throw new CodesignError(
+        `game-godot-web requires engine='godot' (got "${opts.engine}"). Use game-html / game-zip for the JS engines, game-py for pygame.`,
+        ERROR_CODES.EXPORTER_FORMAT_REJECTED,
+      );
+    }
+    const mod = await import('./game-godot-web');
+    const webOpts: import('./game-godot-web').ExportGameGodotWebOptions = { files: opts.files };
+    if (opts.designName !== undefined) webOpts.designName = opts.designName;
+    if (opts.engineVersion !== undefined) webOpts.engineVersion = opts.engineVersion;
+    return mod.exportGameGodotWeb(destinationPath, webOpts);
   }
   if (format === 'game-py') {
     if (opts.engine !== 'pygame' && opts.engine !== undefined) {

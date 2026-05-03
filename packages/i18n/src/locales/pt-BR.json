@@ -449,7 +449,14 @@
       "toggleDevtools": "Alternar DevTools",
       "prefsLoadFailed": "Falha ao carregar preferências",
       "prefsSaveFailed": "Falha ao salvar preferência",
-      "devtoolsFailed": "Não foi possível alternar o DevTools"
+      "devtoolsFailed": "Não foi possível alternar o DevTools",
+      "godotCli": "Godot CLI",
+      "godotCliHint": "Necessário para gerar uma pré-visualização web a partir de um design Godot 4.3+. A CLI é detectada uma vez na inicialização do aplicativo.",
+      "godotCliOk": "Detectado — {{version}}",
+      "godotCliMissing": "Não detectado no PATH",
+      "godotCliWrongVersion": "Encontrado {{version}} — Godot 4.3+ necessário",
+      "godotCliInstallLink": "Instalar Godot 4.3+",
+      "godotCliRedetect": "Detectar novamente"
     }
   },
   "updates": {

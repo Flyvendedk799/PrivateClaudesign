@@ -484,7 +484,14 @@
       "toggleDevtools": "切换 DevTools",
       "prefsLoadFailed": "加载偏好设置失败",
       "prefsSaveFailed": "保存偏好失败",
-      "devtoolsFailed": "无法切换 DevTools"
+      "devtoolsFailed": "无法切换 DevTools",
+      "godotCli": "Godot CLI",
+      "godotCliHint": "从 Godot 4.3+ 设计构建 Web 预览所需。应用启动时检测一次 CLI。",
+      "godotCliOk": "已检测 — {{version}}",
+      "godotCliMissing": "未在 PATH 中检测到",
+      "godotCliWrongVersion": "找到 {{version}} — 需要 Godot 4.3+",
+      "godotCliInstallLink": "安装 Godot 4.3+",
+      "godotCliRedetect": "重新检测"
     }
   },
   "updates": {

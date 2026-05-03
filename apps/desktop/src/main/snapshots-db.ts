@@ -946,6 +946,10 @@ export function contentTypeFromPath(path: string): string {
     case 'godot':
     case 'cfg':
       return 'text/plain';
+    case 'wasm':
+      return 'application/wasm';
+    case 'pck':
+      return 'application/octet-stream';
     default:
       return 'application/octet-stream';
   }

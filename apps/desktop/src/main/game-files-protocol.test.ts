@@ -12,6 +12,7 @@ import {
   GAME_FILES_SCHEME,
   gameFilesResponseHeaders,
   parseGameFilesUrl,
+  resolveGameFilesBuildRequest,
   resolveGameFilesRequest,
 } from './game-files-protocol';
 import { createDesign, initInMemoryDb, upsertDesignFile } from './snapshots-db';
@@ -173,6 +174,52 @@ describe('resolveGameFilesRequest', () => {
       db,
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe('resolveGameFilesBuildRequest (Phase D — Godot web preview)', () => {
+  it('serves a registered _build/ file with COOP/COEP set + the right MIME', async () => {
+    const wasmBytes = Buffer.from([0x00, 0x61, 0x73, 0x6d]);
+    const res = await resolveGameFilesBuildRequest({
+      rawUrl: 'game-files://designs/d-1/_build/index.wasm',
+      getBuildDir: (id) => (id === 'd-1' ? '/tmp/builds/d-1' : null),
+      readBuildFile: async (dir, rel) =>
+        dir === '/tmp/builds/d-1' && rel === 'index.wasm' ? { body: wasmBytes } : null,
+    });
+    expect(res.status).toBe(200);
+    expect(res.contentType).toBe('application/wasm');
+    expect(res.crossOriginIsolated).toBe(true);
+    expect(Buffer.from(res.body).equals(wasmBytes)).toBe(true);
+  });
+
+  it('returns 404 with COOP/COEP when no build is registered for the design', async () => {
+    const res = await resolveGameFilesBuildRequest({
+      rawUrl: 'game-files://designs/d-2/_build/index.html',
+      getBuildDir: () => null,
+      readBuildFile: async () => null,
+    });
+    expect(res.status).toBe(404);
+    expect(res.crossOriginIsolated).toBe(true);
+  });
+
+  it('returns 404 when the file is missing inside the registered build dir', async () => {
+    const res = await resolveGameFilesBuildRequest({
+      rawUrl: 'game-files://designs/d-3/_build/missing.wasm',
+      getBuildDir: () => '/tmp/builds/d-3',
+      readBuildFile: async () => null,
+    });
+    expect(res.status).toBe(404);
+    expect(res.crossOriginIsolated).toBe(true);
+  });
+
+  it('returns 404 when the URL does not target a _build/ path (caller dispatched wrong)', async () => {
+    const res = await resolveGameFilesBuildRequest({
+      rawUrl: 'game-files://designs/d-4/index.html',
+      getBuildDir: () => '/tmp/builds/d-4',
+      readBuildFile: async () => ({ body: Buffer.from('<html/>') }),
+    });
+    expect(res.status).toBe(404);
+    expect(res.crossOriginIsolated).toBe(true);
   });
 });
 

@@ -495,7 +495,14 @@
       "toggleDevtools": "Toggle DevTools",
       "prefsLoadFailed": "Failed to load preferences",
       "prefsSaveFailed": "Failed to save preference",
-      "devtoolsFailed": "Could not toggle DevTools"
+      "devtoolsFailed": "Could not toggle DevTools",
+      "godotCli": "Godot CLI",
+      "godotCliHint": "Required to build a web preview from a Godot 4.3+ design. The CLI is detected once at app boot.",
+      "godotCliOk": "Detected — {{version}}",
+      "godotCliMissing": "Not detected on PATH",
+      "godotCliWrongVersion": "Found {{version}} — Godot 4.3+ required",
+      "godotCliInstallLink": "Install Godot 4.3+",
+      "godotCliRedetect": "Re-detect"
     }
   },
   "updates": {

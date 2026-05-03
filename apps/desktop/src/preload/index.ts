@@ -715,7 +715,62 @@ const api = {
   },
   openExternal: (url: string) =>
     ipcRenderer.invoke('codesign:v1:open-external', url) as Promise<void>,
+  godot: {
+    /** gameplan §D — surface the cached Godot CLI detection result. The
+     *  Settings panel renders three states: ok / wrong-version / missing. */
+    getStatus: () => ipcRenderer.invoke('codesign:v1:godot-cli-status') as Promise<GodotCliStatus>,
+    /** Force a re-probe — used by the Settings "Re-detect" button after
+     *  the user installs Godot mid-session. */
+    refreshStatus: () =>
+      ipcRenderer.invoke('codesign:v1:godot-cli-status:refresh') as Promise<GodotCliStatus>,
+    /** gameplan §D — kick off `godot --headless --export-release Web` for
+     *  the given design. Resolves once the build completes (or fails).
+     *  Subscribe to `onBuildProgress` first to follow stdout/stderr lines. */
+    buildWebPreview: (designId: string) =>
+      ipcRenderer.invoke('codesign:v1:godot-web-build', { designId }) as Promise<{
+        ok: boolean;
+        buildDir?: string;
+        files?: string[];
+        reason?: string;
+        detail?: string;
+      }>,
+    onBuildProgress: (
+      cb: (
+        event:
+          | { designId: string; phase: 'materialize'; pct: number }
+          | { designId: string; phase: 'preset' }
+          | { designId: string; phase: 'build:start' }
+          | { designId: string; phase: 'build:stdout'; line: string }
+          | { designId: string; phase: 'build:stderr'; line: string }
+          | { designId: string; phase: 'collect' },
+      ) => void,
+    ) => {
+      const listener = (_evt: unknown, e: Parameters<typeof cb>[0]) => cb(e);
+      ipcRenderer.on('codesign:v1:godot-web-build:progress', listener);
+      return () => ipcRenderer.removeListener('codesign:v1:godot-web-build:progress', listener);
+    },
+  },
 };
+
+/** Mirrors `GodotCliStatus` from the main process — duplicated here so
+ *  the preload bundle doesn't pull in `node:child_process` types. */
+export type GodotCliStatus =
+  | {
+      ok: true;
+      path: string;
+      version: string;
+      major: number;
+      minor: number;
+      patch: number;
+    }
+  | { ok: false; reason: 'missing' }
+  | {
+      ok: false;
+      reason: 'wrong-version';
+      path: string;
+      version: string;
+      major: number;
+    };
 
 contextBridge.exposeInMainWorld('codesign', api);
 

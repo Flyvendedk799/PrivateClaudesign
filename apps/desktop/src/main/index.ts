@@ -65,6 +65,8 @@ import {
   GAME_FILES_PRIVILEGED_SCHEME,
   GAME_FILES_SCHEME,
   gameFilesResponseHeaders,
+  parseGameFilesUrl,
+  resolveGameFilesBuildRequest,
   resolveGameFilesRequest,
 } from './game-files-protocol';
 import { findInFlightDuplicate, generateDedupKey, hashContentKey } from './generate-dedup';
@@ -73,6 +75,9 @@ import {
   cancelGenerationRequest,
   extractGenerationTimeoutError,
 } from './generation-ipc';
+import { readGodotBuildFile } from './godot-web-build';
+import { registerGodotWebBuildIpc } from './godot-web-build-ipc';
+import { getGodotWebBuildDir } from './godot-web-build-registry';
 import {
   registerImageGenerationSettingsIpc,
   resolveImageGenerationConfig,
@@ -2271,6 +2276,18 @@ if (!IS_VITEST) {
         const gameFilesLog = getLogger('game-files');
         protocol.handle(GAME_FILES_SCHEME, async (request) => {
           try {
+            const parsed = parseGameFilesUrl(request.url);
+            if (parsed?.isBuild) {
+              const resolved = await resolveGameFilesBuildRequest({
+                rawUrl: request.url,
+                getBuildDir: getGodotWebBuildDir,
+                readBuildFile: readGodotBuildFile,
+              });
+              return new Response(resolved.body, {
+                status: resolved.status,
+                headers: gameFilesResponseHeaders(resolved),
+              });
+            }
             const resolved = resolveGameFilesRequest({
               rawUrl: request.url,
               db: dbResult.db,
@@ -2366,6 +2383,10 @@ if (!IS_VITEST) {
       registerPreferencesIpc();
       registerImageGenerationSettingsIpc();
       registerExporterIpc(
+        () => mainWindow,
+        () => (dbResult.ok ? dbResult.db : null),
+      );
+      registerGodotWebBuildIpc(
         () => mainWindow,
         () => (dbResult.ok ? dbResult.db : null),
       );

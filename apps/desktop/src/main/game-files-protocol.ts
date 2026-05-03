@@ -120,9 +120,11 @@ export function resolveGameFilesRequest(input: {
   const parsed = parseGameFilesUrl(input.rawUrl);
   if (parsed === null) return NOT_FOUND;
 
-  // _build paths (Phase D) are reserved for ephemeral Godot web exports
-  // produced by the godot --headless shell-out. Phase A doesn't write
-  // anything under that prefix, so respond 404 until Phase D wires it.
+  // _build paths flow through the async resolver — call
+  // `resolveGameFilesBuildRequest` from the protocol handler. Reaching
+  // this branch via the sync entry means the caller didn't dispatch on
+  // isBuild; respond 404 with COOP/COEP set so the browser still treats
+  // the response as part of the cross-origin-isolated context.
   if (parsed.isBuild) {
     return {
       ...NOT_FOUND,
@@ -151,6 +153,44 @@ export function resolveGameFilesRequest(input: {
     contentType,
     body: new TextEncoder().encode(row.content),
     crossOriginIsolated: false,
+  };
+}
+
+/** Async resolver for `_build/*` paths. Looks the build dir up via the
+ *  injected lookup (`getGodotWebBuildDir(designId)` in production), then
+ *  reads the file from disk through the injected reader (`readGodotBuildFile`).
+ *
+ *  Returns 404 when:
+ *   - the URL doesn't shape-check
+ *   - the URL targets a non-`_build` path (caller dispatched wrong)
+ *   - no build is registered for the designId
+ *   - the file is missing under the build dir, or path traversal escapes it
+ *
+ *  Always emits COOP/COEP because Godot's web export needs cross-origin
+ *  isolation to use SharedArrayBuffer (without it, the WASM thread pool
+ *  refuses to start). */
+export async function resolveGameFilesBuildRequest(input: {
+  rawUrl: string;
+  getBuildDir: (designId: string) => string | null;
+  readBuildFile: (buildDir: string, relPath: string) => Promise<{ body: Buffer } | null>;
+}): Promise<GameFilesResolved> {
+  const parsed = parseGameFilesUrl(input.rawUrl);
+  if (parsed === null || !parsed.isBuild) {
+    return { ...NOT_FOUND, crossOriginIsolated: true };
+  }
+  const buildDir = input.getBuildDir(parsed.designId);
+  if (buildDir === null) {
+    return { ...NOT_FOUND, crossOriginIsolated: true };
+  }
+  const file = await input.readBuildFile(buildDir, parsed.path);
+  if (file === null) {
+    return { ...NOT_FOUND, crossOriginIsolated: true };
+  }
+  return {
+    status: 200,
+    contentType: contentTypeFromPath(parsed.path),
+    body: Uint8Array.from(file.body),
+    crossOriginIsolated: true,
   };
 }
 

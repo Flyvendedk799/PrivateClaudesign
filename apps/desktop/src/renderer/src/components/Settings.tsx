@@ -33,6 +33,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AppPaths,
+  GodotCliStatus,
   ImageGenerationSettingsView,
   Preferences,
   ProviderRow,
@@ -2708,7 +2709,81 @@ function AdvancedTab() {
           {t('settings.advanced.toggleDevtools')}
         </button>
       </Row>
+
+      <GodotCliRow />
     </div>
+  );
+}
+
+function GodotCliRow() {
+  const t = useT();
+  const [status, setStatus] = useState<GodotCliStatus | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  useEffect(() => {
+    if (!window.codesign?.godot) return;
+    void window.codesign.godot
+      .getStatus()
+      .then(setStatus)
+      .catch(() => undefined);
+  }, []);
+
+  const onRedetect = async (): Promise<void> => {
+    if (!window.codesign?.godot) return;
+    setRefreshing(true);
+    try {
+      const next = await window.codesign.godot.refreshStatus();
+      setStatus(next);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  let valueLabel: string;
+  let valueColor = 'text-[var(--color-text-secondary)]';
+  if (status === null) {
+    valueLabel = '…';
+  } else if (status.ok) {
+    valueLabel = t('settings.advanced.godotCliOk', { version: status.version });
+    valueColor = 'text-[var(--color-success,_#4ade80)]';
+  } else if (status.reason === 'wrong-version') {
+    valueLabel = t('settings.advanced.godotCliWrongVersion', { version: status.version });
+    valueColor = 'text-[var(--color-warning,_#fbbf24)]';
+  } else {
+    valueLabel = t('settings.advanced.godotCliMissing');
+    valueColor = 'text-[var(--color-text-muted)]';
+  }
+
+  return (
+    <Row label={t('settings.advanced.godotCli')} hint={t('settings.advanced.godotCliHint')}>
+      <div className="flex items-center gap-2">
+        <span className={`text-[var(--text-xs)] ${valueColor}`}>{valueLabel}</span>
+        {status !== null && !status.ok && (
+          <a
+            href="https://godotengine.org/download"
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => {
+              if (window.codesign) {
+                e.preventDefault();
+                void window.codesign.openExternal('https://godotengine.org/download');
+              }
+            }}
+            className="text-[var(--text-xs)] text-[var(--color-accent)] hover:underline"
+          >
+            {t('settings.advanced.godotCliInstallLink')}
+          </a>
+        )}
+        <button
+          type="button"
+          onClick={onRedetect}
+          disabled={refreshing}
+          className="h-7 px-3 rounded-[var(--radius-sm)] border border-[var(--color-border)] text-[var(--text-xs)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] transition-colors disabled:opacity-50"
+        >
+          {t('settings.advanced.godotCliRedetect')}
+        </button>
+      </div>
+    </Row>
   );
 }
 
