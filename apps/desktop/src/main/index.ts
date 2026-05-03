@@ -49,8 +49,22 @@ import { registerConnectionIpc } from './connection-ipc';
 import { scanDesignSystem } from './design-system';
 import { registerDiagnosticsIpc } from './diagnostics-ipc';
 import { makeRuntimeVerifier } from './done-verify';
-import { BrowserWindow, app, clipboard, dialog, ipcMain, shell } from './electron-runtime';
+import {
+  BrowserWindow,
+  app,
+  clipboard,
+  dialog,
+  ipcMain,
+  protocol,
+  shell,
+} from './electron-runtime';
 import { registerExporterIpc } from './exporter-ipc';
+import {
+  GAME_FILES_PRIVILEGED_SCHEME,
+  GAME_FILES_SCHEME,
+  gameFilesResponseHeaders,
+  resolveGameFilesRequest,
+} from './game-files-protocol';
 import { findInFlightDuplicate, generateDedupKey, hashContentKey } from './generate-dedup';
 import {
   armGenerationTimeout,
@@ -2120,6 +2134,21 @@ async function scheduleStartupUpdateCheck(): Promise<void> {
 }
 
 if (!IS_VITEST) {
+  // gameplan §7.2 — `game-files://` privileged scheme MUST be registered
+  // before app.whenReady() resolves. Setting privileges here means the
+  // post-ready protocol.handle() call (further down) can serve module
+  // imports + binary assets out of the multi-file project bundle into the
+  // preview iframe. The handler itself attaches once the DB is open.
+  try {
+    protocol.registerSchemesAsPrivileged([GAME_FILES_PRIVILEGED_SCHEME]);
+  } catch (err) {
+    // Re-registration in dev (hot reload) throws; main-process logger isn't
+    // wired yet at this point, so route through console which is allowed
+    // here only because it sits before app.whenReady().
+    // biome-ignore lint/suspicious/noConsole: pre-ready bootstrap, no logger available
+    console.warn('[game-files] scheme register failed', err);
+  }
+
   void app.whenReady().then(async () => {
     // Extracted so the outer try/catch AND post-init listeners (whose callbacks
     // fire outside this block) can route failures through the same boot-fallback
@@ -2188,6 +2217,33 @@ if (!IS_VITEST) {
       const dbResult = safeInitSnapshotsDb(join(app.getPath('userData'), 'designs.db'));
       const diagnosticsDb: Database | null = dbResult.ok ? dbResult.db : null;
       if (dbResult.ok) {
+        // gameplan §7.2 — attach the game-files:// handler now that the DB is
+        // open. Resolves multi-file game project bundles into the preview
+        // iframe. Route any internal failure through the existing logger so
+        // protocol issues surface in diagnostics rather than crashing the
+        // iframe load.
+        const gameFilesLog = getLogger('game-files');
+        protocol.handle(GAME_FILES_SCHEME, async (request) => {
+          try {
+            const resolved = resolveGameFilesRequest({
+              rawUrl: request.url,
+              db: dbResult.db,
+            });
+            return new Response(resolved.body, {
+              status: resolved.status,
+              headers: gameFilesResponseHeaders(resolved),
+            });
+          } catch (err) {
+            gameFilesLog.error('handle.fail', {
+              url: request.url,
+              message: err instanceof Error ? err.message : String(err),
+            });
+            return new Response('Internal protocol error', {
+              status: 500,
+              headers: { 'content-type': 'text/plain' },
+            });
+          }
+        });
         registerSnapshotsIpc(dbResult.db);
         registerWorkspaceIpc(dbResult.db, () => mainWindow);
         registerChatMessagesIpc(dbResult.db);
