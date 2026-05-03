@@ -146,6 +146,10 @@ export interface AgentStreamEvent {
   type:
     | 'turn_start'
     | 'text_delta'
+    | 'thinking_delta'
+    | 'thinking_end'
+    | 'tool_draft_start'
+    | 'tool_draft_delta'
     | 'turn_end'
     | 'tool_call_start'
     | 'tool_call_result'
@@ -153,6 +157,7 @@ export interface AgentStreamEvent {
     | 'chunk_start'
     | 'chunk_end'
     | 'agent_end'
+    | 'heartbeat'
     | 'error';
   designId: string;
   /** Trace ID linking this event to the main-process generation log entry.
@@ -161,7 +166,9 @@ export interface AgentStreamEvent {
   generationId: string;
   // turn_start
   turnId?: string;
-  // text_delta
+  // text_delta and thinking_delta share the `delta` field. Distinguish via
+  // the `type` discriminator. `thinking_end` carries no delta — it just
+  // signals the renderer to clear the live thoughts panel.
   delta?: string;
   // turn_end
   finalText?: string;
@@ -174,6 +181,16 @@ export interface AgentStreamEvent {
   // tool_call_result
   result?: unknown;
   durationMs?: number;
+  // tool_call_result enrichments — present only when the tool was the agent's
+  // text_editor (str_replace / insert) and the FS callback returned a populated
+  // EditResult. Powers the follow-the-edit cursor in the preview.
+  editPath?: string;
+  editStartLine?: number;
+  editEndLine?: number;
+  // tool_call_result enrichment — true when pi-agent-core flagged the call
+  // with `isError`. Renderer counts these to surface a "run is thrashing"
+  // signal in the chat status header without waiting for the run summary.
+  isFailure?: boolean;
   // fs_updated — emitted whenever the agent's text_editor mutates a file in the
   // virtual fs. Renderer uses this to re-render the iframe live during
   // generation so the user can watch the design take shape.
@@ -186,6 +203,12 @@ export interface AgentStreamEvent {
   chunkCap?: number;
   chunkBudgetMs?: number;
   chunkInterrupted?: boolean;
+  // heartbeat — emitted when no other event has fired for ≥5s during a run.
+  // Renderer keeps the thinking panel visible and shows an elapsed counter
+  // so the user can tell the run is alive during long extended-thinking gaps
+  // (the analysed traces had a 14-min silent stretch in run 1 turn 3).
+  // sinceMs = ms since the previous event of any kind.
+  sinceMs?: number;
   // error
   message?: string;
   code?: string;

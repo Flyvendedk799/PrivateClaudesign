@@ -27,11 +27,30 @@ function makeFs(initial: Record<string, string> = {}): TextEditorFsCallbacks {
         }
         throw new Error(`old_str matched ${count} times in ${path}; must be unique`);
       }
-      map.set(path, cur.replace(oldStr, newStr));
-      return { path };
+      const next = cur.replace(oldStr, newStr);
+      map.set(path, next);
+      const newlinesBefore = (cur.slice(0, idx).match(/\n/g) ?? []).length;
+      const startLine = newlinesBefore + 1;
+      const newlinesInNew = (newStr.match(/\n/g) ?? []).length;
+      const endLine = newStr.length === 0 ? startLine - 1 : startLine + newlinesInNew;
+      const totalLines = next.split('\n').length;
+      return { path, startLine, endLine, totalLines };
     },
-    insert(path) {
-      return { path };
+    insert(path, line, text) {
+      const cur = map.get(path) ?? '';
+      const lines = cur.split('\n');
+      const clamped = Math.max(0, Math.min(line, lines.length));
+      lines.splice(clamped, 0, text);
+      const next = lines.join('\n');
+      map.set(path, next);
+      const startLine = clamped + 1;
+      const newlinesInText = (text.match(/\n/g) ?? []).length;
+      return {
+        path,
+        startLine,
+        endLine: startLine + newlinesInText,
+        totalLines: next.split('\n').length,
+      };
     },
     listDir() {
       return [];
@@ -120,11 +139,95 @@ describe('text-editor str_replace miss handling', () => {
   });
 });
 
+describe('text-editor success message includes post-edit position', () => {
+  // Anchors the model's mental model of the file after each edit. Without
+  // these line numbers the agent drifts after a few sequential str_replaces
+  // and starts retrying with stale snippets — the 2026-04-29 production
+  // trace showed a 14% str_replace miss rate that this should reduce.
+  it('str_replace surfaces start/end line and total line count', async () => {
+    const file = ['line1', 'line2', 'line3', 'line4', 'line5'].join('\n');
+    const tool = makeTextEditorTool(makeFs({ 'index.html': file }));
+    const res = await tool.execute('id-pos-replace', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: 'line3',
+      new_str: 'replaced3a\nreplaced3b',
+    });
+    const text = (res.content[0] as { text: string }).text;
+    // "line3" sits at line 3; replacement spans 2 lines (3-4); file gains
+    // one line (now 6 total).
+    expect(text).toBe('Edited index.html. New content at lines 3-4 (file is now 6 lines).');
+  });
+
+  it('str_replace deletion (empty new_str) surfaces "Removed content"', async () => {
+    const file = ['a', 'b', 'c', 'd'].join('\n');
+    const tool = makeTextEditorTool(makeFs({ 'index.html': file }));
+    const res = await tool.execute('id-pos-delete', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: 'b\nc\n',
+      new_str: '',
+    });
+    const text = (res.content[0] as { text: string }).text;
+    // Anchor on what's left at the deletion's first line for readability.
+    expect(text).toMatch(
+      /^Edited index\.html\. Removed content at line 2 \(file is now \d+ lines\)\.$/,
+    );
+  });
+
+  it('insert reports the post-edit range of the new content', async () => {
+    const file = ['a', 'b', 'c'].join('\n');
+    const tool = makeTextEditorTool(makeFs({ 'index.html': file }));
+    const res = await tool.execute('id-pos-insert', {
+      command: 'insert',
+      path: 'index.html',
+      insert_line: 2,
+      new_str: 'X\nY',
+    });
+    const text = (res.content[0] as { text: string }).text;
+    // insert_line: 2 = before line 3 (1-indexed), spans 2 lines, total grows by 2.
+    expect(text).toBe('Inserted at index.html:2. New content at lines 3-4 (file is now 5 lines).');
+  });
+
+  it('falls back to the headline when the FS impl omits position info', async () => {
+    // Test that the formatter is tolerant of mocks that don't return positions
+    // (older tests, third-party FS adapters). When fields are missing, we
+    // emit the original short message rather than crashing.
+    const map = new Map<string, string>([['index.html', '<h1>Hi</h1>']]);
+    const tool = makeTextEditorTool({
+      view: (p) => {
+        const c = map.get(p);
+        return c === undefined ? null : { content: c, numLines: c.split('\n').length };
+      },
+      create: (p, c) => {
+        map.set(p, c);
+        return { path: p };
+      },
+      strReplace: (p, oldStr, newStr) => {
+        map.set(p, (map.get(p) ?? '').replace(oldStr, newStr));
+        return { path: p };
+      },
+      insert: (p) => ({ path: p }),
+      listDir: () => [],
+    });
+    const res = await tool.execute('id-pos-fallback', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: '<h1>Hi</h1>',
+      new_str: '<h1>Hello</h1>',
+    });
+    expect((res.content[0] as { text: string }).text).toBe('Edited index.html.');
+  });
+});
+
 describe('text-editor per-call size guards', () => {
   it('throws on text_editor.create when file_text exceeds the skeleton cap', async () => {
     const tool = makeTextEditorTool(makeFs());
-    // 24577 bytes — one byte over the 24 KB cap.
-    const huge = 'x'.repeat(24577);
+    // 12289 bytes — one byte over the 12 KB skeleton cap. The 2026-04-29
+    // traces showed 5/8 runs blowing the prior 24 KB cap with 37-45 KB
+    // monolithic creates; tightening to 12 KB enforces the actual
+    // skeleton-then-fills cadence.
+    const huge = 'x'.repeat(12289);
     const msg = await runAndCatch(() =>
       tool.execute('id-create-too-big', {
         command: 'create',
@@ -132,21 +235,61 @@ describe('text-editor per-call size guards', () => {
         file_text: huge,
       }),
     );
-    expect(msg).toMatch(/exceeds the 24576-byte cap/);
+    expect(msg).toMatch(/exceeds the 12288-byte cap/);
     expect(msg).toMatch(/SKELETON tool/);
+    // The new error copy walks the model through a concrete recovery shape.
+    expect(msg).toMatch(/Recover from this error in TWO calls/);
     expect(msg).toMatch(/str_replace/);
   });
 
-  it('lets a 20 KB JSX skeleton through create (regression: backlog-2 #1 ceiling raise)', async () => {
+  it('lets a typical 8 KB JSX skeleton through create (under the 12 KB cap)', async () => {
     const tool = makeTextEditorTool(makeFs());
-    // 20 KB — would have failed under the old 8 KB cap; passes the new 24 KB cap.
-    const skeleton = `<!doctype html>\n<html>\n<body>\n<div id="root"></div>\n<script type="text/babel">\n${'function Tab() { return <div>tab</div>; }\n'.repeat(420)}</script>\n</body>\n</html>`;
+    // ~8 KB skeleton: doctype + html shell + small App + tweak stub.
+    // Real skeletons fit comfortably under 12 KB; the cap rejects only
+    // monolithic dumps.
+    const skeleton = `<!doctype html>\n<html>\n<body>\n<div id="root"></div>\n<script type="text/babel">\n${'function Tab() { return <div>tab</div>; }\n'.repeat(160)}</script>\n</body>\n</html>`;
     const res = await tool.execute('id-jsx-skeleton', {
       command: 'create',
       path: 'index.html',
       file_text: skeleton,
     });
     expect((res.content[0] as { text: string }).text).toMatch(/Created index\.html/);
+  });
+
+  it('plan0305 P2.2 — rejects the 46 KB monolithic create pattern from the a64f trace', async () => {
+    // The 2026-04-29 a64f run (Futurematch B2B Dashboard) opened with a
+    // 46 KB monolithic create that would have exceeded the per-turn output
+    // budget mid-section. With the cap enforced, this shape is rejected
+    // and the model is told to emit a skeleton-then-fill sequence instead.
+    const tool = makeTextEditorTool(makeFs());
+    const monolith = `<!doctype html>\n<html>\n<head>\n${'<style>.x{}</style>\n'.repeat(2400)}</head>\n<body><div id="root"/></body>\n</html>`;
+    expect(monolith.length).toBeGreaterThan(46_000);
+    const msg = await runAndCatch(() =>
+      tool.execute('id-a64f-monolithic', {
+        command: 'create',
+        path: 'index.html',
+        file_text: monolith,
+      }),
+    );
+    expect(msg).toMatch(/exceeds the 12288-byte cap/);
+    expect(msg).toMatch(/SKELETON tool/);
+    expect(msg).toMatch(/Recover from this error in TWO calls/);
+  });
+
+  it('rejects a 20 KB JSX dump that would have passed the old 24 KB cap (regression guard)', async () => {
+    // Captures the failure mode that motivated the 12 KB tightening: agent
+    // tries to write the entire design in one create. Anything past 12 KB
+    // is now a hard fail, no matter how plausible the contents look.
+    const tool = makeTextEditorTool(makeFs());
+    const dump = `<!doctype html>\n<html>\n<body>\n${'<div>section</div>\n'.repeat(1100)}</body>\n</html>`;
+    const msg = await runAndCatch(() =>
+      tool.execute('id-monolithic', {
+        command: 'create',
+        path: 'index.html',
+        file_text: dump,
+      }),
+    );
+    expect(msg).toMatch(/exceeds the 12288-byte cap/);
   });
 
   it('lets sidecar files (.css / .js) through with the relaxed 64KB create cap', async () => {
@@ -200,7 +343,9 @@ describe('text-editor per-call size guards', () => {
       }),
     );
     expect(msg).toMatch(/exceeds the 24576-byte cap/);
-    expect(msg).toMatch(/Split this into 2-3/);
+    // New copy walks the model toward the canonical "split into smaller
+    // calls anchored to existing snippets" recovery shape.
+    expect(msg).toMatch(/splitting THIS replace into 2-4 smaller/);
   });
 
   it('lets sidecar files through with the relaxed 48KB str_replace cap', async () => {
@@ -218,9 +363,11 @@ describe('text-editor per-call size guards', () => {
   });
 
   it('throws on insert when new_str exceeds the per-extension cap (backlog-2 #1 insert symmetry)', async () => {
+    // insert mirrors create, so the same 12 KB ceiling applies on
+    // index.html. Keeps the four commands' size guarantees consistent.
     const fs = makeFs({ 'index.html': '<App/>' });
     const tool = makeTextEditorTool(fs);
-    const huge = 'z'.repeat(24577);
+    const huge = 'z'.repeat(12289);
     const msg = await runAndCatch(() =>
       tool.execute('id-insert-too-big', {
         command: 'insert',
@@ -230,7 +377,7 @@ describe('text-editor per-call size guards', () => {
       }),
     );
     expect(msg).toMatch(/text_editor\.insert/);
-    expect(msg).toMatch(/exceeds the 24576-byte cap/);
+    expect(msg).toMatch(/exceeds the 12288-byte cap/);
   });
 
   it('lets a typical insert through under the cap', async () => {

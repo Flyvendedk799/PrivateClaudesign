@@ -12,12 +12,65 @@ interface ChatMessageListProps {
   isGenerating?: boolean;
   empty?: React.ReactNode;
   streamingText?: string | null;
+  /** Per-turn live "summarized thinking" buffer streamed from Claude's
+   *  adaptive-thinking response. Drives the thoughts panel — when present
+   *  it replaces the static "Thinking…" dots so the user can SEE the
+   *  model reasoning in real time instead of staring at an inert
+   *  animation for 30–60 s. */
+  streamingThinking?: string | null;
+  /** In-flight tool-call composition (pi-ai's toolcall_start/delta events).
+   *  Drives the "drafting" indicator that bridges the 1–3 s gap between
+   *  thinking ending and the runtime emitting tool_call_start. */
+  streamingToolDraft?: { toolName: string; bytes: number } | null;
   pendingToolCalls?: ChatToolCallPayload[];
 }
 
 interface RenderItem {
   key: string;
   node: React.ReactNode;
+}
+
+/**
+ * plan0305 P2.1 — belt-and-braces filter for inter-tool narration that
+ * the model emitted as plain assistant_text instead of as part of a tool
+ * call (e.g. "Now adding the keyframes…", "Good, let me try…"). These
+ * rows render as full chat bubbles and pollute the chat as filler.
+ *
+ * A row is treated as inter-tool narration when ALL of the following hold:
+ *   1. its text is ≤ MAX_NARRATION_CHARS (≈ short transition phrase, not a
+ *      deliverable summary — the run-traces' deliverable summaries were
+ *      700–1500+ chars; transitions were 50–250)
+ *   2. AT LEAST ONE tool_call follows it before the next user row or EOF
+ *   3. EVERY message between it and the next user row (or EOF) is either
+ *      another assistant_text or a tool_call (no artifact_delivered, error,
+ *      etc. — those would mean this text is part of a delivery boundary
+ *      and should stay rendered)
+ *
+ * The model's final post-`done` summary always survives this filter
+ * because (a) it's typically long-form narrative > 180 chars, and (b) the
+ * artifact_delivered row that follows it makes condition 3 fail.
+ *
+ * Exported for unit testing.
+ */
+export const MAX_NARRATION_CHARS = 180;
+export function isInterToolNarration(messages: readonly ChatMessageRow[], index: number): boolean {
+  const msg = messages[index];
+  if (!msg || msg.kind !== 'assistant_text') return false;
+  const text = (msg.payload as { text?: string } | undefined)?.text ?? '';
+  if (text.length > MAX_NARRATION_CHARS) return false;
+  let toolCallSeen = false;
+  for (let j = index + 1; j < messages.length; j += 1) {
+    const next = messages[j];
+    if (!next) break;
+    if (next.kind === 'user') break;
+    if (next.kind === 'tool_call') {
+      toolCallSeen = true;
+      continue;
+    }
+    if (next.kind === 'assistant_text') continue;
+    return false;
+  }
+  return toolCallSeen;
 }
 
 /**
@@ -34,6 +87,8 @@ export function ChatMessageList({
   isGenerating,
   empty,
   streamingText,
+  streamingThinking,
+  streamingToolDraft,
   pendingToolCalls,
 }: ChatMessageListProps) {
   const t = useT();
@@ -87,7 +142,28 @@ export function ChatMessageList({
     bucket = null;
   };
 
-  for (const msg of messages) {
+  // Pre-compute which set_todos rows are "latest" so the InlineTodoList
+  // can apply the in-progress inference only to the actual most-recent
+  // checklist (older lists are historical and shouldn't pulse). The latest
+  // is whichever set_todos appears last across pendingToolCalls (newer
+  // wins) OR persisted messages.
+  let latestPersistedTodosSeq = -1;
+  if (!pendingToolCalls?.some((c) => c.toolName === 'set_todos')) {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i];
+      if (
+        m?.kind === 'tool_call' &&
+        (m.payload as ChatToolCallPayload | undefined)?.toolName === 'set_todos'
+      ) {
+        latestPersistedTodosSeq = m.seq;
+        break;
+      }
+    }
+  }
+
+  for (let mi = 0; mi < messages.length; mi += 1) {
+    const msg = messages[mi];
+    if (!msg) continue;
     if (msg.kind === 'tool_call') {
       const call = (msg.payload as ChatToolCallPayload) ?? null;
       if (!call) continue;
@@ -98,7 +174,13 @@ export function ChatMessageList({
         flush();
         items.push({
           key: `todos-${msg.seq}`,
-          node: <InlineTodoList call={call} />,
+          node: (
+            <InlineTodoList
+              call={call}
+              isLatest={msg.seq === latestPersistedTodosSeq}
+              isGenerating={Boolean(isGenerating)}
+            />
+          ),
         });
         continue;
       }
@@ -121,6 +203,11 @@ export function ChatMessageList({
         ),
       });
     } else if (msg.kind === 'assistant_text') {
+      // plan0305 P2.1 — drop short transitional narration that's
+      // sandwiched between tool_calls. The deliverable summary at the
+      // end of a turn always survives (it's longer than the cutoff
+      // and is followed by artifact_delivered, not another tool_call).
+      if (isInterToolNarration(messages, mi)) continue;
       const p = msg.payload as { text?: string };
       const isLast = msg === messages[messages.length - 1];
       const streaming = Boolean(isGenerating) && isLast;
@@ -182,12 +269,28 @@ export function ChatMessageList({
               groups.push(<WorkingCard key={`p-cluster-${idx}`} calls={pendingBucket} />);
               pendingBucket = [];
             };
+            // The "latest" set_todos for inference is the LAST one in the
+            // pending stream. Older pending set_todos are mid-run updates.
+            let latestPendingTodosIdx = -1;
+            for (let i = pendingToolCalls.length - 1; i >= 0; i -= 1) {
+              if (pendingToolCalls[i]?.toolName === 'set_todos') {
+                latestPendingTodosIdx = i;
+                break;
+              }
+            }
             for (let i = 0; i < pendingToolCalls.length; i += 1) {
               const c = pendingToolCalls[i];
               if (!c) continue;
               if (c.toolName === 'set_todos') {
                 flushPending(i);
-                groups.push(<InlineTodoList key={`p-todos-${i}`} call={c} />);
+                groups.push(
+                  <InlineTodoList
+                    key={`p-todos-${i}`}
+                    call={c}
+                    isLatest={i === latestPendingTodosIdx}
+                    isGenerating={Boolean(isGenerating)}
+                  />,
+                );
                 continue;
               }
               pendingBucket.push(c);
@@ -217,12 +320,97 @@ export function ChatMessageList({
         );
       })()}
       {(() => {
-        // "Agent is thinking" placeholder — shown only when generating and
-        // nothing has arrived yet (no streaming text, last message is the
-        // user's prompt). Bridges the silent gap between submit and first
-        // tool_call / assistant_text / error event.
+        // Drafting tool indicator — shown while the model is streaming the
+        // args of a tool call (between thinking_end and the runtime's
+        // tool_call_start). Tool icon + name + animated dots so the user
+        // sees "Composing edit…" instead of a 1–3 s blank window. The byte
+        // counter ticks up as deltas arrive, hinting at args size for
+        // bigger str_replace patches.
+        if (!streamingToolDraft) return null;
+        const tn = streamingToolDraft.toolName;
+        // Friendly label per tool — mirrors WorkingCard's iconAndLabel
+        // taxonomy at a higher level. Defaults to the raw tool name.
+        const friendlyName =
+          tn === 'set_todos'
+            ? 'Updating plan'
+            : tn === 'str_replace_based_edit_tool' || tn === 'text_editor'
+              ? 'Composing edit'
+              : tn === 'done'
+                ? 'Finalizing'
+                : tn === 'render_preview'
+                  ? 'Capturing preview'
+                  : tn === 'read_url'
+                    ? 'Composing fetch'
+                    : tn === 'list_design_skills'
+                      ? 'Listing skills'
+                      : tn === 'view_design_skill'
+                        ? 'Reading skill'
+                        : tn === 'declare_tweak_schema'
+                          ? 'Declaring tweak schema'
+                          : `Calling ${tn}`;
+        return (
+          <div
+            key="streaming-tool-draft"
+            className="inline-flex items-center gap-[var(--space-2)] rounded-2xl rounded-bl-md bg-[var(--color-surface)] border border-[var(--color-accent)]/30 px-[var(--space-3)] py-[var(--space-2)] text-[12px] text-[var(--color-text-primary)]"
+            aria-live="polite"
+          >
+            <span className="relative inline-flex w-[10px] h-[10px] items-center justify-center shrink-0">
+              <span className="absolute inline-block w-[5px] h-[5px] rounded-full bg-[var(--color-accent)] animate-pulse" />
+              <span className="absolute inline-block w-[10px] h-[10px] rounded-full border border-[var(--color-accent)]/40 animate-ping" />
+            </span>
+            <span className="font-medium">{friendlyName}</span>
+            <span className="codesign-stream-dot">·</span>
+            <span className="codesign-stream-dot" style={{ animationDelay: '150ms' }}>
+              ·
+            </span>
+            <span className="codesign-stream-dot" style={{ animationDelay: '300ms' }}>
+              ·
+            </span>
+            {streamingToolDraft.bytes > 0 ? (
+              <span className="text-[10px] tabular-nums text-[var(--color-text-muted)]">
+                {streamingToolDraft.bytes < 1024
+                  ? `${streamingToolDraft.bytes} B`
+                  : `${(streamingToolDraft.bytes / 1024).toFixed(1)} KB`}
+              </span>
+            ) : null}
+          </div>
+        );
+      })()}
+      {(() => {
+        // Live thoughts panel. Two modes:
+        //  (a) `streamingThinking` is non-empty → render Claude's
+        //      summarized reasoning live, italicized and fading in. The
+        //      panel naturally clears when text_delta or tool_call_start
+        //      land (handled by the agent stream hook).
+        //  (b) Generating but nothing streamed yet AND last message is
+        //      the user's prompt → fall back to the dot animation so the
+        //      gap between submit and first event isn't silent.
         if (!isGenerating) return null;
         if (streamingText && streamingText.length > 0) return null;
+        const hasThoughts = streamingThinking && streamingThinking.length > 0;
+        if (hasThoughts) {
+          return (
+            <div
+              key="thinking-stream"
+              className="rounded-2xl rounded-bl-md bg-[var(--color-surface)]/60 border border-[var(--color-border-muted)] px-[var(--space-3)] py-[var(--space-2)] max-w-[640px]"
+              aria-live="polite"
+            >
+              <div className="flex items-center gap-[var(--space-1)] text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-muted)] mb-[var(--space-1)]">
+                <span className="codesign-stream-dot">·</span>
+                <span className="codesign-stream-dot" style={{ animationDelay: '150ms' }}>
+                  ·
+                </span>
+                <span className="codesign-stream-dot" style={{ animationDelay: '300ms' }}>
+                  ·
+                </span>
+                <span className="ml-[var(--space-1)]">{t('sidebar.chat.thinking')}</span>
+              </div>
+              <div className="text-[12px] italic leading-[1.55] text-[var(--color-text-muted)] whitespace-pre-wrap break-words">
+                {streamingThinking}
+              </div>
+            </div>
+          );
+        }
         const last = messages[messages.length - 1];
         if (last?.kind !== 'user') return null;
         return (

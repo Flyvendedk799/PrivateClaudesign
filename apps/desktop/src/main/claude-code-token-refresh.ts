@@ -17,7 +17,7 @@
  */
 
 import { refreshClaudeCodeToken, shouldRefresh } from '@open-codesign/providers';
-import { type Config, ERROR_CODES, hydrateConfig } from '@open-codesign/shared';
+import { CodesignError, type Config, ERROR_CODES, hydrateConfig } from '@open-codesign/shared';
 import { writeConfig } from './config';
 import { buildOAuthSecretRef, decryptSecret } from './keychain';
 import { getLogger } from './logger';
@@ -50,13 +50,38 @@ export async function ensureFreshClaudeCodeToken(providerId: string): Promise<vo
   // Need both a refresh token AND a client id to refresh. Without a client
   // id (the OAuth client embedded in Claude Code's binary, captured from
   // the keychain blob when present, or supplied via env override) the
-  // refresh endpoint will reject. Skip silently — the user keeps the
-  // existing static-token behavior until expiry surfaces a 401.
+  // refresh endpoint will reject.
+  //
+  // Two cases when these are missing:
+  //   1. Token still valid (expiresAt is in the future, just inside the
+  //      60s skew window) — log a warning and let the run proceed; the
+  //      request will succeed and the user can re-import on a later run
+  //      before the token actually expires.
+  //   2. Token already at/past expiry — fail-fast with
+  //      CLAUDE_CODE_REIMPORT_REQUIRED. Silent-skipping in this case
+  //      sends the user into a guaranteed-401 generation that surfaces
+  //      as a dead 2-row design stub (plan0305 P2.3 — recent traces
+  //      showed 6/6 most recent failures matched this pattern).
   if (secret.refreshToken === undefined || secret.oauthClientId === undefined) {
+    const expiresInMs = (secret.expiresAt ?? 0) - Date.now();
+    const tokenAlreadyExpired = expiresInMs <= 0;
+    if (tokenAlreadyExpired) {
+      log.warn('refresh.skipped.fail_fast', {
+        reason: 'expired_no_refresh_credentials',
+        hasRefreshToken: secret.refreshToken !== undefined,
+        hasClientId: secret.oauthClientId !== undefined,
+        expiresInMs,
+      });
+      throw new CodesignError(
+        'Claude Code token has expired and the local credential store does not have the refresh prerequisites required to renew it. Re-import from Claude Code in Settings.',
+        ERROR_CODES.CLAUDE_CODE_REIMPORT_REQUIRED,
+      );
+    }
     log.warn('refresh.skipped', {
       reason: 'missing_refresh_or_client_id',
       hasRefreshToken: secret.refreshToken !== undefined,
       hasClientId: secret.oauthClientId !== undefined,
+      expiresInMs,
     });
     return;
   }

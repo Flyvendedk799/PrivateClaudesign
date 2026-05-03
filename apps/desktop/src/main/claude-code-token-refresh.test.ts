@@ -124,9 +124,21 @@ describe('ensureFreshClaudeCodeToken', () => {
     expect(refreshMock).not.toHaveBeenCalled();
   });
 
-  it('skips refresh (logs only) when refreshToken or oauthClientId is missing', async () => {
+  it('throws CLAUDE_CODE_REIMPORT_REQUIRED when token is past expiry and refresh prerequisites are missing (plan0305 P2.3)', async () => {
     cachedConfigRef.current = makeConfig(makeSecret({ expiresAt: Date.now() - 1 }));
-    await ensureFreshClaudeCodeToken('claude-code-imported');
+    const err = await ensureFreshClaudeCodeToken('claude-code-imported').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CodesignError);
+    expect((err as CodesignError).code).toBe(ERROR_CODES.CLAUDE_CODE_REIMPORT_REQUIRED);
+    expect(refreshMock).not.toHaveBeenCalled();
+    expect(writeConfigMock).not.toHaveBeenCalled();
+  });
+
+  it('logs a warning and proceeds when token is still valid but refresh prerequisites are missing (plan0305 P2.3)', async () => {
+    // Inside the 60s skew window so shouldRefresh() fires, but expiresAt is
+    // still in the future — we'd rather let this request succeed than
+    // fail-fast on a token that hasn't actually expired yet.
+    cachedConfigRef.current = makeConfig(makeSecret({ expiresAt: Date.now() + 30 * 1000 }));
+    await expect(ensureFreshClaudeCodeToken('claude-code-imported')).resolves.toBeUndefined();
     expect(refreshMock).not.toHaveBeenCalled();
     expect(writeConfigMock).not.toHaveBeenCalled();
   });

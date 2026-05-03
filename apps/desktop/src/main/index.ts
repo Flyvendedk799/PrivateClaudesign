@@ -385,6 +385,60 @@ function sanitizeAssetStem(input: string | undefined, fallback: string): string 
   return stem.length > 0 ? stem : 'image-asset';
 }
 
+/**
+ * Detect whether `oldStr` looks like it was copy-pasted from a `view`
+ * output that prepends `   123  ` line-number prefixes. Two modes:
+ *   - "uniform": EVERY non-empty line begins with optional whitespace +
+ *      1+ digits + two spaces. Cleanest signal — copy-paste of a contiguous
+ *      view block. Always strip-and-retry.
+ *   - "mixed": ≥50% of non-empty lines have the prefix. Happens when the
+ *      model partially edited the view output (e.g. removed prefixes from
+ *      lines it changed but kept them on context lines). The recovery is
+ *      still safe: stripping a non-prefixed line is a no-op (regex misses).
+ *      The 50% threshold avoids false positives where a content line just
+ *      happens to start with a number followed by two spaces (rare but
+ *      possible in JSX text content, e.g. `42  reasons we love it`).
+ */
+function hasLineNumberPrefix(oldStr: string): boolean {
+  const lines = oldStr.split('\n');
+  let nonEmpty = 0;
+  let prefixed = 0;
+  for (const line of lines) {
+    if (line.length === 0) continue;
+    nonEmpty += 1;
+    if (/^\s*\d+ {2}/.test(line)) prefixed += 1;
+  }
+  if (nonEmpty === 0) return false;
+  // Single-line snippets need an unambiguous match — only return true when
+  // there's no ambiguity (the entire line IS the prefix pattern).
+  if (nonEmpty === 1) return prefixed === 1;
+  // Multi-line: uniform OR ≥50% prefixed both indicate copy-paste contamination.
+  return prefixed >= Math.ceil(nonEmpty * 0.5);
+}
+
+/** Strip the `view` line-number prefix from each line of `oldStr` —
+ *  matching the format emitted in text-editor.ts case 'view':
+ *  `${String(start + i).padStart(4, ' ')}  ${ln}`. Per-line; lines without
+ *  the prefix pass through unchanged (the regex just misses them). */
+function stripLineNumberPrefix(oldStr: string): string {
+  return oldStr
+    .split('\n')
+    .map((line) => line.replace(/^\s*\d+ {2}/, ''))
+    .join('\n');
+}
+
+/** Count `\n` characters in a string. Used to convert byte offsets in the
+ *  pre/post-edit file content into 1-indexed line numbers for the str_replace
+ *  / insert success messages. Avoids `split('\n').length` which allocates an
+ *  array we'd immediately throw away. */
+function countNewlines(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) === 10) n += 1;
+  }
+  return n;
+}
+
 function allocateAssetPath(
   files: Map<string, string>,
   request: GenerateImageAssetRequest,
@@ -489,17 +543,45 @@ export function createRuntimeTextEditorFs({
     async strReplace(path: string, oldStr: string, newStr: string) {
       const current = fsMap.get(path);
       if (current === undefined) throw new Error(`File not found: ${path}`);
-      const idx = current.indexOf(oldStr);
+      // Match #1: exact substring. Always tried first so well-formed
+      // old_str strings stay on the fast path and ambiguity detection works.
+      let idx = current.indexOf(oldStr);
+      let matchedOldStr = oldStr;
+      // Match #2 (recovery): strip the leading line-number prefix that
+      // `view` prepends to each line of its output (`   123  <body>` →
+      // `<body>`). Production traces from 2026-04-28 showed the agent
+      // copy-pasting view output verbatim into old_str and getting
+      // "old_str not found" errors it described as "JSX encoding
+      // issues". Easy to detect: every line of old_str starts with
+      // optional whitespace + 1+ digits + two spaces. If yes, strip and
+      // retry. Idempotent: when old_str is already clean this regex
+      // doesn't match (no digits in source), and the path is skipped.
+      if (idx === -1 && hasLineNumberPrefix(oldStr)) {
+        const stripped = stripLineNumberPrefix(oldStr);
+        if (stripped !== oldStr) {
+          const recoveryIdx = current.indexOf(stripped);
+          if (recoveryIdx !== -1) {
+            idx = recoveryIdx;
+            matchedOldStr = stripped;
+          }
+        }
+      }
       if (idx === -1) throw new Error(`old_str not found in ${path}`);
-      if (current.indexOf(oldStr, idx + oldStr.length) !== -1) {
+      if (current.indexOf(matchedOldStr, idx + matchedOldStr.length) !== -1) {
         throw new Error(`old_str is ambiguous in ${path}; provide more context`);
       }
-      const next = current.slice(0, idx) + newStr + current.slice(idx + oldStr.length);
+      const next = current.slice(0, idx) + newStr + current.slice(idx + matchedOldStr.length);
       await persistMutation(path, next);
       fsMap.set(path, next);
       emitFsUpdated(path, next);
       emitIndexIfAssetChanged(path);
-      return { path };
+      // Post-edit position: 1-indexed start line is "newlines before idx + 1".
+      // For a deletion (newStr === ''), endLine = startLine - 1 by convention
+      // so the tool can format "Removed content at line N" cleanly.
+      const startLine = countNewlines(current.slice(0, idx)) + 1;
+      const endLine = newStr.length === 0 ? startLine - 1 : startLine + countNewlines(newStr);
+      const totalLines = countNewlines(next) + 1;
+      return { path, startLine, endLine, totalLines };
     },
     async insert(path: string, line: number, text: string) {
       const current = fsMap.get(path) ?? '';
@@ -511,7 +593,14 @@ export function createRuntimeTextEditorFs({
       fsMap.set(path, next);
       emitFsUpdated(path, next);
       emitIndexIfAssetChanged(path);
-      return { path };
+      // `clamped` is 0 = "before line 1", 1 = "before line 2", etc., so the
+      // first new line is always at 1-indexed `clamped + 1`. `text` may itself
+      // contain newlines; one inserted line + N internal newlines = N+1
+      // resulting lines.
+      const startLine = clamped + 1;
+      const endLine = startLine + countNewlines(text);
+      const totalLines = next.split('\n').length;
+      return { path, startLine, endLine, totalLines };
     },
     listDir(dir: string) {
       const prefix = dir.length === 0 || dir === '.' ? '' : `${dir.replace(/\/+$/, '')}/`;
@@ -632,10 +721,35 @@ function registerIpcHandlers(db: Database | null): void {
     previousHtml: string | null,
   ): ReturnType<typeof generate> => {
     if (!USE_AGENT_RUNTIME) return generate(input);
-    const sendEvent = (event: AgentStreamEvent) => {
+
+    // plan0305 P2.4 — main-process heartbeat to bridge the silent gap
+    // between thinking_end / a long pi-ai turn and the next visible event.
+    // Track wall-clock time of the last outbound event of any kind; when the
+    // gap exceeds HEARTBEAT_IDLE_MS the timer ticks a `heartbeat` event so
+    // the renderer can keep the thinking panel alive with an elapsed
+    // counter instead of clearing to a frozen-looking empty state.
+    let lastEventAt = Date.now();
+    const HEARTBEAT_IDLE_MS = 5_000;
+    const HEARTBEAT_POLL_MS = 2_000;
+    const sendEventInner = (event: AgentStreamEvent) => {
       mainWindow?.webContents.send('agent:event:v1', event);
     };
+    const sendEvent = (event: AgentStreamEvent) => {
+      lastEventAt = Date.now();
+      sendEventInner(event);
+    };
     const baseCtx = { designId: designId ?? '', generationId: id } as const;
+    const heartbeatTimer = setInterval(() => {
+      const now = Date.now();
+      const sinceMs = now - lastEventAt;
+      if (sinceMs < HEARTBEAT_IDLE_MS) return;
+      // Bypass the wrapping sendEvent — we don't want heartbeats to reset
+      // their own idle counter (otherwise the user would see a steady
+      // stream of "still thinking" pings even when the model produces
+      // nothing). The next real event will reset lastEventAt.
+      sendEventInner({ ...baseCtx, type: 'heartbeat', sinceMs });
+    }, HEARTBEAT_POLL_MS);
+    const stopHeartbeat = () => clearInterval(heartbeatTimer);
     const toolStartedAt = new Map<string, number>();
     const runtimeVerify = makeRuntimeVerifier();
     const renderPreview = makeRenderPreviewer();
@@ -710,11 +824,57 @@ function registerIpcHandlers(db: Database | null): void {
     let deltaCount = 0;
     let toolCount = 0;
 
+    // Per-RUN aggregators (Group A2: agent.run_summary). Counts every tool
+    // execution by name, separates failures by name, tracks the longest
+    // single tool call, and bookends with start time so totalMs is exact
+    // even when the upstream wall-clock timer races a deferred abort.
+    const runStartedAt = Date.now();
+    const toolByName = new Map<string, number>();
+    const toolFailByName = new Map<string, number>();
+    const failedToolErrors: Array<{ tool: string; snippet: string }> = [];
+    let slowestToolMs = 0;
+    let slowestToolName = '';
+    let totalTurns = 0;
+
     // backlog-2 #7 — user-authored skills, loaded once per run from the
     // local DB. Empty array on DB-unavailable or zero saved skills.
     const userSkills: ReadonlyArray<readonly [string, string]> = db
       ? listUserSkills(db).map((s) => [s.name, `// when_to_use: ${s.whenToUse}\n${s.source}`])
       : [];
+
+    /**
+     * Extract the first ~240 chars of the error message a tool returned.
+     * The agent runtime treats `result.content` as the model-facing text
+     * payload; for thrown errors that's where pi-agent-core puts the
+     * message. We don't try to JSON-parse — just slice text so the dev log
+     * stays human-readable.
+     */
+    const extractToolErrorSnippet = (result: unknown): string => {
+      if (typeof result === 'string') return result.slice(0, 240);
+      if (typeof result !== 'object' || result === null) return '';
+      const content = (result as { content?: unknown }).content;
+      if (!Array.isArray(content)) {
+        const direct = result as { errorMessage?: unknown; message?: unknown };
+        const msg =
+          typeof direct.errorMessage === 'string'
+            ? direct.errorMessage
+            : typeof direct.message === 'string'
+              ? direct.message
+              : '';
+        return msg.slice(0, 240);
+      }
+      for (const block of content) {
+        if (
+          block &&
+          typeof block === 'object' &&
+          (block as { type?: unknown }).type === 'text' &&
+          typeof (block as { text?: unknown }).text === 'string'
+        ) {
+          return ((block as { text: string }).text || '').slice(0, 240);
+        }
+      }
+      return '';
+    };
 
     return generateViaAgent(input, {
       fs,
@@ -728,22 +888,59 @@ function registerIpcHandlers(db: Database | null): void {
         if (event.type === 'turn_start') {
           deltaCount = 0;
           toolCount = 0;
+          totalTurns += 1;
           logIpc.info('agent.turn_start', { generationId: id });
         } else if (event.type === 'message_update') {
           const ame = event.assistantMessageEvent;
           if (ame.type === 'text_delta') deltaCount += 1;
         } else if (event.type === 'tool_execution_start') {
           toolCount += 1;
-          logIpc.info('agent.tool_start', { generationId: id, tool: event.toolName });
+          const tn = event.toolName ?? 'unknown';
+          toolByName.set(tn, (toolByName.get(tn) ?? 0) + 1);
+          logIpc.info('agent.tool_start', { generationId: id, tool: tn });
         } else if (event.type === 'tool_execution_end') {
+          // A1: log the actual error snippet on failure so post-hoc
+          // analysis can categorize the failure mode without needing a
+          // sqlite query against chat_messages tool-result rows.
+          const tn = event.toolName ?? 'unknown';
+          const errSnippet = event.isError ? extractToolErrorSnippet(event.result) : '';
+          if (event.isError) {
+            toolFailByName.set(tn, (toolFailByName.get(tn) ?? 0) + 1);
+            failedToolErrors.push({ tool: tn, snippet: errSnippet });
+          }
           logIpc.info('agent.tool_end', {
             generationId: id,
-            tool: event.toolName,
+            tool: tn,
             isError: event.isError,
+            ...(event.isError && errSnippet.length > 0 ? { errorSnippet: errSnippet } : {}),
           });
         } else if (event.type === 'turn_end') {
           logIpc.info('agent.turn_end', { generationId: id, deltas: deltaCount, tools: toolCount });
         } else if (event.type === 'agent_end') {
+          // A2: emit a single structured summary at run end. Captures
+          // tool counts by name, failure counts, slowest tool, total
+          // turns, and total wall-clock — enough for `grep agent.run_summary`
+          // to give a per-run health snapshot without needing the full
+          // log line count or sqlite queries.
+          const totalRunMs = Date.now() - runStartedAt;
+          const summary: Record<string, unknown> = {
+            generationId: id,
+            totalMs: totalRunMs,
+            turns: totalTurns,
+            toolsByName: Object.fromEntries(toolByName),
+          };
+          if (toolFailByName.size > 0) {
+            summary['toolFailsByName'] = Object.fromEntries(toolFailByName);
+            summary['failureCount'] = Array.from(toolFailByName.values()).reduce(
+              (a, b) => a + b,
+              0,
+            );
+            summary['failureSamples'] = failedToolErrors.slice(0, 3);
+          }
+          if (slowestToolName.length > 0) {
+            summary['slowestTool'] = { name: slowestToolName, ms: slowestToolMs };
+          }
+          logIpc.info('agent.run_summary', summary);
           logIpc.info('agent.end', { generationId: id });
         }
         if (designId === null) return; // no routing target
@@ -755,6 +952,58 @@ function registerIpcHandlers(db: Database | null): void {
           const ame = event.assistantMessageEvent;
           if (ame.type === 'text_delta' && typeof ame.delta === 'string') {
             sendEvent({ ...baseCtx, type: 'text_delta', delta: ame.delta });
+          } else if (ame.type === 'toolcall_start') {
+            // The model has started forming a tool call. Extract the tool
+            // name from the partial assistant message and open a "drafting"
+            // indicator in the UI. Bridges the 1-3s gap between thinking
+            // ending and the real tool_call_start firing — without it the
+            // user sees a brief silent window after the thoughts panel
+            // clears, which reads as the run stalling.
+            const partial = (
+              ame as unknown as { partial?: { content?: Array<Record<string, unknown>> } }
+            ).partial;
+            const block =
+              typeof ame.contentIndex === 'number'
+                ? partial?.content?.[ame.contentIndex]
+                : undefined;
+            const toolName = typeof block?.['name'] === 'string' ? (block['name'] as string) : '';
+            const toolCallId = typeof block?.['id'] === 'string' ? (block['id'] as string) : '';
+            sendEvent({
+              ...baseCtx,
+              type: 'tool_draft_start',
+              toolName,
+              toolCallId,
+            });
+          } else if (ame.type === 'toolcall_delta' && typeof ame.delta === 'string') {
+            // Args delta — JSON characters as the model emits them. We
+            // don't try to parse these (incomplete JSON); the renderer
+            // just uses presence of deltas to keep the "drafting" pulse
+            // alive and shows the partial-text length to suggest progress.
+            const partial = (
+              ame as unknown as { partial?: { content?: Array<Record<string, unknown>> } }
+            ).partial;
+            const block =
+              typeof ame.contentIndex === 'number'
+                ? partial?.content?.[ame.contentIndex]
+                : undefined;
+            const toolCallId = typeof block?.['id'] === 'string' ? (block['id'] as string) : '';
+            sendEvent({
+              ...baseCtx,
+              type: 'tool_draft_delta',
+              delta: ame.delta,
+              toolCallId,
+            });
+          } else if (ame.type === 'thinking_delta' && typeof ame.delta === 'string') {
+            // Stream Claude's summarized reasoning to the UI live. Without
+            // this, turn 2+ (with adaptive thinking enabled) shows a static
+            // "thinking..." dot for 30–60 s while the model reasons. Forward
+            // the deltas so the renderer can display them in a thoughts
+            // panel that updates in real time. The renderer is responsible
+            // for clearing on turn_start / thinking_end and for hiding the
+            // panel once a tool call lands so it doesn't clutter the chat.
+            sendEvent({ ...baseCtx, type: 'thinking_delta', delta: ame.delta });
+          } else if (ame.type === 'thinking_end') {
+            sendEvent({ ...baseCtx, type: 'thinking_end' });
           }
           return;
         }
@@ -788,6 +1037,60 @@ function registerIpcHandlers(db: Database | null): void {
             tool: event.toolName,
             ms: durationMs,
           });
+          // Track the slowest single tool of the run so the run_summary
+          // surfaces it. Only `done` (BrowserWindow load) and
+          // `render_preview` (also BrowserWindow) routinely cross 500 ms;
+          // anything else above that is a regression.
+          if (durationMs > slowestToolMs) {
+            slowestToolMs = durationMs;
+            slowestToolName = event.toolName ?? 'unknown';
+          }
+          // F3: emit a separate `tool.slow_call` warn when a tool's
+          // execution time exceeds 5 s. Done is ~2 s normally and won't
+          // trip; render_preview is ~600 ms; everything else is <30 ms.
+          // A spike above 5 s is a real regression worth investigating.
+          if (durationMs > 5_000) {
+            logIpc.warn('tool.slow_call', {
+              generationId: id,
+              tool: event.toolName,
+              ms: durationMs,
+            });
+          }
+          // Edit metadata enrichment — only fires for str_replace / insert
+          // success paths, where the FS callback returned an EditResult with
+          // post-edit position info. Powers the follow-the-edit cursor in
+          // the preview iframe. Validated structurally to keep the IPC payload
+          // narrow even if event.result evolves.
+          let editPath: string | undefined;
+          let editStartLine: number | undefined;
+          let editEndLine: number | undefined;
+          if (event.toolName === 'str_replace_based_edit_tool') {
+            const details = (event.result as { details?: unknown })?.details;
+            if (details && typeof details === 'object') {
+              const command = (details as { command?: unknown }).command;
+              const inner = (details as { result?: unknown }).result;
+              if (
+                (command === 'str_replace' || command === 'insert') &&
+                inner &&
+                typeof inner === 'object'
+              ) {
+                const r = inner as {
+                  path?: unknown;
+                  startLine?: unknown;
+                  endLine?: unknown;
+                };
+                if (
+                  typeof r.path === 'string' &&
+                  typeof r.startLine === 'number' &&
+                  typeof r.endLine === 'number'
+                ) {
+                  editPath = r.path;
+                  editStartLine = r.startLine;
+                  editEndLine = r.endLine;
+                }
+              }
+            }
+          }
           sendEvent({
             ...baseCtx,
             type: 'tool_call_result',
@@ -795,6 +1098,14 @@ function registerIpcHandlers(db: Database | null): void {
             toolCallId: event.toolCallId,
             result: event.result,
             durationMs,
+            // pi-agent-core sets `isError: true` on the tool_execution_end
+            // event when the tool threw or returned an error result. The
+            // renderer increments a per-run failure tally so the chat status
+            // header can surface "N retries this run" past a threshold.
+            ...(event.isError === true ? { isFailure: true } : {}),
+            ...(editPath !== undefined ? { editPath } : {}),
+            ...(editStartLine !== undefined ? { editStartLine } : {}),
+            ...(editEndLine !== undefined ? { editEndLine } : {}),
           });
           return;
         }
@@ -822,16 +1133,18 @@ function registerIpcHandlers(db: Database | null): void {
           return;
         }
       },
-    }).then((result) => ({
-      ...result,
-      artifacts: result.artifacts.map((artifact) => ({
-        ...artifact,
-        // Final-result artifact path: same inline-then-resolve order as
-        // emitFsUpdated. JSX-pattern artifacts pass through unchanged
-        // because they have no local <link>/<script src>.
-        content: resolveLocalAssetRefs(inlineLocalSidecars(artifact.content, fsMap), fsMap),
-      })),
-    }));
+    })
+      .then((result) => ({
+        ...result,
+        artifacts: result.artifacts.map((artifact) => ({
+          ...artifact,
+          // Final-result artifact path: same inline-then-resolve order as
+          // emitFsUpdated. JSX-pattern artifacts pass through unchanged
+          // because they have no local <link>/<script src>.
+          content: resolveLocalAssetRefs(inlineLocalSidecars(artifact.content, fsMap), fsMap),
+        })),
+      }))
+      .finally(stopHeartbeat);
   };
 
   /** In-flight requests: generationId → AbortController */

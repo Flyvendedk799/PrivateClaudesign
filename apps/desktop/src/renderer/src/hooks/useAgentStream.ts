@@ -30,6 +30,11 @@ interface InFlightTurn {
    *  AgentStreamEvent.generationId is required as of schema v1. */
   generationId: string;
   textBuffer: string;
+  /** Per-turn buffer for Claude's summarized reasoning. Reset on every
+   *  turn_start (thinking is per-turn, not per-run). Cleared on the
+   *  first text_delta or tool_call_start of the same turn so the chat
+   *  doesn't show two streams at once. */
+  thinkingBuffer: string;
   /** Final assistant text persisted on the previous turn_end of this run.
    *  pi-agent-core can re-emit the same trailing assistant prose across
    *  consecutive turns (e.g. tool turn → wrap-up turn that repeats the
@@ -39,14 +44,24 @@ interface InFlightTurn {
    *  arrived yet. Drained at tool_call_result and any leftovers are flipped
    *  to 'done' at turn_end. */
   pendingTools: PendingPersist[];
+  /** Byte size of `previewHtml` at the first turn_start of this run.
+   *  Used at agent_end to compute the delta shown in the
+   *  "Preview updated · +N KB" pill so the user has a visible cue when
+   *  a long refactor lands sections off-screen. Captured once per run;
+   *  preserved across same-run turn_starts. */
+  baselineBytes: number;
 }
 
 export function useAgentStream(): void {
   const appendChatMessage = useCodesignStore((s) => s.appendChatMessage);
   const setStreamingAssistantText = useCodesignStore((s) => s.setStreamingAssistantText);
+  const setStreamingThinking = useCodesignStore((s) => s.setStreamingThinking);
+  const setStreamingToolDraft = useCodesignStore((s) => s.setStreamingToolDraft);
+  const setPreviewUpdatedAt = useCodesignStore((s) => s.setPreviewUpdatedAt);
   const setPreviewHtmlFromAgent = useCodesignStore((s) => s.setPreviewHtmlFromAgent);
   const updateChatToolStatus = useCodesignStore((s) => s.updateChatToolStatus);
   const persistAgentRunSnapshot = useCodesignStore((s) => s.persistAgentRunSnapshot);
+  const setEditCursor = useCodesignStore((s) => s.setEditCursor);
   const inFlight = useRef<InFlightTurn | null>(null);
 
   // Throttled live-preview push. iframe srcdoc reloads the whole page on every
@@ -94,6 +109,10 @@ export function useAgentStream(): void {
         lastTextDeltaAt: number;
         lastTurnStartAt: number;
         chunkTransitioning: boolean;
+        turnCount: number;
+        turnCountGenerationId: string | null;
+        runFailureCount: number;
+        runFailureGenerationId: string | null;
       }> = {},
     ) => {
       const now = Date.now();
@@ -104,6 +123,16 @@ export function useAgentStream(): void {
           lastTextDeltaAt: patch.lastTextDeltaAt ?? cur?.lastTextDeltaAt ?? null,
           lastTurnStartAt: patch.lastTurnStartAt ?? cur?.lastTurnStartAt ?? null,
           chunkTransitioning: patch.chunkTransitioning ?? cur?.chunkTransitioning ?? false,
+          turnCount: patch.turnCount ?? cur?.turnCount ?? 0,
+          turnCountGenerationId:
+            patch.turnCountGenerationId !== undefined
+              ? patch.turnCountGenerationId
+              : (cur?.turnCountGenerationId ?? null),
+          runFailureCount: patch.runFailureCount ?? cur?.runFailureCount ?? 0,
+          runFailureGenerationId:
+            patch.runFailureGenerationId !== undefined
+              ? patch.runFailureGenerationId
+              : (cur?.runFailureGenerationId ?? null),
         },
       });
     };
@@ -158,27 +187,135 @@ export function useAgentStream(): void {
         previous &&
         previous.designId === event.designId &&
         previous.generationId === event.generationId;
+      // Snapshot the current previewHtml byte size at the first turn_start
+      // of a fresh run so we can show "Preview updated · +N KB" at agent_end.
+      // Same-run turn_starts (chunk transitions) preserve the original
+      // baseline so the delta reflects the entire run, not the last chunk.
+      const baselineBytes = sameRun
+        ? previous.baselineBytes
+        : (useCodesignStore.getState().previewHtml ?? '').length;
       inFlight.current = {
         designId: event.designId,
         generationId: event.generationId,
         textBuffer: '',
+        thinkingBuffer: '',
         lastPersistedText: sameRun ? previous.lastPersistedText : null,
         pendingTools: sameRun ? previous.pendingTools : [],
+        baselineBytes,
       };
       setStreamingAssistantText({ designId: event.designId, text: '' });
+      setStreamingThinking(null);
+      setStreamingToolDraft(null);
       // The model has begun a turn — explicitly clear the chunk-transition
       // flag so the header switches from "Transitioning…" to "Waiting for
       // first token…".
-      tickLiveness({ lastTurnStartAt: Date.now(), chunkTransitioning: false });
+      // Increment the turn counter so long runs can surface "turn N" in the
+      // header. Reset to 1 on a fresh generationId; same-run starts (chunk
+      // transitions inside one generate call) accumulate.
+      const prevLiveness = useCodesignStore.getState().agentLiveness;
+      const sameGen = prevLiveness?.turnCountGenerationId === event.generationId;
+      const nextTurnCount = sameGen ? (prevLiveness?.turnCount ?? 0) + 1 : 1;
+      tickLiveness({
+        lastTurnStartAt: Date.now(),
+        chunkTransitioning: false,
+        turnCount: nextTurnCount,
+        turnCountGenerationId: event.generationId,
+      });
     };
 
     const handleTextDelta = (event: AgentStreamEvent) => {
       if (!inFlight.current || typeof event.delta !== 'string') return;
       inFlight.current.textBuffer += event.delta;
+      // Once the model emits real assistant text, the thinking summary is
+      // no longer informative — clear it so the chat shows the answer, not
+      // both at once.
+      if (inFlight.current.thinkingBuffer.length > 0) {
+        inFlight.current.thinkingBuffer = '';
+        setStreamingThinking(null);
+      }
       setStreamingAssistantText({
         designId: inFlight.current.designId,
         text: inFlight.current.textBuffer,
       });
+      tickLiveness({ lastTextDeltaAt: Date.now() });
+    };
+
+    const handleThinkingDelta = (event: AgentStreamEvent) => {
+      if (!inFlight.current || typeof event.delta !== 'string') return;
+      inFlight.current.thinkingBuffer += event.delta;
+      setStreamingThinking({
+        designId: inFlight.current.designId,
+        text: inFlight.current.thinkingBuffer,
+      });
+      tickLiveness({ lastTextDeltaAt: Date.now() });
+    };
+
+    const handleThinkingEnd = () => {
+      // Keep the buffer visible until the first text_delta or tool_call_start
+      // of the same turn — that's when the panel naturally fades out and is
+      // replaced by either the answer or the tool stream. Clearing here would
+      // flicker the panel off briefly between thinking_end and the next
+      // visible event.
+    };
+
+    const handleHeartbeat = (event: AgentStreamEvent) => {
+      // plan0305 P2.4 — main process emits a heartbeat when no other event
+      // has fired for ≥5s. Surface it as a soft "still thinking… mm:ss"
+      // line in the thoughts panel so the long extended-thinking gaps that
+      // showed up in run traces (14 min in run 1 turn 3) read as activity
+      // rather than a frozen run. We only synthesise a placeholder when the
+      // model has not produced its own thinking content for this turn —
+      // otherwise the real reasoning text wins and we just keep liveness
+      // ticking.
+      if (!inFlight.current) return;
+      const sinceMs = typeof event.sinceMs === 'number' ? event.sinceMs : 0;
+      tickLiveness({ lastTextDeltaAt: Date.now() });
+      if (inFlight.current.thinkingBuffer.length > 0) return;
+      const totalSec = Math.floor(sinceMs / 1000);
+      const m = Math.floor(totalSec / 60);
+      const s = totalSec % 60;
+      const padded = `${m}:${s.toString().padStart(2, '0')}`;
+      setStreamingThinking({
+        designId: inFlight.current.designId,
+        text: `Still working — last update ${padded} ago`,
+      });
+    };
+
+    const handleToolDraftStart = (event: AgentStreamEvent) => {
+      // The model has begun streaming a tool call's args. Open the
+      // "drafting" indicator so the user sees activity in the otherwise-
+      // silent gap between thinking_end and the runtime's tool_call_start
+      // (1–3 s window). The thinking panel is also explicitly cleared
+      // here — once the model has committed to a tool, the previous
+      // reasoning is no longer the active narrative.
+      if (!inFlight.current) return;
+      if (inFlight.current.thinkingBuffer.length > 0) {
+        inFlight.current.thinkingBuffer = '';
+        setStreamingThinking(null);
+      }
+      const toolName = event.toolName ?? '';
+      const toolCallId = event.toolCallId ?? '';
+      if (toolName.length === 0) return;
+      setStreamingToolDraft({
+        designId: event.designId,
+        toolName,
+        toolCallId,
+        bytes: 0,
+      });
+    };
+
+    const handleToolDraftDelta = (event: AgentStreamEvent) => {
+      // Each delta extends the in-progress JSON args. We don't try to
+      // parse the partial JSON; just bump the byte counter so the
+      // "drafting" UI can show progress (e.g. a thin growing bar or a
+      // truncated character count).
+      if (!inFlight.current) return;
+      const designId = inFlight.current.designId;
+      const delta = typeof event.delta === 'string' ? event.delta : '';
+      if (delta.length === 0) return;
+      const cur = useCodesignStore.getState().streamingToolDraft;
+      if (cur === null || cur.designId !== designId) return;
+      setStreamingToolDraft({ ...cur, bytes: cur.bytes + delta.length });
       tickLiveness({ lastTextDeltaAt: Date.now() });
     };
 
@@ -222,6 +359,17 @@ export function useAgentStream(): void {
       const current = inFlight.current;
       const designId = event.designId;
       const toolName = event.toolName ?? 'unknown';
+      // The thinking panel exists to bridge the silent "model is reasoning"
+      // gap. Once the model commits to a tool, the next visible signal is
+      // the tool card itself — clear the thinking stream so the chat
+      // doesn't show two competing live indicators. Same logic for the
+      // drafting-tool indicator, which fades the moment the real tool
+      // card takes over.
+      if (current && current.thinkingBuffer.length > 0) {
+        current.thinkingBuffer = '';
+        setStreamingThinking(null);
+      }
+      setStreamingToolDraft(null);
       // TODO: replace with rendererLogger once renderer-logger lands
       console.debug('[agent] tool_call_start', {
         generationId: event.generationId,
@@ -283,7 +431,41 @@ export function useAgentStream(): void {
           ...(durationMs !== undefined ? { durationMs } : {}),
         });
       });
-      tickLiveness();
+      // Per-run failure counter — reset on generationId change, increment
+      // on each isFailure=true result. Status header reads this to surface
+      // "N retries this run" once the count crosses the threshold.
+      if (event.isFailure === true) {
+        const cur = useCodesignStore.getState().agentLiveness;
+        const sameGen = cur?.runFailureGenerationId === event.generationId;
+        const nextCount = sameGen ? (cur?.runFailureCount ?? 0) + 1 : 1;
+        tickLiveness({
+          runFailureCount: nextCount,
+          runFailureGenerationId: event.generationId,
+        });
+      } else {
+        tickLiveness();
+      }
+
+      // Drive the follow-the-edit cursor from str_replace / insert metadata.
+      // Scoped to index.html (the JSX entry point) since the source-line
+      // tagger only runs on that file's Babel pass; sidecar / skill edits are
+      // intentionally silent. PreviewPane reads `editCursor` and forwards
+      // HIGHLIGHT_SRC_LINE to the iframe overlay.
+      if (
+        event.editPath === 'index.html' &&
+        typeof event.editStartLine === 'number' &&
+        typeof event.editEndLine === 'number'
+      ) {
+        const label =
+          event.editStartLine === event.editEndLine
+            ? `Editing line ${event.editStartLine}`
+            : `Editing lines ${event.editStartLine}-${event.editEndLine}`;
+        setEditCursor({
+          toolLabel: label,
+          startLine: event.editStartLine,
+          endLine: event.editEndLine,
+        });
+      }
     };
 
     const handleFsUpdated = (event: AgentStreamEvent) => {
@@ -324,6 +506,8 @@ export function useAgentStream(): void {
           generatingDesignId: null,
           generationStage: 'error',
           streamingAssistantText: null,
+          streamingThinking: null,
+          streamingToolDraft: null,
           chunkProgress: null,
           agentLiveness: null,
         });
@@ -344,6 +528,19 @@ export function useAgentStream(): void {
         slot.lastFlushAt = Date.now();
         setPreviewHtmlFromAgent(pending);
       }
+      // Compute the run's net byte delta and emit a "preview updated" event
+      // for the UI pill + iframe pulse animation. Without this, a long
+      // multi-section refactor produces no perceptible change above the
+      // fold (e.g. the drone-portfolio run on 2026-04-28 added 5 sections
+      // below the hero — the user saw the same hero and assumed nothing
+      // changed). Skip when delta is 0 so chat-only runs (no edits) don't
+      // flash the pill.
+      const baseline = inFlight.current?.baselineBytes ?? 0;
+      const finalBytes = (useCodesignStore.getState().previewHtml ?? '').length;
+      const bytesDelta = finalBytes - baseline;
+      if (bytesDelta !== 0) {
+        setPreviewUpdatedAt({ designId: event.designId, ts: Date.now(), bytesDelta });
+      }
       const finalText = inFlight.current?.lastPersistedText ?? undefined;
       void persistAgentRunSnapshot({
         designId: event.designId,
@@ -361,6 +558,8 @@ export function useAgentStream(): void {
           generatingDesignId: null,
           generationStage: 'done',
           streamingAssistantText: null,
+          streamingThinking: null,
+          streamingToolDraft: null,
           chunkProgress: null,
           agentLiveness: null,
         });
@@ -398,6 +597,18 @@ export function useAgentStream(): void {
         case 'text_delta':
           handleTextDelta(event);
           return;
+        case 'thinking_delta':
+          handleThinkingDelta(event);
+          return;
+        case 'thinking_end':
+          handleThinkingEnd();
+          return;
+        case 'tool_draft_start':
+          handleToolDraftStart(event);
+          return;
+        case 'tool_draft_delta':
+          handleToolDraftDelta(event);
+          return;
         case 'turn_end':
           handleTurnEnd(event);
           return;
@@ -412,6 +623,9 @@ export function useAgentStream(): void {
           return;
         case 'agent_end':
           handleAgentEnd(event);
+          return;
+        case 'heartbeat':
+          handleHeartbeat(event);
           return;
         case 'error':
           handleError(event);
@@ -430,8 +644,12 @@ export function useAgentStream(): void {
   }, [
     appendChatMessage,
     setStreamingAssistantText,
+    setStreamingThinking,
+    setStreamingToolDraft,
+    setPreviewUpdatedAt,
     setPreviewHtmlFromAgent,
     updateChatToolStatus,
     persistAgentRunSnapshot,
+    setEditCursor,
   ]);
 }
