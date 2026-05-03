@@ -52,16 +52,23 @@ export function isOfficialAnthropicBaseUrl(baseUrl: string | undefined): boolean
 }
 
 /** Whether requests with this wire+baseUrl need CC identity headers to
- *  pass a sub2api / claude2api WAF. */
+ *  pass a sub2api / claude2api WAF.
+ *
+ *  CC identity is only forced for **custom** anthropic endpoints (gateways
+ *  reject without it). On the official `api.anthropic.com` endpoint we
+ *  do NOT add it ourselves — pi-ai injects it automatically when it sees
+ *  an OAuth token, and duplicating it here would diverge as pi-ai bumps
+ *  its pinned `claudeCodeVersion`.
+ *
+ *  The `apiKey` parameter is kept in the signature for callers that pass
+ *  it, but isn't used for the official-endpoint branch. */
 export function shouldForceClaudeCodeIdentity(
   wire: WireApi | undefined,
   baseUrl: string | undefined,
-  apiKey?: string,
+  _apiKey?: string,
 ): boolean {
   if (wire !== 'anthropic') return false;
-  const isCustom = !isOfficialAnthropicBaseUrl(baseUrl);
-  const isOAuth = apiKey !== undefined && looksLikeClaudeOAuthToken(apiKey);
-  return isCustom || isOAuth;
+  return !isOfficialAnthropicBaseUrl(baseUrl);
 }
 
 /** The CC identity header bag. Lowercase keys so they collide
