@@ -1832,6 +1832,56 @@ describe('game-mode composeSystemPrompt (gameplan §A4)', () => {
   });
 });
 
+describe('Godot engine guide composition (gameplan §B1)', () => {
+  it('includes the Godot guide when engine = "godot"', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'godot',
+    });
+    expect(prompt).toContain('Godot engine guide (pinned to Godot 4.3)');
+    expect(prompt).not.toContain('Three.js engine guide');
+    expect(prompt).not.toContain('Phaser engine guide');
+  });
+
+  it('layers the Godot multi-file guide alongside the generic one', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'godot',
+    });
+    expect(prompt).toContain('Game multi-file authoring guide');
+    expect(prompt).toContain('Godot multi-file project guide');
+  });
+
+  it('does NOT layer the Godot multi-file guide on three / phaser runs', () => {
+    const three = composeSystemPrompt({ mode: 'create', artifactType: 'game', engine: 'three' });
+    const phaser = composeSystemPrompt({ mode: 'create', artifactType: 'game', engine: 'phaser' });
+    expect(three).not.toContain('Godot multi-file project guide');
+    expect(phaser).not.toContain('Godot multi-file project guide');
+  });
+
+  it('explicitly mentions the Godot 3.x format=2 rejection', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'godot',
+    });
+    expect(prompt).toContain('Godot 3.x format files');
+    expect(prompt).toContain('format=2');
+  });
+
+  it('flags res:// scheme as the only acceptable path form', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'game',
+      engine: 'godot',
+    });
+    expect(prompt).toContain('res://');
+    expect(prompt).toContain('Forward slashes only');
+  });
+});
+
 describe('reasoningForModel', () => {
   it('returns undefined for Claude 4 under anthropic provider (adaptive default)', () => {
     expect(

@@ -1485,6 +1485,236 @@ Every successful \`done\` snapshots the full project tree into \`design_snapshot
 - Files outside the project root.
 - Splitting a 50-line script into 5 files for the sake of "cleanliness."`;
 
+// gameplan §B1 — Godot prompts (project-download mode in v1; live preview
+// lands as Phase D). composeGame routes to GODOT_ENGINE_GUIDE when
+// engine === 'godot'. The multi-file guide always ships for game-mode
+// runs (it covers all four engines' layouts).
+
+const GODOT_ENGINE_GUIDE = `# Godot engine guide (pinned to Godot 4.3)
+
+Godot 4.3 is project-download mode in v1. The agent authors a clean Godot project (\`project.godot\`, \`*.tscn\`, \`*.gd\`, \`assets/\`) that the user opens in their installed Godot 4.3+. Phase D (later) adds an in-app web preview when \`godot --headless\` is on the user's \`\$PATH\`.
+
+**Do NOT** generate Godot 3.x format files (\`[gd_scene format=2]\`). The validator rejects them. Pin every scene to format=3 (4.x).
+
+## Required project files
+
+\`\`\`
+project.godot                # top-level manifest — required
+main.tscn                    # root scene named in run/main_scene — required
+scenes/                      # one .tscn per logical scene
+scripts/                     # one .gd per behaviour
+assets/sprites/              # PNG / JPG textures
+assets/audio/                # WAV / OGG (Godot 4 reads both natively)
+\`\`\`
+
+## project.godot — minimum shape
+
+\`\`\`
+[application]
+config/name="Game name"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.3", "GL Compatibility")
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+\`\`\`
+
+The \`gl_compatibility\` renderer is the safe default — works on every machine including older laptops. Switch to \`forward_plus\` only when the brief explicitly asks for high-end PBR.
+
+## main.tscn — minimum shape
+
+\`\`\`
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1")
+\`\`\`
+
+Every \`[ext_resource path=…]\` MUST resolve to a file you also create in the bundle. The validator catches dangling references.
+
+## GDScript 2 essentials
+
+\`\`\`gdscript
+extends CharacterBody2D
+
+@export var speed: float = 200.0
+@onready var sprite: AnimatedSprite2D = \$Sprite
+signal hit_pickup(pickup_name)
+
+func _ready() -> void:
+    sprite.play("idle")
+
+func _physics_process(delta: float) -> void:
+    var dir := Vector2(
+        Input.get_axis("ui_left", "ui_right"),
+        Input.get_axis("ui_up", "ui_down")
+    )
+    velocity = dir.normalized() * speed
+    move_and_slide()
+
+func _on_pickup_area_entered(area: Area2D) -> void:
+    hit_pickup.emit(area.name)
+    area.queue_free()
+\`\`\`
+
+Use \`@export\` for inspector-tweakable values, \`@onready\` for child-node references, and signals for cross-node events. Static typing (\`-> void\`, \`: float\`) is encouraged but not required.
+
+## Common nodes
+
+- \`CharacterBody2D\` / \`CharacterBody3D\` — player + smart-physics characters. Use \`move_and_slide()\` for slope handling.
+- \`RigidBody2D\` / \`RigidBody3D\` — physics-driven props (boxes, balls).
+- \`Area2D\` / \`Area3D\` — overlap detection (pickups, triggers). Connect \`body_entered\` / \`area_entered\`.
+- \`AnimatedSprite2D\` — sprite-sheet animations. Pair with a \`SpriteFrames\` resource.
+- \`AudioStreamPlayer\` — non-positional audio (UI cues, music). \`AudioStreamPlayer2D\` for spatial.
+- \`Tween\` (transient) — short animations: \`create_tween().tween_property(node, "modulate", Color.RED, 0.2)\`.
+- \`CanvasLayer\` — UI elements that ignore camera. HUD lives here.
+
+## Lifecycle
+
+- \`_ready()\` — once when the node enters the tree. Do \`@onready\` after this; child nodes exist now.
+- \`_process(delta)\` — every frame. **Never** \`print()\` here (validator warns).
+- \`_physics_process(delta)\` — fixed-timestep, 60 Hz default. Use for movement / collision.
+- \`_input(event)\` — global input. Prefer \`Input.is_action_pressed("…")\` polling for game controls.
+- \`_unhandled_input(event)\` — input that no UI consumed. Right place for game-only shortcuts.
+
+## Resource paths
+
+Always \`res://path/to/file.ext\`. Forward slashes only. Paths are case-sensitive on Linux/Mac.
+
+\`\`\`gdscript
+var tex: Texture2D = preload("res://assets/sprites/player.png")
+var scene: PackedScene = preload("res://scenes/enemy.tscn")
+var enemy: Node = scene.instantiate()
+add_child(enemy)
+\`\`\`
+
+## Autoloads (singletons)
+
+Add to \`project.godot\` under \`[autoload]\`:
+
+\`\`\`
+[autoload]
+GameState="*res://scripts/game_state.gd"
+\`\`\`
+
+The leading \`*\` means autoloaded as a singleton accessible globally. Use sparingly — one for \`GameState\`, one for \`AudioBus\` is plenty.
+
+## Forbidden
+
+- Godot 3.x format files (\`[gd_scene format=2]\`).
+- \`.gd\` files without an \`extends\` declaration (parse errors).
+- \`print()\` inside \`_process()\` — log spam + frame-stutter.
+- Absolute paths (\`/Users/...\`). Always \`res://…\`.
+- Binary \`.tscn\` files. Always plain text format=3.
+- Referencing files that don't exist in the bundle (validator rejects).`;
+
+const GODOT_MULTI_FILE_GUIDE = `# Godot multi-file project guide
+
+Godot is multi-file by design. Even the simplest project is \`project.godot\` + \`main.tscn\` + at least one \`.gd\` script. This guide covers the structural decisions that hit first-shot quality.
+
+## Recommended layout
+
+\`\`\`
+project.godot              # required — manifest with [application] section
+main.tscn                  # root scene; named in run/main_scene
+scenes/
+  player.tscn              # one scene per logical "thing"
+  enemy.tscn
+  ui_hud.tscn
+scripts/
+  main.gd                  # script attached to main.tscn root node
+  player.gd
+  enemy.gd
+  game_state.gd            # autoload singleton
+assets/
+  sprites/                 # PNG textures
+  audio/                   # WAV / OGG
+  fonts/                   # TTF / OTF (when needed)
+README.md                  # how to open in Godot 4.3 (optional but nice)
+\`\`\`
+
+Group by *role*: scenes/ + scripts/ + assets/. Don't co-locate a script next to its scene; the \`[ext_resource path]\` reference works regardless and the split keeps the inspector tidy.
+
+## .tscn format primer
+
+Godot scene files are plain text. Key concepts the validator enforces:
+
+\`\`\`
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/player.gd" id="1_a"]
+[ext_resource type="Texture2D" path="res://assets/sprites/player.png" id="2_b"]
+
+[node name="Player" type="CharacterBody2D"]
+script = ExtResource("1_a")
+
+[node name="Sprite" type="Sprite2D" parent="."]
+texture = ExtResource("2_b")
+position = Vector2(0, -16)
+\`\`\`
+
+- \`[gd_scene format=3]\` — required (Godot 4.x). Format 2 is rejected.
+- \`[ext_resource path=…]\` — every referenced path must exist in the bundle.
+- \`[node ... parent="."]\` — the dot means "root node of this scene".
+- IDs are arbitrary strings — Godot uses them only for cross-references inside the same file.
+
+## Sub-scenes (instancing)
+
+Reusable components — Player, Enemy, Pickup — get their own \`.tscn\`. Instantiate from another scene via:
+
+\`\`\`
+[ext_resource type="PackedScene" path="res://scenes/enemy.tscn" id="1_e"]
+[node name="Enemy1" parent="." instance=ExtResource("1_e")]
+position = Vector2(200, 100)
+\`\`\`
+
+Override per-instance properties (position, scale, custom @export vars) inline. Keep enemy *behaviour* in \`enemy.gd\`, attached to the root of \`enemy.tscn\`.
+
+## Autoload singletons
+
+Game-wide state (score, current level, audio bus) lives in autoloads. Declared in \`project.godot\`:
+
+\`\`\`
+[autoload]
+GameState="*res://scripts/game_state.gd"
+\`\`\`
+
+The \`*\` prefix marks it as a singleton — accessible from any script as \`GameState.score = 5\`. Don't autoload more than 2–3 singletons; past that, scenes start hidden-coupling and the project becomes hard to reason about.
+
+## Asset paths
+
+- Inside \`.tscn\` / \`.tres\`: \`res://assets/sprites/player.png\` — always with the scheme.
+- Inside \`.gd\`: \`preload("res://assets/sprites/player.png")\` for compile-time, \`load("res://…")\` for runtime-conditional.
+- Forward slashes only. Case-sensitive on Linux/Mac. Lowercase + underscores for filenames is the safest convention.
+
+## Per-extension byte caps (gameplan §4 / Q5)
+
+\`text_editor.create\` enforces these for game-mode files:
+
+- \`.tscn\` → 32 KB. Past that, split the scene: extract a sub-tree into a child .tscn the parent instances. A 200-node main.tscn is a code smell — break it.
+- \`.gd\` → 16 KB per file. Past that, move logic into a separate script attached to a child node, or extract a helper \`static class\` / utility module.
+
+If you hit a cap, the right move is structural: more scenes / more scripts. Not compression.
+
+## .godot/ + .import/ — DO NOT author
+
+Godot generates \`.godot/\`, \`.import/\`, and \`.tmp\` files at editor open time. The agent must NOT create these — they're per-machine cache. The exporter zips the project tree but excludes them via \`.gitignore\`. If you find yourself authoring \`*.import\` files, stop and just author the source asset; Godot creates the import sidecar on first open.
+
+## .gd.uid files (Godot 4.4+ — skip in 4.3)
+
+Godot 4.4 added deterministic UID files (\`script.gd.uid\`) alongside scripts. We pin to 4.3, so **do not** generate \`.gd.uid\` files. They'll be created the first time the user opens the project in 4.4+.
+
+## Forbidden
+
+- Absolute paths (\`/Users/...\`, \`C:\\...\`). Use \`res://…\`.
+- Binary \`.tscn\` / \`.tres\` files. Always plain text.
+- Referencing files that don't exist in the bundle.
+- Circular preload imports.
+- Splitting one 50-line script into 5 files for the sake of "cleanliness."
+- Committing \`.godot/\`, \`.import/cache/\`, \`*.tmp\` (export \`.gitignore\` handles this).`;
+
 // Split CRAFT_DIRECTIVES into a Map<subsectionName, "## name\n\nbody"> so the
 // progressive-disclosure composer can include only the subsections relevant to
 // the user's prompt. The intro paragraph (everything before the first `## `)
@@ -1541,6 +1771,9 @@ export const PROMPT_SECTIONS: Record<string, string> = {
   phaserEngineGuide: PHASER_ENGINE_GUIDE,
   gameAntiSlop: GAME_ANTI_SLOP,
   gameMultiFileGuide: GAME_MULTI_FILE_GUIDE,
+  // gameplan §B1
+  godotEngineGuide: GODOT_ENGINE_GUIDE,
+  godotMultiFileGuide: GODOT_MULTI_FILE_GUIDE,
 };
 
 export const PROMPT_SECTION_FILES: Record<keyof typeof PROMPT_SECTIONS, string> = {
@@ -1566,6 +1799,8 @@ export const PROMPT_SECTION_FILES: Record<keyof typeof PROMPT_SECTIONS, string> 
   phaserEngineGuide: 'phaser-engine-guide.v1.txt',
   gameAntiSlop: 'game-anti-slop.v1.txt',
   gameMultiFileGuide: 'game-multi-file-guide.v1.txt',
+  godotEngineGuide: 'godot-engine-guide.v1.txt',
+  godotMultiFileGuide: 'godot-multi-file-guide.v1.txt',
 };
 
 // ---------------------------------------------------------------------------
@@ -1743,13 +1978,16 @@ function composeGame(engine: PromptComposeOptions['engine']): string[] {
   const sections: string[] = [IDENTITY, GAME_WORKFLOW, OUTPUT_RULES, GAME_ANTI_SLOP];
   if (engine === 'three') sections.push(THREE_ENGINE_GUIDE);
   else if (engine === 'phaser') sections.push(PHASER_ENGINE_GUIDE);
-  // engine === 'pygame' | 'godot' are reserved for Phase B/C — when they
-  // ship their guides land here and a paragraph in the New-design dialog
-  // explains the rest. For Phase A those values reach this branch only via
-  // an explicit user pick before their guides exist; the prompt simply
-  // skips the engine-guide section, the agent's next `choose_engine` will
-  // adjust if needed.
+  else if (engine === 'godot') sections.push(GODOT_ENGINE_GUIDE);
+  // engine === 'pygame' is reserved for Phase C. Until that guide lands
+  // the prompt simply skips the engine-guide section; the agent's next
+  // choose_engine call drives the correct path.
+
+  // Godot's project layout differs enough from JS / Python that it gets
+  // its own multi-file guide layered alongside the generic one.
   sections.push(GAME_MULTI_FILE_GUIDE);
+  if (engine === 'godot') sections.push(GODOT_MULTI_FILE_GUIDE);
+
   sections.push(SAFETY);
   return sections;
 }

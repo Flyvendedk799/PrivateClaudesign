@@ -1,0 +1,104 @@
+# Godot multi-file project guide
+
+Godot is multi-file by design. Even the simplest project is `project.godot` + `main.tscn` + at least one `.gd` script. This guide covers the structural decisions that hit first-shot quality.
+
+## Recommended layout
+
+```
+project.godot              # required — manifest with [application] section
+main.tscn                  # root scene; named in run/main_scene
+scenes/
+  player.tscn              # one scene per logical "thing"
+  enemy.tscn
+  ui_hud.tscn
+scripts/
+  main.gd                  # script attached to main.tscn root node
+  player.gd
+  enemy.gd
+  game_state.gd            # autoload singleton
+assets/
+  sprites/                 # PNG textures
+  audio/                   # WAV / OGG
+  fonts/                   # TTF / OTF (when needed)
+README.md                  # how to open in Godot 4.3 (optional but nice)
+```
+
+Group by *role*: scenes/ + scripts/ + assets/. Don't co-locate a script next to its scene; the `[ext_resource path]` reference works regardless and the split keeps the inspector tidy.
+
+## .tscn format primer
+
+Godot scene files are plain text. Key concepts the validator enforces:
+
+```
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/player.gd" id="1_a"]
+[ext_resource type="Texture2D" path="res://assets/sprites/player.png" id="2_b"]
+
+[node name="Player" type="CharacterBody2D"]
+script = ExtResource("1_a")
+
+[node name="Sprite" type="Sprite2D" parent="."]
+texture = ExtResource("2_b")
+position = Vector2(0, -16)
+```
+
+- `[gd_scene format=3]` — required (Godot 4.x). Format 2 is rejected.
+- `[ext_resource path=…]` — every referenced path must exist in the bundle.
+- `[node ... parent="."]` — the dot means "root node of this scene".
+- IDs are arbitrary strings — Godot uses them only for cross-references inside the same file.
+
+## Sub-scenes (instancing)
+
+Reusable components — Player, Enemy, Pickup — get their own `.tscn`. Instantiate from another scene via:
+
+```
+[ext_resource type="PackedScene" path="res://scenes/enemy.tscn" id="1_e"]
+[node name="Enemy1" parent="." instance=ExtResource("1_e")]
+position = Vector2(200, 100)
+```
+
+Override per-instance properties (position, scale, custom @export vars) inline. Keep enemy *behaviour* in `enemy.gd`, attached to the root of `enemy.tscn`.
+
+## Autoload singletons
+
+Game-wide state (score, current level, audio bus) lives in autoloads. Declared in `project.godot`:
+
+```
+[autoload]
+GameState="*res://scripts/game_state.gd"
+```
+
+The `*` prefix marks it as a singleton — accessible from any script as `GameState.score = 5`. Don't autoload more than 2–3 singletons; past that, scenes start hidden-coupling and the project becomes hard to reason about.
+
+## Asset paths
+
+- Inside `.tscn` / `.tres`: `res://assets/sprites/player.png` — always with the scheme.
+- Inside `.gd`: `preload("res://assets/sprites/player.png")` for compile-time, `load("res://…")` for runtime-conditional.
+- Forward slashes only. Case-sensitive on Linux/Mac. Lowercase + underscores for filenames is the safest convention.
+
+## Per-extension byte caps (gameplan §4 / Q5)
+
+`text_editor.create` enforces these for game-mode files:
+
+- `.tscn` → 32 KB. Past that, split the scene: extract a sub-tree into a child .tscn the parent instances. A 200-node main.tscn is a code smell — break it.
+- `.gd` → 16 KB per file. Past that, move logic into a separate script attached to a child node, or extract a helper `static class` / utility module.
+
+If you hit a cap, the right move is structural: more scenes / more scripts. Not compression.
+
+## .godot/ + .import/ — DO NOT author
+
+Godot generates `.godot/`, `.import/`, and `.tmp` files at editor open time. The agent must NOT create these — they're per-machine cache. The exporter zips the project tree but excludes them via `.gitignore`. If you find yourself authoring `*.import` files, stop and just author the source asset; Godot creates the import sidecar on first open.
+
+## .gd.uid files (Godot 4.4+ — skip in 4.3)
+
+Godot 4.4 added deterministic UID files (`script.gd.uid`) alongside scripts. We pin to 4.3, so **do not** generate `.gd.uid` files. They'll be created the first time the user opens the project in 4.4+.
+
+## Forbidden
+
+- Absolute paths (`/Users/...`, `C:\...`). Use `res://…`.
+- Binary `.tscn` / `.tres` files. Always plain text.
+- Referencing files that don't exist in the bundle.
+- Circular preload imports.
+- Splitting one 50-line script into 5 files for the sake of "cleanliness."
+- Committing `.godot/`, `.import/cache/`, `*.tmp` (export `.gitignore` handles this).

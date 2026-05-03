@@ -1,0 +1,119 @@
+# Godot engine guide (pinned to Godot 4.3)
+
+Godot 4.3 is project-download mode in v1. The agent authors a clean Godot project (`project.godot`, `*.tscn`, `*.gd`, `assets/`) that the user opens in their installed Godot 4.3+. Phase D (later) adds an in-app web preview when `godot --headless` is on the user's `$PATH`.
+
+**Do NOT** generate Godot 3.x format files (`[gd_scene format=2]`). The validator rejects them. Pin every scene to format=3 (4.x).
+
+## Required project files
+
+```
+project.godot                # top-level manifest — required
+main.tscn                    # root scene named in run/main_scene — required
+scenes/                      # one .tscn per logical scene
+scripts/                     # one .gd per behaviour
+assets/sprites/              # PNG / JPG textures
+assets/audio/                # WAV / OGG (Godot 4 reads both natively)
+```
+
+## project.godot — minimum shape
+
+```
+[application]
+config/name="Game name"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.3", "GL Compatibility")
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+```
+
+The `gl_compatibility` renderer is the safe default — works on every machine including older laptops. Switch to `forward_plus` only when the brief explicitly asks for high-end PBR.
+
+## main.tscn — minimum shape
+
+```
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1")
+```
+
+Every `[ext_resource path=…]` MUST resolve to a file you also create in the bundle. The validator catches dangling references.
+
+## GDScript 2 essentials
+
+```gdscript
+extends CharacterBody2D
+
+@export var speed: float = 200.0
+@onready var sprite: AnimatedSprite2D = $Sprite
+signal hit_pickup(pickup_name)
+
+func _ready() -> void:
+    sprite.play("idle")
+
+func _physics_process(delta: float) -> void:
+    var dir := Vector2(
+        Input.get_axis("ui_left", "ui_right"),
+        Input.get_axis("ui_up", "ui_down")
+    )
+    velocity = dir.normalized() * speed
+    move_and_slide()
+
+func _on_pickup_area_entered(area: Area2D) -> void:
+    hit_pickup.emit(area.name)
+    area.queue_free()
+```
+
+Use `@export` for inspector-tweakable values, `@onready` for child-node references, and signals for cross-node events. Static typing (`-> void`, `: float`) is encouraged but not required.
+
+## Common nodes
+
+- `CharacterBody2D` / `CharacterBody3D` — player + smart-physics characters. Use `move_and_slide()` for slope handling.
+- `RigidBody2D` / `RigidBody3D` — physics-driven props (boxes, balls).
+- `Area2D` / `Area3D` — overlap detection (pickups, triggers). Connect `body_entered` / `area_entered`.
+- `AnimatedSprite2D` — sprite-sheet animations. Pair with a `SpriteFrames` resource.
+- `AudioStreamPlayer` — non-positional audio (UI cues, music). `AudioStreamPlayer2D` for spatial.
+- `Tween` (transient) — short animations: `create_tween().tween_property(node, "modulate", Color.RED, 0.2)`.
+- `CanvasLayer` — UI elements that ignore camera. HUD lives here.
+
+## Lifecycle
+
+- `_ready()` — once when the node enters the tree. Do `@onready` after this; child nodes exist now.
+- `_process(delta)` — every frame. **Never** `print()` here (validator warns).
+- `_physics_process(delta)` — fixed-timestep, 60 Hz default. Use for movement / collision.
+- `_input(event)` — global input. Prefer `Input.is_action_pressed("…")` polling for game controls.
+- `_unhandled_input(event)` — input that no UI consumed. Right place for game-only shortcuts.
+
+## Resource paths
+
+Always `res://path/to/file.ext`. Forward slashes only. Paths are case-sensitive on Linux/Mac.
+
+```gdscript
+var tex: Texture2D = preload("res://assets/sprites/player.png")
+var scene: PackedScene = preload("res://scenes/enemy.tscn")
+var enemy: Node = scene.instantiate()
+add_child(enemy)
+```
+
+## Autoloads (singletons)
+
+Add to `project.godot` under `[autoload]`:
+
+```
+[autoload]
+GameState="*res://scripts/game_state.gd"
+```
+
+The leading `*` means autoloaded as a singleton accessible globally. Use sparingly — one for `GameState`, one for `AudioBus` is plenty.
+
+## Forbidden
+
+- Godot 3.x format files (`[gd_scene format=2]`).
+- `.gd` files without an `extends` declaration (parse errors).
+- `print()` inside `_process()` — log spam + frame-stutter.
+- Absolute paths (`/Users/...`). Always `res://…`.
+- Binary `.tscn` files. Always plain text format=3.
+- Referencing files that don't exist in the bundle (validator rejects).
