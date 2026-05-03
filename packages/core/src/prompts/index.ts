@@ -133,7 +133,7 @@ When the user asks for a change to an existing design (the file is already popul
 - Emitting an \`<artifact>...\</artifact>\` tag inline in your assistant text. The host parses tool results, not assistant prose.
 - Skipping \`set_todos\`. The user-visible progress UI is built from todo updates; without it the run looks frozen.
 - Calling \`text_editor.create\` then never calling \`done\`. The runtime cannot know you're finished without the explicit \`done\` call.
-- **Short transitional prose between tool batches** — phrases like "Now let me…", "Good, now…", "Let me try…", "Now adding…", "The X is preventing me from…". These render as chat bubbles in the user's sidebar and read as filler. Your assistant text stays empty across the whole run until the post-\`done\` summary; if you would have typed a transition, just emit the next tool call instead.
+- **ANY assistant text between tool calls** — this is a hard rule, not a preference. Every character you emit between two tool_call entries is a violation. The user reads the tool stream, NOT your prose. Banned patterns include but aren't limited to: "Now let me…", "Good, now…", "Let me try…", "Now adding…", "The X is preventing me from…", "I'll replace…", "Now fix…", "Now remove…", "Now inject…", "The linter is…", "Only a non-fatal…", "The X works perfectly", "Using Y to add…", "Good — new code inserted at…", "The str_replace engine is struggling…". The only correct number of inter-tool text bubbles is **zero**. If you would have typed a transition, just emit the next tool call. Recent BRAWL ARENA trace had 10+ such bubbles in a 14-min run; the work would have been the same with zero. Text is allowed only in the \`done\` summary string and in your single post-\`done\` reply.
 
 ## Self-check before \`done\`
 
@@ -1104,7 +1104,7 @@ A game without a coherent mechanic — input → state change → feedback → w
 
 ## Cadence
 
-**Emit no assistant text between tool calls** (gameplan + plan0305 P1.1). The user reads the tool stream, not your prose. Long-form narrative belongs only in the \`done\` summary string and the single post-\`done\` assistant message. Phrases like "Now let me…", "Good, now…" are a forbidden pattern.
+**Emit no assistant text between tool calls** (gameplan + plan0305 P1.1 + Gameimprove §3). This is a HARD rule, not a preference. Every character between two tool_call entries is a violation. Banned patterns include but aren't limited to: "Now let me…", "Good, now…", "Let me try…", "Now adding…", "I'll replace…", "Now fix…", "Now remove…", "Now inject…", "The linter is…", "Only a non-fatal…", "Using Y to add…", "Good — new code inserted at…", "The str_replace engine is struggling…". The user reads the tool stream, NOT your prose. The correct number of inter-tool text bubbles is **zero**. If you would have typed a transition, just emit the next tool call. Long-form narrative belongs only in the \`done\` summary string and your single post-\`done\` assistant message.
 
 ## Engine-specific guides
 

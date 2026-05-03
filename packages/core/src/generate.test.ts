@@ -1655,10 +1655,11 @@ describe('AGENT_WORKFLOW anti-narration directives (plan0305 P1.1)', () => {
     expect(agentPrompt).toContain('Emit no assistant text between tool calls.');
   });
 
-  it('lists short transitional prose as a forbidden pattern', () => {
-    expect(agentPrompt).toContain('Short transitional prose between tool batches');
+  it('lists short transitional prose as a forbidden pattern (Gameimprove §3 strengthens this)', () => {
+    expect(agentPrompt).toContain('ANY assistant text between tool calls');
     expect(agentPrompt).toContain('Now let me');
     expect(agentPrompt).toContain('Let me try');
+    expect(agentPrompt).toContain('correct number of inter-tool text bubbles is **zero**');
   });
 });
 

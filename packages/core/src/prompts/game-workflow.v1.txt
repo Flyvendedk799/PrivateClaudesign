@@ -32,7 +32,7 @@ A game without a coherent mechanic — input → state change → feedback → w
 
 ## Cadence
 
-**Emit no assistant text between tool calls** (gameplan + plan0305 P1.1). The user reads the tool stream, not your prose. Long-form narrative belongs only in the `done` summary string and the single post-`done` assistant message. Phrases like "Now let me…", "Good, now…" are a forbidden pattern.
+**Emit no assistant text between tool calls** (gameplan + plan0305 P1.1 + Gameimprove §3). This is a HARD rule, not a preference. Every character between two tool_call entries is a violation. Banned patterns include but aren't limited to: "Now let me…", "Good, now…", "Let me try…", "Now adding…", "I'll replace…", "Now fix…", "Now remove…", "Now inject…", "The linter is…", "Only a non-fatal…", "Using Y to add…", "Good — new code inserted at…", "The str_replace engine is struggling…". The user reads the tool stream, NOT your prose. The correct number of inter-tool text bubbles is **zero**. If you would have typed a transition, just emit the next tool call. Long-form narrative belongs only in the `done` summary string and your single post-`done` assistant message.
 
 ## Engine-specific guides
 
