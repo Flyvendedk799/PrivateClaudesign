@@ -630,6 +630,8 @@
     "generationFailed": "Falha na geração",
     "transientRetryTitle": "Falha de conexão — tentando novamente",
     "transientRetryBody": "O stream do provedor foi cortado antes que qualquer trabalho fosse concluído. Reemitindo automaticamente o mesmo prompt.",
+    "duplicatePromptTitle": "Prompt idêntico — ignorado",
+    "duplicatePromptBody": "Você acabou de enviar o mesmo texto. Edite o prompt ou aguarde a execução anterior terminar.",
     "oauthExpiringTitle": "Token de autenticação expirando",
     "oauthExpiringBody": "O token OAuth do provedor expira em {{minutes}} min. Execuções longas podem ser interrompidas — reimporte em Configurações se possível.",
     "oauthExpiredTitle": "Token de autenticação expirado",

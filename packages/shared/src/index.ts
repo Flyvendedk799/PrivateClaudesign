@@ -503,6 +503,7 @@ export interface ActionTimelineEntry {
     | 'prompt.submit'
     | 'prompt.cancel'
     | 'prompt.retry'
+    | 'prompt.dedup'
     | 'provider.switch'
     | 'skill.toggle'
     | 'design.open'

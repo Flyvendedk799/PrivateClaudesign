@@ -676,6 +676,8 @@
     "generationFailed": "Generation failed",
     "transientRetryTitle": "Connection blip — retrying",
     "transientRetryBody": "The provider's stream was cut before any work landed. Reissuing the same prompt automatically.",
+    "duplicatePromptTitle": "Identical prompt — skipped",
+    "duplicatePromptBody": "You just submitted the same text. Edit the prompt or wait for the previous run to finish.",
     "oauthExpiringTitle": "Auth token expiring soon",
     "oauthExpiringBody": "Your provider's OAuth token expires in {{minutes}} min. Long runs may be cut short — re-import in Settings if you can.",
     "oauthExpiredTitle": "Auth token has expired",

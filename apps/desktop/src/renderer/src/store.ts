@@ -1989,6 +1989,40 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       },
     });
     if (get().isGenerating) return;
+
+    // Gameimprove §4 — drop near-duplicate adjacent submissions. The
+    // BRAWL ARENA trace had the same brief at seq 0 AND seq 2 (full
+    // wasted agent run). Auto-retry from a transient failure shouldn't
+    // be the only path; manual double-clicks deserve the same guard.
+    // Skip for silent submissions (auto-polish) and the resolvePromptAssist
+    // resume path — those legitimately re-call sendPrompt with the same
+    // payload after the dialog cycle.
+    if (!input.silent && input._autoRetried !== true && !input.skipPromptAssist) {
+      const designId = get().currentDesignId;
+      if (designId !== null) {
+        const lastUserMsg = [...get().chatMessages]
+          .reverse()
+          .find((m) => m.designId === designId && m.kind === 'user');
+        if (lastUserMsg !== undefined) {
+          const lastText = (lastUserMsg.payload as { text?: string } | null)?.text ?? '';
+          const ageMs = Date.now() - new Date(lastUserMsg.createdAt).getTime();
+          if (lastText === input.prompt && ageMs < 60_000) {
+            recordAction({ type: 'prompt.dedup', data: { ageMs } });
+            get().pushToast({
+              variant: 'info',
+              title: tr('notifications.duplicatePromptTitle', {
+                defaultValue: 'Identical prompt — skipped',
+              }),
+              description: tr('notifications.duplicatePromptBody', {
+                defaultValue:
+                  'You just submitted the same text. Edit the prompt or wait for the previous run to finish.',
+              }),
+            });
+            return;
+          }
+        }
+      }
+    }
     if (!window.codesign) {
       const msg = tr('errors.rendererDisconnected');
       set({ errorMessage: msg, lastError: msg });

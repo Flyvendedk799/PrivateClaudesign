@@ -665,6 +665,8 @@
     "generationFailed": "生成失败",
     "transientRetryTitle": "连接抖动——正在重试",
     "transientRetryBody": "在任何工作落地之前，服务提供商的流被切断。正在自动重发相同提示。",
+    "duplicatePromptTitle": "重复提示——已跳过",
+    "duplicatePromptBody": "您刚刚提交了相同的文本。请修改提示或等待之前的运行完成。",
     "oauthExpiringTitle": "授权令牌即将过期",
     "oauthExpiringBody": "服务提供商的 OAuth 令牌将在 {{minutes}} 分钟后过期。长时间运行可能会被中断——如有可能请到设置中重新导入。",
     "oauthExpiredTitle": "授权令牌已过期",

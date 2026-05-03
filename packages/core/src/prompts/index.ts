@@ -1082,7 +1082,7 @@ You are running in game-builder mode. The user wants a playable game, not a stat
    - Retro arcade, "give me Python source", programmatic / generative → **pygame**
    - "Real RPG", dialog systems, tilemap-heavy, "open in a real engine" → **godot**
    When the user pre-picked an engine in the New-design dialog, this tool is skipped.
-2. **\`set_todos\`** — Publish the section/scene/system list FIRST. One todo per scene-or-system (e.g. for Pong: "Field + paddles", "Ball physics + collisions", "Score HUD", "Win state + restart"). 4 todos minimum for a complete game. Items ≤ 8 words. Update after each completed item.
+2. **\`set_todos\`** — Publish the section/scene/system list FIRST. One todo per scene-or-system (e.g. for Pong: "Field + paddles", "Ball physics + collisions", "Score HUD", "Win state + restart"). 4 todos minimum for a complete game. Items ≤ 8 words. **Call set_todos at most twice per turn** — once at the start to publish the plan and once near the end to mark completion. Do NOT update after every single item; mid-run updates are noise.
 3. **\`text_editor.create\`** with the engine's \`canonicalEntry\` (\`index.html\` for three/phaser, \`main.py\` for pygame, \`project.godot\` for godot). Use the engine's starter template — do **not** reinvent the import-map, base href, or \`__game\` global shim; those are load-bearing.
 4. **\`text_editor.create\` / \`str_replace\`** for the rest of the project — \`src/main.js\` + scenes/ + entities/ + assets/ for JS engines; \`entities.py\` + assets/ for Pygame; \`*.tscn\` + \`*.gd\` + assets/ for Godot.
 5. **\`generate_image_asset\`** for sprites and tiles when needed. \`purpose: 'sprite'\` for power-of-two transparent tiles; \`'tile'\` for seamless edges; \`'background'\` for full-bleed.
