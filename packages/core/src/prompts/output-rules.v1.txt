@@ -12,7 +12,8 @@
     - `recharts` — data viz (preferred for dashboards)
     - `Chart.js` — alternative charting (note: cdnjs slug is capitalized)
     - `d3` — low-level visualization
-    - `three.js` — 3D
+    - `three.js` — 3D scenes. **Reach for this last, not first**: when a brief asks for animation, default to pure CSS `@keyframes` + `transform` / `opacity` for the whole thing. Inline SVG with SMIL (`<animate>`, `<animateTransform>`) covers icon-scale loops, drawing-line reveals, and morphs at near-zero cost. Lottie (`lottie-web`) plays vector animations that designers actually authored. Three.js is right when the brief explicitly asks for 3D, parallax depth, or a real WebGL scene — and even then, scope it: the 2026-04-29 traces showed runs where 50–90% of `index.html` bytes were a single Three.js scene that crowded out the actual product sections. If the brief is "intro animation for a [non-tech subject]", pick CSS first.
+    - `lottie-web` — vector animation playback (designer-authored JSON, ~1.6 MB unminified, ~250 KB on cdnjs). Right for "play this designed animation"; wrong for "fly particles around in 3D".
     - `lodash.js` — utilities (cdnjs slug includes the `.js`)
     - `PapaParse` — CSV parsing (note: cdnjs slug is CamelCase)
 - **Forbidden**:

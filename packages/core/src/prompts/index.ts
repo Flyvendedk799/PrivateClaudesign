@@ -179,7 +179,8 @@ const OUTPUT_RULES = `# Output rules
     - \`recharts\` — data viz (preferred for dashboards)
     - \`Chart.js\` — alternative charting (note: cdnjs slug is capitalized)
     - \`d3\` — low-level visualization
-    - \`three.js\` — 3D
+    - \`three.js\` — 3D scenes. **Reach for this last, not first**: when a brief asks for animation, default to pure CSS \`@keyframes\` + \`transform\` / \`opacity\` for the whole thing. Inline SVG with SMIL (\`<animate>\`, \`<animateTransform>\`) covers icon-scale loops, drawing-line reveals, and morphs at near-zero cost. Lottie (\`lottie-web\`) plays vector animations that designers actually authored. Three.js is right when the brief explicitly asks for 3D, parallax depth, or a real WebGL scene — and even then, scope it: the 2026-04-29 traces showed runs where 50–90% of \`index.html\` bytes were a single Three.js scene that crowded out the actual product sections. If the brief is "intro animation for a [non-tech subject]", pick CSS first.
+    - \`lottie-web\` — vector animation playback (designer-authored JSON, ~1.6 MB unminified, ~250 KB on cdnjs). Right for "play this designed animation"; wrong for "fly particles around in 3D".
     - \`lodash.js\` — utilities (cdnjs slug includes the \`.js\`)
     - \`PapaParse\` — CSV parsing (note: cdnjs slug is CamelCase)
 - **Forbidden**:
@@ -1168,6 +1169,12 @@ export interface PromptAssistMetadataLike {
   primaryAction?: string | undefined;
   vibe?: string | undefined;
   a11y?: 'baseline' | 'enhanced' | undefined;
+  /** plan0305 P4.2 — palette directive captured when the user overrides
+   *  the model's first palette pick in conversation. Persisted on the
+   *  design so refinement runs honor the steer instead of regressing
+   *  (the cosmic-by-default bias would otherwise pull each new turn back
+   *  toward dark + cyan + radial glow). Free-text. */
+  paletteHint?: string | undefined;
 }
 
 /** Render the prompt-assist picks as a structured constraints block.
@@ -1185,11 +1192,15 @@ export function formatPromptAssistConstraints(
   if (meta.primaryAction) lines.push(`<primary-action>${meta.primaryAction}</primary-action>`);
   if (meta.vibe) lines.push(`<vibe>${meta.vibe}</vibe>`);
   if (meta.a11y) lines.push(`<a11y-target>${meta.a11y}</a11y-target>`);
+  if (meta.paletteHint) lines.push(`<palette-hint>${meta.paletteHint}</palette-hint>`);
   if (lines.length === 0) return null;
+  const paletteFooter = meta.paletteHint
+    ? '\n\nThe `<palette-hint>` overrides the OUTPUT_RULES default token block AND any anti-slop palette suggestions. Honor it across all sections of the artifact — do not regress to the model-default palette on refinement turns.'
+    : '';
   return [
     '# Design constraints',
     '',
-    'These came from the user via the prompt-assist interstitial. Treat them as load-bearing scope/taste guidance, not free-text suggestions. If a constraint conflicts with the prompt itself, surface the conflict in your 2-sentence summary.',
+    `These came from the user via the prompt-assist interstitial. Treat them as load-bearing scope/taste guidance, not free-text suggestions. If a constraint conflicts with the prompt itself, surface the conflict in your 2-sentence summary.${paletteFooter}`,
     '',
     '<design-constraints>',
     ...lines,

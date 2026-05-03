@@ -4,7 +4,12 @@ import { fileURLToPath } from 'node:url';
 import type { ChatMessage, LoadedSkill, ModelRef, StoredDesignSystem } from '@open-codesign/shared';
 import { CodesignError, STORED_DESIGN_SYSTEM_SCHEMA_VERSION } from '@open-codesign/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PROMPT_SECTIONS, PROMPT_SECTION_FILES, composeSystemPrompt } from './prompts/index.js';
+import {
+  PROMPT_SECTIONS,
+  PROMPT_SECTION_FILES,
+  composeSystemPrompt,
+  formatPromptAssistConstraints,
+} from './prompts/index.js';
 
 const completeMock = vi.fn();
 const loadBuiltinSkillsMock = vi.fn(async (): Promise<LoadedSkill[]> => []);
@@ -1654,6 +1659,53 @@ describe('AGENT_WORKFLOW anti-narration directives (plan0305 P1.1)', () => {
     expect(agentPrompt).toContain('Short transitional prose between tool batches');
     expect(agentPrompt).toContain('Now let me');
     expect(agentPrompt).toContain('Let me try');
+  });
+});
+
+describe('paletteHint constraint (plan0305 P4.2)', () => {
+  it('renders <palette-hint> inside the design-constraints block when set', () => {
+    const out = formatPromptAssistConstraints({
+      paletteHint: 'warm wood + cream + iron — NOT dark + cyan',
+    });
+    expect(out).not.toBeNull();
+    expect(out).toContain(
+      '<palette-hint>warm wood + cream + iron — NOT dark + cyan</palette-hint>',
+    );
+  });
+
+  it('explains the override-strength when paletteHint is the only field', () => {
+    const out = formatPromptAssistConstraints({ paletteHint: 'mossy green + bone + brass' });
+    expect(out).not.toBeNull();
+    expect(out).toMatch(/overrides the OUTPUT_RULES default token block/);
+    expect(out).toMatch(/regress to the model-default palette/);
+  });
+
+  it('omits the palette-override footer when paletteHint is absent', () => {
+    const out = formatPromptAssistConstraints({ vibe: 'minimal' });
+    expect(out).not.toBeNull();
+    expect(out).not.toMatch(/overrides the OUTPUT_RULES default token block/);
+  });
+
+  it('renders nothing when no fields are set at all', () => {
+    expect(formatPromptAssistConstraints({})).toBeNull();
+  });
+});
+
+describe('OUTPUT_RULES animation alternatives (plan0305 P4.1)', () => {
+  const prompt = composeSystemPrompt({ mode: 'create' });
+
+  it('flags three.js as a last resort and points at CSS first', () => {
+    expect(prompt).toContain('Reach for this last, not first');
+    expect(prompt).toContain('CSS');
+    expect(prompt).toContain('@keyframes');
+  });
+
+  it('lists SVG SMIL alongside CSS as an alternative', () => {
+    expect(prompt).toContain('SMIL');
+  });
+
+  it('lists lottie-web as a separate approved library', () => {
+    expect(prompt).toContain('lottie-web');
   });
 });
 

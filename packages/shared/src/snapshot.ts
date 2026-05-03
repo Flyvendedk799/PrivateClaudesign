@@ -17,7 +17,17 @@ export type DesignSnapshot = z.infer<typeof DesignSnapshotV1>;
 /** v1 schema for prompt-assist chip selections. Captured before the agent
  *  runs when the prompt is short and underspecified (see backlog-1 #9), and
  *  injected into the system prompt as structured constraints on every
- *  generation for the design (initial + refinements). */
+ *  generation for the design (initial + refinements).
+ *
+ *  paletteHint (plan0305 P4.2) is a free-text palette steer captured when
+ *  the user overrides the model's palette choice in conversation
+ *  (e.g. "actually use warm wood + cream + iron, not dark + cyan"). The
+ *  renderer writes this into the design's metadata via the existing
+ *  `setDesignPromptAssistMetadata` IPC so refinement runs honor the steer
+ *  rather than regressing to the model's first instinct (often dark+cyan
+ *  per the cosmic-by-default bias the rest of plan0305 fixes). Deliberately
+ *  free-text, not an enum, because palette directives are open-ended.
+ */
 export const PromptAssistMetadataV1 = z.object({
   schemaVersion: z.literal(1).default(1),
   audience: z.string().optional(),
@@ -26,6 +36,7 @@ export const PromptAssistMetadataV1 = z.object({
   primaryAction: z.string().optional(),
   vibe: z.string().optional(),
   a11y: z.enum(['baseline', 'enhanced']).optional(),
+  paletteHint: z.string().optional(),
 });
 export type PromptAssistMetadata = z.infer<typeof PromptAssistMetadataV1>;
 
