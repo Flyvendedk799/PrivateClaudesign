@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   appendChatMessage,
   clearDesignWorkspace,
+  contentTypeFromPath,
   createDesign,
   createSnapshot,
   deleteSnapshot,
@@ -15,17 +16,21 @@ import {
   getDesign,
   getDesignUsageTotals,
   getSnapshot,
+  getSnapshotFiles,
   initInMemoryDb,
   listChatMessages,
   listDesigns,
   listSnapshots,
   recordRunUsage,
   renameDesign,
+  restoreSnapshotFiles,
   setDesignPromptAssistMetadata,
   setDesignThumbnail,
+  snapshotDesignFiles,
   softDeleteDesign,
   updateChatToolCallStatus,
   updateDesignWorkspace,
+  upsertDesignFile,
 } from './snapshots-db';
 
 function makeDb() {
@@ -1026,5 +1031,181 @@ describe('run_usage telemetry (plan0305 P3.2)', () => {
     // doesn't fire for that path).
     db.prepare('DELETE FROM designs WHERE id = ?').run(d.id);
     expect(getDesignUsageTotals(db, d.id).runs).toBe(0);
+  });
+});
+
+describe('game-mode schema (gameplan §6, A1)', () => {
+  it('createSnapshot accepts engine + engineVersion and round-trips them', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    const snap = createSnapshot(db, {
+      designId: d.id,
+      parentId: null,
+      type: 'initial',
+      prompt: 'pong',
+      artifactType: 'game',
+      artifactSource: '<!doctype html><body><script type="module"></script></body>',
+      engine: 'phaser',
+      engineVersion: '3.88.0',
+    });
+    expect(snap.artifactType).toBe('game');
+    expect(snap.engine).toBe('phaser');
+    expect(snap.engineVersion).toBe('3.88.0');
+    const round = getSnapshot(db, snap.id);
+    expect(round?.engine).toBe('phaser');
+    expect(round?.engineVersion).toBe('3.88.0');
+  });
+
+  it('design-mode snapshots leave engine + engineVersion null', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    const snap = createSnapshot(db, {
+      designId: d.id,
+      parentId: null,
+      type: 'initial',
+      prompt: 'landing page',
+      artifactType: 'html',
+      artifactSource: '<!doctype html><html></html>',
+    });
+    expect(snap.engine).toBeNull();
+    expect(snap.engineVersion).toBeNull();
+  });
+
+  it('SQL CHECK admits artifact_type=game on fresh installs', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    expect(() =>
+      createSnapshot(db, {
+        designId: d.id,
+        parentId: null,
+        type: 'initial',
+        prompt: null,
+        artifactType: 'game',
+        artifactSource: '<html></html>',
+        engine: 'three',
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe('snapshotDesignFiles + getSnapshotFiles + restoreSnapshotFiles (gameplan §6, A1)', () => {
+  it('captures the full design_files bundle into design_snapshot_files', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    upsertDesignFile(db, d.id, 'index.html', '<!doctype html>');
+    upsertDesignFile(db, d.id, 'src/main.js', 'console.log(1);');
+    upsertDesignFile(db, d.id, 'assets/sprite.png', 'data:base64,iVBOR…');
+    const snap = createSnapshot(db, {
+      designId: d.id,
+      parentId: null,
+      type: 'initial',
+      prompt: null,
+      artifactType: 'game',
+      artifactSource: '<!doctype html>',
+      engine: 'phaser',
+    });
+    const captured = snapshotDesignFiles(db, snap.id, d.id);
+    expect(captured).toBe(3);
+    const rows = getSnapshotFiles(db, snap.id);
+    expect(rows.map((r) => r.path).sort()).toEqual([
+      'assets/sprite.png',
+      'index.html',
+      'src/main.js',
+    ]);
+    const sprite = rows.find((r) => r.path === 'assets/sprite.png');
+    expect(sprite?.isBinary).toBe(true);
+    expect(sprite?.contentType).toBe('image/png');
+    const js = rows.find((r) => r.path === 'src/main.js');
+    expect(js?.isBinary).toBe(false);
+    expect(js?.contentType).toBe('text/javascript');
+  });
+
+  it('returns 0 when the design has no files', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    const snap = createSnapshot(db, {
+      designId: d.id,
+      parentId: null,
+      type: 'initial',
+      prompt: null,
+      artifactType: 'game',
+      artifactSource: '<!doctype html>',
+      engine: 'three',
+    });
+    expect(snapshotDesignFiles(db, snap.id, d.id)).toBe(0);
+    expect(getSnapshotFiles(db, snap.id)).toHaveLength(0);
+  });
+
+  it('restoreSnapshotFiles replaces design_files with the snapshot bundle', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    upsertDesignFile(db, d.id, 'index.html', '<!doctype html>v1');
+    upsertDesignFile(db, d.id, 'src/main.js', 'console.log(1);');
+    const snap = createSnapshot(db, {
+      designId: d.id,
+      parentId: null,
+      type: 'initial',
+      prompt: null,
+      artifactType: 'game',
+      artifactSource: '<!doctype html>v1',
+      engine: 'three',
+    });
+    snapshotDesignFiles(db, snap.id, d.id);
+    // Simulate further edits then restore.
+    upsertDesignFile(db, d.id, 'index.html', '<!doctype html>v2');
+    upsertDesignFile(db, d.id, 'src/extra.js', 'extra');
+    const restored = restoreSnapshotFiles(db, d.id, snap.id);
+    expect(restored).toBe(2);
+    const after = db
+      .prepare('SELECT path, content FROM design_files WHERE design_id = ? ORDER BY path')
+      .all(d.id) as Array<{ path: string; content: string }>;
+    expect(after.map((r) => r.path)).toEqual(['index.html', 'src/main.js']);
+    expect(after[0]?.content).toBe('<!doctype html>v1');
+  });
+
+  it('cascades on snapshot delete', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    upsertDesignFile(db, d.id, 'index.html', '<!doctype html>');
+    const snap = createSnapshot(db, {
+      designId: d.id,
+      parentId: null,
+      type: 'initial',
+      prompt: null,
+      artifactType: 'game',
+      artifactSource: '<!doctype html>',
+      engine: 'three',
+    });
+    snapshotDesignFiles(db, snap.id, d.id);
+    expect(getSnapshotFiles(db, snap.id)).toHaveLength(1);
+    deleteSnapshot(db, snap.id);
+    expect(getSnapshotFiles(db, snap.id)).toHaveLength(0);
+  });
+});
+
+describe('contentTypeFromPath (gameplan §7.2)', () => {
+  it('returns engine-aware MIME types for JS-engine files', () => {
+    expect(contentTypeFromPath('index.html')).toBe('text/html');
+    expect(contentTypeFromPath('src/main.js')).toBe('text/javascript');
+    expect(contentTypeFromPath('config.json')).toBe('application/json');
+    expect(contentTypeFromPath('assets/sprite.png')).toBe('image/png');
+    expect(contentTypeFromPath('assets/jump.wav')).toBe('audio/wav');
+  });
+
+  it('returns engine-aware MIME types for Python (Pygame)', () => {
+    expect(contentTypeFromPath('main.py')).toBe('text/x-python');
+    expect(contentTypeFromPath('entities/player.py')).toBe('text/x-python');
+  });
+
+  it('returns engine-aware MIME types for Godot project files', () => {
+    expect(contentTypeFromPath('project.godot')).toBe('text/plain');
+    expect(contentTypeFromPath('main.tscn')).toBe('text/plain');
+    expect(contentTypeFromPath('player.gd')).toBe('text/x-gdscript');
+    expect(contentTypeFromPath('default_env.tres')).toBe('text/plain');
+  });
+
+  it('falls back to application/octet-stream for unknown extensions', () => {
+    expect(contentTypeFromPath('mystery.bin')).toBe('application/octet-stream');
+    expect(contentTypeFromPath('no-extension')).toBe('application/octet-stream');
   });
 });

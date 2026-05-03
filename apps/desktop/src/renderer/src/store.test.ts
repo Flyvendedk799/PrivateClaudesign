@@ -14,6 +14,7 @@ const READY_CONFIG: OnboardingState = {
   modelPrimary: 'claude-sonnet-4-6',
   baseUrl: null,
   designSystem: null,
+  activeKeyExpiresAt: null,
 };
 
 const initialState = useCodesignStore.getState();
@@ -192,6 +193,16 @@ describe('useCodesignStore generation cancellation', () => {
   });
 
   it('surfaces current-generation failures even when the message contains abort wording', async () => {
+    // 2026-04-28: this test originally rejected once and asserted the
+    // error toast surfaces verbatim. The auto-retry path (B1) now
+    // reissues the prompt automatically when the upstream cuts the
+    // stream mid-response (any message matching looksLikeTruncatedStream,
+    // which includes "aborted" wording). The user-visible behavior
+    // becomes: silent retry once; if the retry ALSO fails, the error
+    // toast surfaces. The test now exercises both rejections so the
+    // failure surfaces only after the retry exhausts — preserving the
+    // original intent (abort-shaped errors must reach the user) while
+    // accepting the new retry mechanism.
     const pendingById = new Map<
       string,
       ReturnType<typeof deferred<{ artifacts: Array<{ content: string }>; message: string }>>
@@ -212,12 +223,19 @@ describe('useCodesignStore generation cancellation', () => {
     });
 
     const run = useCodesignStore.getState().sendPrompt({ prompt: 'first prompt' });
-    const generationId = useCodesignStore.getState().activeGenerationId;
-    if (!generationId) throw new Error('expected generation id');
+    const firstGenerationId = useCodesignStore.getState().activeGenerationId;
+    if (!firstGenerationId) throw new Error('expected first generation id');
 
-    await vi.waitFor(() => expect(pendingById.has(generationId)).toBe(true));
+    await vi.waitFor(() => expect(pendingById.has(firstGenerationId)).toBe(true));
+    pendingById.get(firstGenerationId)?.reject(new Error('Upstream proxy aborted the response'));
 
-    pendingById.get(generationId)?.reject(new Error('Upstream proxy aborted the response'));
+    // The retry kicks off internally with a fresh generationId. Wait for
+    // it to register, then reject it too so the error path surfaces.
+    await vi.waitFor(() => expect(pendingById.size).toBe(2));
+    const retryId = [...pendingById.keys()].find((k) => k !== firstGenerationId);
+    if (!retryId) throw new Error('expected retry generation id');
+    pendingById.get(retryId)?.reject(new Error('Upstream proxy aborted the response'));
+
     await run;
 
     const state = useCodesignStore.getState();
@@ -225,10 +243,13 @@ describe('useCodesignStore generation cancellation', () => {
     expect(state.activeGenerationId).toBeNull();
     expect(state.errorMessage).toBe('Upstream proxy aborted the response');
     expect(state.lastError).toBe('Upstream proxy aborted the response');
-    expect(state.toasts.at(-1)).toMatchObject({
-      variant: 'error',
-      description: 'Upstream proxy aborted the response',
-    });
+    // The raw upstream message must be in the final error toast,
+    // possibly augmented with the transientStreamCut hypothesis hint.
+    const lastToast = state.toasts.at(-1);
+    expect(lastToast?.variant).toBe('error');
+    expect(lastToast?.description).toContain('Upstream proxy aborted the response');
+    // Confirm the retry actually fired (generate called twice).
+    expect(generate).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -387,6 +408,7 @@ describe('useCodesignStore active provider routing', () => {
       modelPrimary: 'gpt-4o',
       baseUrl: null,
       designSystem: null,
+      activeKeyExpiresAt: null,
     };
 
     // Simulate setActiveProvider result updating the store config.
@@ -595,7 +617,7 @@ describe('useCodesignStore artifact persistence', () => {
       parentId: string | null;
       type: 'initial' | 'edit' | 'fork';
       prompt: string | null;
-      artifactType: 'html' | 'react' | 'svg';
+      artifactType: 'html' | 'react' | 'svg' | 'game';
       artifactSource: string;
       createdAt: string;
       message?: string;

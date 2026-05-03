@@ -7,10 +7,17 @@ export const DesignSnapshotV1 = z.object({
   parentId: z.string().nullable(),
   type: z.enum(['initial', 'edit', 'fork']),
   prompt: z.string().nullable(),
-  artifactType: z.enum(['html', 'react', 'svg']),
+  artifactType: z.enum(['html', 'react', 'svg', 'game']),
   artifactSource: z.string(),
   createdAt: z.string(),
   message: z.string().optional(),
+  /** Engine pin for game-mode snapshots (gameplan §6). NULL on every
+   *  design-mode snapshot; required when artifactType === 'game'. */
+  engine: z.enum(['three', 'phaser', 'pygame', 'godot']).nullable().optional(),
+  /** Free-text engine version pin (gameplan §6, Appendix). e.g.
+   *  '0.170.0' for Three.js, '3.88.0' for Phaser, '2.5.5' for pygame-ce,
+   *  '4.3' for Godot. */
+  engineVersion: z.string().nullable().optional(),
 });
 export type DesignSnapshot = z.infer<typeof DesignSnapshotV1>;
 
@@ -239,9 +246,12 @@ export interface SnapshotCreateInput {
   parentId: string | null;
   type: 'initial' | 'edit' | 'fork';
   prompt: string | null;
-  artifactType: 'html' | 'react' | 'svg';
+  artifactType: 'html' | 'react' | 'svg' | 'game';
   artifactSource: string;
   message?: string;
+  /** Game-mode only — engine pin for the snapshot. (gameplan §6) */
+  engine?: 'three' | 'phaser' | 'pygame' | 'godot' | null;
+  engineVersion?: string | null;
 }
 
 // ---------------------------------------------------------------------------

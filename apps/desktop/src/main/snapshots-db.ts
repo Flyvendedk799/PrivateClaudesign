@@ -108,7 +108,7 @@ function applySchema(db: Database): void {
       parent_id      TEXT REFERENCES design_snapshots(id) ON DELETE SET NULL,
       type           TEXT NOT NULL CHECK(type IN ('initial','edit','fork')),
       prompt         TEXT,
-      artifact_type  TEXT NOT NULL CHECK(artifact_type IN ('html','react','svg')),
+      artifact_type  TEXT NOT NULL CHECK(artifact_type IN ('html','react','svg','game')),
       artifact_source TEXT NOT NULL,
       created_at     TEXT NOT NULL,
       message        TEXT
@@ -354,6 +354,96 @@ function applyAdditiveMigrations(db: Database): void {
       new Date().toISOString(),
     );
   }
+
+  // Game-mode (gameplan §6, A1) — add engine + engine_version columns to
+  // design_snapshots and create the design_snapshot_files bundle table.
+  // Column adds are pure ALTER; the design_snapshot_files table is gated
+  // by a db_meta marker so we only do the CREATE TABLE work once.
+  const snapshotCols = (
+    db.prepare('PRAGMA table_info(design_snapshots)').all() as ColumnInfo[]
+  ).map((c) => c.name);
+  if (!snapshotCols.includes('engine')) {
+    db.exec('ALTER TABLE design_snapshots ADD COLUMN engine TEXT');
+  }
+  if (!snapshotCols.includes('engine_version')) {
+    db.exec('ALTER TABLE design_snapshots ADD COLUMN engine_version TEXT');
+  }
+
+  // The CHECK constraint on artifact_type was 'html'/'react'/'svg' until we
+  // added 'game'. SQLite has no ALTER TABLE … MODIFY CONSTRAINT, so an
+  // existing DB on disk would reject INSERT WHERE artifact_type='game'.
+  // Rebuild the table once via temporary-swap so existing rows survive but
+  // the constraint admits the new value. New installs already have the
+  // relaxed CHECK from the CREATE TABLE statement above and skip this.
+  const snapshotsCheckRelaxed = db
+    .prepare('SELECT value FROM db_meta WHERE key = ?')
+    .get('snapshots_artifact_type_game_v1') as { value?: string } | undefined;
+  if (snapshotsCheckRelaxed === undefined) {
+    const sqlRow = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='design_snapshots'")
+      .get() as { sql?: string } | undefined;
+    const needsRebuild = !!sqlRow?.sql && !sqlRow.sql.includes("'game'");
+    if (needsRebuild) {
+      const rebuild = db.transaction(() => {
+        db.exec(`
+          CREATE TABLE design_snapshots_new (
+            id              TEXT PRIMARY KEY,
+            schema_version  INTEGER NOT NULL DEFAULT 1,
+            design_id       TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+            parent_id       TEXT REFERENCES design_snapshots_new(id) ON DELETE SET NULL,
+            type            TEXT NOT NULL CHECK(type IN ('initial','edit','fork')),
+            prompt          TEXT,
+            artifact_type   TEXT NOT NULL CHECK(artifact_type IN ('html','react','svg','game')),
+            artifact_source TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            message         TEXT,
+            engine          TEXT,
+            engine_version  TEXT
+          );
+          INSERT INTO design_snapshots_new
+            SELECT id, schema_version, design_id, parent_id, type, prompt,
+                   artifact_type, artifact_source, created_at, message,
+                   engine, engine_version
+              FROM design_snapshots;
+          DROP TABLE design_snapshots;
+          ALTER TABLE design_snapshots_new RENAME TO design_snapshots;
+          CREATE INDEX IF NOT EXISTS idx_snapshots_design_created
+            ON design_snapshots(design_id, created_at DESC);
+        `);
+      });
+      rebuild();
+    }
+    db.prepare('INSERT INTO db_meta (key, value) VALUES (?, ?)').run(
+      'snapshots_artifact_type_game_v1',
+      new Date().toISOString(),
+    );
+  }
+
+  // design_snapshot_files: snapshot of the multi-file game project bundle so
+  // restore can recover the whole tree, not just one HTML blob. Same shape
+  // proposed by the prior opengameplan; reused for all four engines.
+  const snapshotFilesV1 = db
+    .prepare('SELECT value FROM db_meta WHERE key = ?')
+    .get('snapshot_files_v1') as { value?: string } | undefined;
+  if (snapshotFilesV1 === undefined) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS design_snapshot_files (
+        snapshot_id  TEXT NOT NULL REFERENCES design_snapshots(id) ON DELETE CASCADE,
+        path         TEXT NOT NULL,
+        content      TEXT NOT NULL,
+        content_type TEXT NOT NULL DEFAULT 'text/plain',
+        is_binary    INTEGER NOT NULL DEFAULT 0,
+        created_at   INTEGER NOT NULL,
+        PRIMARY KEY (snapshot_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_design_snapshot_files_snapshot
+        ON design_snapshot_files(snapshot_id);
+    `);
+    db.prepare('INSERT INTO db_meta (key, value) VALUES (?, ?)').run(
+      'snapshot_files_v1',
+      new Date().toISOString(),
+    );
+  }
 }
 
 /** Initialize and return the singleton DB instance for production use. */
@@ -431,6 +521,9 @@ interface SnapshotRow {
   artifact_source: string;
   created_at: string;
   message: string | null;
+  /** gameplan §6 — engine pin (NULL on design-mode snapshots). */
+  engine: string | null;
+  engine_version: string | null;
 }
 
 interface MessageRow {
@@ -483,6 +576,8 @@ function rowToSnapshot(row: SnapshotRow): DesignSnapshot {
     artifactSource: row.artifact_source,
     createdAt: row.created_at,
     ...(row.message !== null ? { message: row.message } : {}),
+    engine: (row.engine as DesignSnapshot['engine']) ?? null,
+    engineVersion: row.engine_version ?? null,
   };
 }
 
@@ -630,8 +725,8 @@ export function duplicateDesign(db: Database, sourceId: string, newName: string)
     const idMap = new Map<string, string>();
     const insertSnap = db.prepare(
       `INSERT INTO design_snapshots
-         (id, schema_version, design_id, parent_id, type, prompt, artifact_type, artifact_source, created_at, message)
-       VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, schema_version, design_id, parent_id, type, prompt, artifact_type, artifact_source, created_at, message, engine, engine_version)
+       VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const s of snaps) {
       const cloneId = crypto.randomUUID();
@@ -647,6 +742,8 @@ export function duplicateDesign(db: Database, sourceId: string, newName: string)
         s.artifact_source,
         s.created_at,
         s.message,
+        s.engine,
+        s.engine_version,
       );
     }
   });
@@ -664,8 +761,8 @@ export function createSnapshot(db: Database, input: SnapshotCreateInput): Design
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO design_snapshots
-       (id, schema_version, design_id, parent_id, type, prompt, artifact_type, artifact_source, created_at, message)
-     VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, schema_version, design_id, parent_id, type, prompt, artifact_type, artifact_source, created_at, message, engine, engine_version)
+     VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     input.designId,
@@ -676,6 +773,8 @@ export function createSnapshot(db: Database, input: SnapshotCreateInput): Design
     input.artifactSource,
     now,
     input.message ?? null,
+    input.engine ?? null,
+    input.engineVersion ?? null,
   );
   // Bump the parent design's updated_at so clients can sort designs by activity.
   db.prepare('UPDATE designs SET updated_at = ? WHERE id = ?').run(now, input.designId);
@@ -701,6 +800,155 @@ export function getSnapshot(db: Database, id: string): DesignSnapshot | null {
 
 export function deleteSnapshot(db: Database, id: string): void {
   db.prepare('DELETE FROM design_snapshots WHERE id = ?').run(id);
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot files (gameplan §6, A1) — multi-file project bundle copy attached
+// to a snapshot row. Lets restore() recover the full tree (Godot project,
+// Pygame package, multi-scene Three/Phaser game) instead of just one HTML
+// blob. The path-and-content shape mirrors design_files; we copy at snapshot
+// time rather than schema-relating to design_files so historical snapshots
+// stay intact even when the live design_files table is mutated.
+// ---------------------------------------------------------------------------
+
+export interface SnapshotFileRow {
+  snapshotId: string;
+  path: string;
+  content: string;
+  contentType: string;
+  isBinary: boolean;
+  createdAt: number;
+}
+
+interface SnapshotFileRowDb {
+  snapshot_id: string;
+  path: string;
+  content: string;
+  content_type: string;
+  is_binary: number;
+  created_at: number;
+}
+
+function rowToSnapshotFile(row: SnapshotFileRowDb): SnapshotFileRow {
+  return {
+    snapshotId: row.snapshot_id,
+    path: row.path,
+    content: row.content,
+    contentType: row.content_type,
+    isBinary: row.is_binary !== 0,
+    createdAt: row.created_at,
+  };
+}
+
+/** Copy every current `design_files` row for `designId` into
+ *  `design_snapshot_files` keyed by `snapshotId`. Idempotent — caller is
+ *  expected to invoke this once per `createSnapshot` call. Skips silently
+ *  when the design has no files. */
+export function snapshotDesignFiles(db: Database, snapshotId: string, designId: string): number {
+  const files = db
+    .prepare('SELECT path, content FROM design_files WHERE design_id = ?')
+    .all(designId) as Array<{ path: string; content: string }>;
+  if (files.length === 0) return 0;
+  const now = Date.now();
+  const insert = db.prepare(
+    `INSERT INTO design_snapshot_files
+       (snapshot_id, path, content, content_type, is_binary, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(snapshot_id, path) DO UPDATE SET
+       content      = excluded.content,
+       content_type = excluded.content_type,
+       is_binary    = excluded.is_binary`,
+  );
+  const tx = db.transaction(() => {
+    for (const f of files) {
+      const isBinary = f.content.startsWith('data:base64,') ? 1 : 0;
+      const contentType = contentTypeFromPath(f.path);
+      insert.run(snapshotId, f.path, f.content, contentType, isBinary, now);
+    }
+  });
+  tx();
+  return files.length;
+}
+
+export function getSnapshotFiles(db: Database, snapshotId: string): SnapshotFileRow[] {
+  return (
+    db
+      .prepare('SELECT * FROM design_snapshot_files WHERE snapshot_id = ? ORDER BY path ASC')
+      .all(snapshotId) as SnapshotFileRowDb[]
+  ).map(rowToSnapshotFile);
+}
+
+/** Replace the live `design_files` rows for `designId` with the bundle that
+ *  was captured against `snapshotId`. Used by snapshot-restore to rewind
+ *  the workspace to the state recorded against an earlier snapshot. */
+export function restoreSnapshotFiles(db: Database, designId: string, snapshotId: string): number {
+  const files = getSnapshotFiles(db, snapshotId);
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM design_files WHERE design_id = ?').run(designId);
+    if (files.length === 0) return;
+    const insert = db.prepare(
+      `INSERT INTO design_files (id, design_id, path, content, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    for (const f of files) {
+      insert.run(crypto.randomUUID(), designId, f.path, f.content, now, now);
+    }
+  });
+  tx();
+  return files.length;
+}
+
+/** Path → MIME mapping shared between snapshot capture and the
+ *  game-files:// protocol handler (Phase A2). */
+export function contentTypeFromPath(path: string): string {
+  const ext = path.includes('.') ? path.slice(path.lastIndexOf('.') + 1).toLowerCase() : '';
+  switch (ext) {
+    case 'html':
+    case 'htm':
+      return 'text/html';
+    case 'js':
+    case 'mjs':
+      return 'text/javascript';
+    case 'jsx':
+    case 'tsx':
+      return 'text/javascript';
+    case 'json':
+      return 'application/json';
+    case 'css':
+      return 'text/css';
+    case 'md':
+      return 'text/markdown';
+    case 'svg':
+      return 'image/svg+xml';
+    case 'png':
+      return 'image/png';
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'gif':
+      return 'image/gif';
+    case 'webp':
+      return 'image/webp';
+    case 'wav':
+      return 'audio/wav';
+    case 'mp3':
+      return 'audio/mpeg';
+    case 'ogg':
+      return 'audio/ogg';
+    case 'py':
+      return 'text/x-python';
+    case 'gd':
+      return 'text/x-gdscript';
+    case 'tscn':
+    case 'tres':
+    case 'import':
+    case 'godot':
+    case 'cfg':
+      return 'text/plain';
+    default:
+      return 'application/octet-stream';
+  }
 }
 
 // ---------------------------------------------------------------------------

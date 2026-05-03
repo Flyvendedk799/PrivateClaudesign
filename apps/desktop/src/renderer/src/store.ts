@@ -20,7 +20,7 @@ import type {
   ReportableError,
   SelectedElement,
 } from '@open-codesign/shared';
-import { diagnoseGenerateFailure } from '@open-codesign/shared';
+import { diagnoseGenerateFailure, looksLikeTruncatedStream } from '@open-codesign/shared';
 import { computeFingerprint } from '@open-codesign/shared/fingerprint';
 import { create } from 'zustand';
 import type { StoreApi } from 'zustand';
@@ -199,6 +199,43 @@ interface CodesignState {
    *  waiting for the turn to settle. Cleared on turn_end (the persisted
    *  chat row takes over). */
   streamingAssistantText: { designId: string; text: string } | null;
+  /** Per-turn live thinking buffer (Claude's summarized reasoning). Streams
+   *  in real-time during turn 2+ (when thinkingEnabled=true on the agent).
+   *  Reset on turn_start; cleared on thinking_end. The chat sidebar shows
+   *  this as a faded "Thinking…" panel that updates live so the user can
+   *  see the model is working — without it, turns with adaptive thinking
+   *  show only a static dot animation for 30–60 s. */
+  streamingThinking: { designId: string; text: string } | null;
+  /** In-flight tool-call composition. Set when the model emits
+   *  `toolcall_start` (the LLM has begun streaming the tool args), updated
+   *  on each `toolcall_delta`, cleared when the runtime fires the real
+   *  `tool_call_start` (full args ready, tool about to execute). Bridges
+   *  the 1–3 s gap between thinking ending and the tool card appearing —
+   *  the gap previously read as "the run stalled". The renderer shows a
+   *  "drafting" card with the tool icon + animated dots + a byte counter
+   *  hinting at the args length. */
+  streamingToolDraft: {
+    designId: string;
+    toolName: string;
+    toolCallId: string;
+    bytes: number;
+  } | null;
+  /** Wall-clock ms when the preview iframe content most recently changed
+   *  via an agent run (set on agent_end if the file delta was non-zero).
+   *  Drives the "Preview updated · 12 s ago" pill in PreviewPane and a
+   *  brief ring-pulse animation around the active iframe so a structural
+   *  rewrite is visually unmissable — without this, after a long
+   *  multi-section refactor the user sees the same hero/above-the-fold
+   *  view and assumes nothing changed. Cleared by switchDesign /
+   *  startNewDesign so each design tracks its own freshness. */
+  previewUpdatedAt: { designId: string; ts: number; bytesDelta: number } | null;
+  /** Monotonic counter used as a React `key` suffix on the active preview
+   *  iframe. Incremented by the manual "Refresh preview" button so React
+   *  unmounts and remounts the iframe — guaranteeing the document is
+   *  re-parsed from the latest srcdoc even when the underlying html
+   *  string didn't change (e.g. iframe got into a stuck state, async
+   *  resource hiccup, user wants a clean re-render). */
+  previewReloadTick: number;
   /** Live chunk progress emitted by the auto-continue IPC loop. Drives the
    *  ChatStatusHeader pill ("Chunk 2 of 5 · 1:34 elapsed"). Cleared on
    *  agent_end (any path) or when isGenerating goes false. */
@@ -234,6 +271,22 @@ interface CodesignState {
      *  AND between chunk_end and the next chunk_start. Drives the
      *  "Transitioning between chunks…" narrative. */
     chunkTransitioning: boolean;
+    /** Count of turn_start events in the current run (reset when generationId
+     *  changes). Surfaced as "· turn N" in the status header once the run
+     *  passes a threshold so long iterative runs (the 2026-04-29 trace hit
+     *  30 turns / 6m40s) stop reading as "stuck". */
+    turnCount: number;
+    /** generationId tied to the current turnCount — used to detect a fresh
+     *  run and reset the counter. */
+    turnCountGenerationId: string | null;
+    /** Cumulative count of tool_call_result events with isFailure=true in
+     *  the current run. Resets when generationId changes. The status header
+     *  surfaces "N retries this run" past a threshold (default 3) so the
+     *  user can spot a thrashing run mid-flight, not after the fact. */
+    runFailureCount: number;
+    /** generationId tied to the runFailureCount — same reset pattern as
+     *  turnCountGenerationId. */
+    runFailureGenerationId: string | null;
   } | null;
   lastUsage: UsageSnapshot | null;
   errorMessage: string | null;
@@ -290,6 +343,30 @@ interface CodesignState {
    *  prefer this over the stored rect when present. Unscaled — callers
    *  apply zoom themselves. */
   liveRects: Record<string, CommentRect>;
+
+  /** Follow-the-edit cursor anchor — driven by `tool_call_result` events
+   *  carrying `editStartLine`/`editEndLine`. The renderer pushes those line
+   *  numbers into the iframe via `HIGHLIGHT_SRC_LINE`; the iframe broadcasts
+   *  the matching DOM element's rect under `liveRects['__edit_cursor__']`.
+   *  This slice tracks the cursor's overlay metadata (label + key for CSS
+   *  re-trigger), not the rect itself — read the rect from `liveRects`. */
+  editCursor: {
+    /** Bumped on each new edit so the overlay can re-trigger CSS animations
+     *  even when consecutive edits land on the same DOM element. */
+    key: number;
+    /** Short label rendered in the cursor pill, e.g. "Editing line 412". */
+    toolLabel: string;
+    /** Source-line range from the agent's str_replace/insert metadata.
+     *  PreviewPane forwards these into the iframe via HIGHLIGHT_SRC_LINE so
+     *  the overlay can resolve them to a DOM element. */
+    startLine: number;
+    endLine: number;
+    /** perf.now() + 1400. The overlay component clears itself when expired
+     *  so a stalled run doesn't leave a stale halo on the preview. */
+    expiresAt: number;
+  } | null;
+  setEditCursor: (next: { toolLabel: string; startLine: number; endLine: number }) => void;
+  clearEditCursor: () => void;
 
   // Workstream G — canvas file tabs
   canvasTabs: CanvasTab[];
@@ -351,6 +428,11 @@ interface CodesignState {
      *  constraints, so the second-pass sendPrompt skips the dialog
      *  intercept (the design now has metadata). */
     skipPromptAssist?: boolean | undefined;
+    /** Internal: set when the auto-retry path re-issues a prompt that
+     *  hit a transient stream cut on its first attempt. Caps retries to 1
+     *  so a genuinely broken request can't loop forever. (B1 — see
+     *  applyGenerateError for the trigger.) */
+    _autoRetried?: boolean | undefined;
   }) => Promise<void>;
   /** Pending short-prompt submission queued behind the prompt-assist
    *  interstitial. The dialog reads this; when null, the dialog is closed.
@@ -473,6 +555,12 @@ interface CodesignState {
   appendChatMessage: (input: ChatAppendInput) => Promise<ChatMessageRow | null>;
   clearChatLocal: () => void;
   setStreamingAssistantText: (value: { designId: string; text: string } | null) => void;
+  setStreamingThinking: (value: { designId: string; text: string } | null) => void;
+  setStreamingToolDraft: (
+    value: { designId: string; toolName: string; toolCallId: string; bytes: number } | null,
+  ) => void;
+  setPreviewUpdatedAt: (value: { designId: string; ts: number; bytesDelta: number } | null) => void;
+  bumpPreviewReload: () => void;
   pushPendingToolCall: (designId: string, call: ChatToolCallPayload) => void;
   resolvePendingToolCall: (
     designId: string,
@@ -715,13 +803,17 @@ function isDefaultDesignName(name: string): boolean {
   return name === 'Untitled design' || /^Untitled design \d+$/.test(name);
 }
 
-// Core emits 'html' | 'svg' | 'slides' | 'bundle' but the snapshots schema only
-// stores 'html' | 'react' | 'svg' (see DesignSnapshotV1). 'slides'/'bundle' fold
-// into 'html' because their on-disk source is HTML — keeping the column
-// constraint stable means we don't need a schema migration to persist them.
+// Core emits 'html' | 'svg' | 'slides' | 'bundle' | 'game' (gameplan §A1)
+// but the snapshots schema only stores 'html' | 'react' | 'svg' | 'game'
+// (see DesignSnapshotV1). 'slides'/'bundle' fold into 'html' because their
+// on-disk source is HTML — keeping the column constraint stable means we
+// don't need a schema migration to persist them. 'game' carries through
+// directly so the renderer can branch the preview pipeline on it.
 // Unknown types throw so a new core ArtifactType doesn't silently round-trip
 // as the wrong renderer.
-export function toSnapshotArtifactType(coreType: string | undefined): 'html' | 'react' | 'svg' {
+export function toSnapshotArtifactType(
+  coreType: string | undefined,
+): 'html' | 'react' | 'svg' | 'game' {
   switch (coreType) {
     case undefined:
     case 'html':
@@ -732,6 +824,8 @@ export function toSnapshotArtifactType(coreType: string | undefined): 'html' | '
       return 'svg';
     case 'react':
       return 'react';
+    case 'game':
+      return 'game';
     default:
       throw new Error(`Unsupported artifact type for snapshot persistence: ${coreType}`);
   }
@@ -1132,6 +1226,10 @@ function applyGenerateError(
     currentRunIsRefinement: false,
     generatingDesignId: null,
     streamingAssistantText: null,
+    streamingThinking: null,
+    streamingToolDraft: null,
+    previewUpdatedAt: null,
+    previewReloadTick: 0,
     errorMessage: msg,
     lastError: msg,
     generationStage: 'error' as GenerationStage,
@@ -1449,6 +1547,10 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   generatingDesignId: null,
   generationStage: 'idle' as GenerationStage,
   streamingAssistantText: null,
+  streamingThinking: null,
+  streamingToolDraft: null,
+  previewUpdatedAt: null,
+  previewReloadTick: 0,
   chunkProgress: null,
   agentLiveness: null,
   pendingToolCalls: [],
@@ -1531,6 +1633,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   commentBubble: null,
   currentSnapshotId: null,
   liveRects: {},
+  editCursor: null,
 
   canvasTabs: [FILES_TAB],
   activeCanvasTab: 0,
@@ -1672,6 +1775,36 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       return;
     }
 
+    // F1: pre-flight OAuth expiry warning. The active provider's secret
+    // may be an OAuth token with a known expiresAt. If we're inside the
+    // 5-minute soft-warn window (or already past expiry), surface an
+    // info toast BEFORE the request goes out so the user has a chance to
+    // re-import or re-auth instead of losing 2-15 minutes to a 401
+    // mid-stream. Skipped on auto-retry paths (the user already saw the
+    // first attempt's warning) and when expiresAt is null (static API
+    // keys). The retry-on-truncated-stream path also skips this since
+    // the original surfaced any warning that mattered.
+    if (cfg.activeKeyExpiresAt !== null && input.silent !== true && input._autoRetried !== true) {
+      const msToExpiry = cfg.activeKeyExpiresAt - Date.now();
+      if (msToExpiry < 5 * 60 * 1000) {
+        // Past expiry: error-level. Within 5 min: info-level so the
+        // run can still proceed (the agent runtime auto-refreshes when
+        // the refresh token + clientId are available).
+        const minutesLeft = Math.max(0, Math.ceil(msToExpiry / 60_000));
+        get().pushToast({
+          variant: msToExpiry <= 0 ? 'error' : 'info',
+          title:
+            msToExpiry <= 0
+              ? tr('notifications.oauthExpiredTitle')
+              : tr('notifications.oauthExpiringTitle'),
+          description:
+            msToExpiry <= 0
+              ? tr('notifications.oauthExpiredBody')
+              : tr('notifications.oauthExpiringBody', { minutes: String(minutesLeft) }),
+        });
+      }
+    }
+
     // Prompt-assist intercept (backlog-1 #9): a sub-120-char prompt with no
     // existing per-design constraints leaves the model guessing audience /
     // device / vibe / a11y. Open the chip dialog FIRST, then let
@@ -1776,6 +1909,10 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       generatingDesignId: designIdAtStart,
       generationStage: 'sending',
       streamingAssistantText: null,
+      streamingThinking: null,
+      streamingToolDraft: null,
+      previewUpdatedAt: null,
+      previewReloadTick: 0,
       errorMessage: null,
       lastPromptInput: request,
       selectedElement: null,
@@ -1871,6 +2008,63 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         }
       }
     } catch (err) {
+      // B1: auto-retry on transient stream cut. When (1) the upstream cut
+      // mid-stream, (2) the run produced ZERO useful turns (no tool_call
+      // landed in chat for the design), and (3) we haven't already
+      // retried, re-issue the same prompt once. This makes the most-
+      // common 1-in-N "wasted run" failure mode invisible. We don't retry
+      // when ANY tool call landed because partial state would either
+      // duplicate work or stomp valid edits.
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const transient = looksLikeTruncatedStream(errMsg);
+      const designId = designIdAtStart ?? get().currentDesignId;
+      let producedToolCall = false;
+      if (designId) {
+        // Count tool_calls in chat that came AFTER the most recent user
+        // message of this run. If there are none, the run was 0-progress.
+        const msgs = get().chatMessages.filter((m) => m.designId === designId);
+        for (let i = msgs.length - 1; i >= 0; i -= 1) {
+          const m = msgs[i];
+          if (!m) continue;
+          if (m.kind === 'user') break;
+          if (m.kind === 'tool_call') {
+            producedToolCall = true;
+            break;
+          }
+        }
+      }
+      const canAutoRetry = transient && !producedToolCall && input._autoRetried !== true;
+      if (canAutoRetry) {
+        // Surface the retry attempt as a low-key info toast so the user
+        // sees what's happening but doesn't get a scary error first.
+        get().pushToast({
+          variant: 'info',
+          title: tr('notifications.transientRetryTitle'),
+          description: tr('notifications.transientRetryBody'),
+        });
+        // Reset isGenerating flags so the retry can claim them.
+        set({
+          isGenerating: false,
+          generatingDesignId: null,
+          generationStage: 'idle' as GenerationStage,
+          activeGenerationId: null,
+        });
+        try {
+          await get().sendPrompt({
+            ...input,
+            _autoRetried: true,
+            // Suppress the chat user-bubble on retry — the original is
+            // already visible. Same intent as the polish path.
+            silent: true,
+          });
+          return;
+        } catch (retryErr) {
+          // Fall through to the normal error path with the retry's error
+          // (more accurate than re-surfacing the original).
+          applyGenerateError(get, set, generationId, retryErr, designIdAtStart);
+          return;
+        }
+      }
       applyGenerateError(get, set, generationId, err, designIdAtStart);
     }
   },
@@ -1905,6 +2099,10 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           currentRunIsRefinement: false,
           generatingDesignId: null,
           streamingAssistantText: null,
+          streamingThinking: null,
+          streamingToolDraft: null,
+          previewUpdatedAt: null,
+          previewReloadTick: 0,
           generationStage: 'idle' as GenerationStage,
         }));
       })
@@ -2165,6 +2363,29 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     const snapshotId = state.currentSnapshotId;
     if (designId === null || snapshotId === null) return;
     set({ skillExtractDraft: { rect, designId, snapshotId } });
+  },
+
+  setEditCursor({ toolLabel, startLine, endLine }) {
+    const prev = get().editCursor;
+    // Bumping `key` (rather than reusing the previous one) is what makes the
+    // CSS appear-animation re-trigger when two consecutive edits land on the
+    // same DOM element — without it the halo would just sit motionless.
+    const nextKey = (prev?.key ?? 0) + 1;
+    set({
+      editCursor: {
+        key: nextKey,
+        toolLabel,
+        startLine,
+        endLine,
+        // 1400 ms tracks the visual fade-out window; the overlay component
+        // observes this clock and renders nothing once we're past it.
+        expiresAt: performance.now() + 1400,
+      },
+    });
+  },
+
+  clearEditCursor() {
+    if (get().editCursor !== null) set({ editCursor: null });
   },
 
   async submitSkillExtract(userPrompt) {
@@ -2742,6 +2963,22 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
 
   setStreamingAssistantText(value) {
     set({ streamingAssistantText: value });
+  },
+
+  setStreamingThinking(value) {
+    set({ streamingThinking: value });
+  },
+
+  setStreamingToolDraft(value) {
+    set({ streamingToolDraft: value });
+  },
+
+  setPreviewUpdatedAt(value) {
+    set({ previewUpdatedAt: value });
+  },
+
+  bumpPreviewReload() {
+    set((s) => ({ previewReloadTick: s.previewReloadTick + 1 }));
   },
 
   pushPendingToolCall(designId, call) {

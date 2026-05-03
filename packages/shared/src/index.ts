@@ -62,8 +62,18 @@ export const DesignParam = z.discriminatedUnion('type', [
 ]);
 export type DesignParam = z.infer<typeof DesignParam>;
 
-export const ArtifactType = z.enum(['html', 'svg', 'slides', 'bundle']);
+export const ArtifactType = z.enum(['html', 'svg', 'slides', 'bundle', 'game']);
 export type ArtifactType = z.infer<typeof ArtifactType>;
+
+/** Engine pin for game-mode designs. NULL on every design-mode artifact;
+ *  required (set via `choose_engine` tool or the New-design dialog) on game
+ *  artifacts. Adding an engine here also requires:
+ *    - matching adapter in packages/runtime/src/engines/<id>.ts
+ *    - branch in packages/core/src/tools/validate-game-scene.ts
+ *    - cell in the §3 engine matrix in docs/gameplan.md
+ */
+export const GameEngine = z.enum(['three', 'phaser', 'pygame', 'godot']);
+export type GameEngine = z.infer<typeof GameEngine>;
 
 export const Artifact = z.object({
   id: z.string(),
@@ -385,7 +395,7 @@ export type {
 export { SkillFrontmatterV1 } from './skills';
 export type { LoadedSkill } from './skills';
 
-export { diagnose, diagnoseGenerateFailure } from './diagnostics';
+export { diagnose, diagnoseGenerateFailure, looksLikeTruncatedStream } from './diagnostics';
 export type {
   DiagnosticHypothesis,
   DiagnosticFix,
