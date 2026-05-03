@@ -185,6 +185,7 @@ function toState(cfg: Config | null): OnboardingState {
       modelPrimary: null,
       baseUrl: null,
       designSystem: null,
+      activeKeyExpiresAt: null,
     };
   }
   const active = cfg.activeProvider;
@@ -196,6 +197,7 @@ function toState(cfg: Config | null): OnboardingState {
       modelPrimary: null,
       baseUrl: null,
       designSystem: cfg.designSystem ?? null,
+      activeKeyExpiresAt: null,
     };
   }
   return {
@@ -204,6 +206,11 @@ function toState(cfg: Config | null): OnboardingState {
     modelPrimary: cfg.activeModel,
     baseUrl: cfg.providers[active]?.baseUrl ?? null,
     designSystem: cfg.designSystem ?? null,
+    // F1: surface the OAuth expiry so the renderer's sendPrompt can
+    // pre-flight a warning when the token is within ~5 min of expiring.
+    // Null for static API keys (no expiry) and for OAuth refs that
+    // don't carry an expiresAt (legacy imports).
+    activeKeyExpiresAt: ref?.expiresAt ?? null,
   };
 }
 

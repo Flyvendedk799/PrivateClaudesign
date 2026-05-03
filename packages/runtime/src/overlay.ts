@@ -30,6 +30,12 @@ export const OVERLAY_SCRIPT = `(function() {
 
   var watchedSelectors = [];
   var rectsFrameHandle = 0;
+  // XPath of the element the follow-the-edit cursor is currently anchored to.
+  // Set by HIGHLIGHT_SRC_LINE; broadcast under the synthetic selector key
+  // '__edit_cursor__' alongside watchedSelectors so the parent gets free
+  // scroll/resize tracking via the existing rect-broadcast loop.
+  var cursorSelector = null;
+  var EDIT_CURSOR_KEY = '__edit_cursor__';
 
   function resolveSelector(sel) {
     if (!sel || typeof sel !== 'string') return null;
@@ -46,7 +52,6 @@ export const OVERLAY_SCRIPT = `(function() {
 
   function measureAndPostRects() {
     rectsFrameHandle = 0;
-    if (!watchedSelectors.length) return;
     var entries = [];
     for (var i = 0; i < watchedSelectors.length; i++) {
       var sel = watchedSelectors[i];
@@ -57,6 +62,19 @@ export const OVERLAY_SCRIPT = `(function() {
         selector: sel,
         rect: { top: r.top, left: r.left, width: r.width, height: r.height }
       });
+    }
+    // Follow-the-edit cursor: separate slot so the cursor is broadcast even
+    // when no watched selectors are pinned. Same rect shape as a normal entry
+    // — the parent looks it up by EDIT_CURSOR_KEY.
+    if (cursorSelector) {
+      var cursorEl = resolveSelector(cursorSelector);
+      if (cursorEl && cursorEl.getBoundingClientRect) {
+        var cr = cursorEl.getBoundingClientRect();
+        entries.push({
+          selector: EDIT_CURSOR_KEY,
+          rect: { top: cr.top, left: cr.left, width: cr.width, height: cr.height }
+        });
+      }
     }
     if (!entries.length) return;
     try {
@@ -218,6 +236,34 @@ export const OVERLAY_SCRIPT = `(function() {
       scheduleRectsBroadcast();
       return;
     }
+    if (data.type === 'HIGHLIGHT_SRC_LINE') {
+      var startLine = typeof data.startLine === 'number' ? data.startLine : null;
+      var endLine = typeof data.endLine === 'number' ? data.endLine : null;
+      if (startLine === null || endLine === null) {
+        cursorSelector = null;
+        return;
+      }
+      // Find the element with the highest data-src-line in [startLine, endLine].
+      // The Babel jsx-source plugin tags opening tags, and nested elements have
+      // higher line numbers than their parents — so "highest in range" is
+      // typically the deepest match, which is what we want (cursor on the
+      // edited button, not the wrapper section).
+      var candidates = document.querySelectorAll('[data-src-line]');
+      var best = null;
+      var bestLine = -1;
+      for (var j = 0; j < candidates.length; j++) {
+        var rawLine = candidates[j].getAttribute('data-src-line') || '';
+        var line = parseInt(rawLine, 10);
+        if (isNaN(line)) continue;
+        if (line >= startLine && line <= endLine && line > bestLine) {
+          best = candidates[j];
+          bestLine = line;
+        }
+      }
+      cursorSelector = best ? getXPath(best) : null;
+      scheduleRectsBroadcast();
+      return;
+    }
   }
   function onError(ev) {
     try {
@@ -352,6 +398,12 @@ export interface ElementRectsMessage {
  *  parent's liveRects store. Chosen generously — a design with 256 tracked
  *  pins is already beyond any realistic review session. */
 export const MAX_ELEMENT_RECTS_ENTRIES = 256;
+
+/** Synthetic selector key the iframe overlay uses for the follow-the-edit
+ *  cursor's anchor element. The key is never resolvable as a real DOM query;
+ *  it's a sentinel the parent looks up in `liveRects` to position its cursor.
+ *  Kept in the same module as the protocol so iframe + renderer can't drift. */
+export const EDIT_CURSOR_KEY = '__edit_cursor__';
 
 export function isElementRectsMessage(data: unknown): data is ElementRectsMessage {
   if (typeof data !== 'object' || data === null) return false;

@@ -18,7 +18,7 @@ function assistantWithToolCall(toolCallId: string, inputArg: string): AgentMessa
         type: 'toolCall',
         id: toolCallId,
         name: 'str_replace_based_edit_tool',
-        input: { inputArg },
+        arguments: { inputArg },
       },
     ],
   } as unknown as AgentMessage;
@@ -37,7 +37,10 @@ function assistantWithEditorCall(
         type: 'toolCall',
         id: toolCallId,
         name: 'str_replace_based_edit_tool',
-        input: { command, path },
+        // Real pi-ai shape uses `arguments`, not `input`. The pre-fix code
+        // looked at `input` — which was always undefined in production —
+        // and silently failed (see 2026-04-28 trace moix9ivu).
+        arguments: { command, path },
       },
     ],
   } as unknown as AgentMessage;
@@ -96,14 +99,14 @@ describe('buildTransformContext — size-based block compaction with recent-turn
     ];
     const out = await transform(messages);
     const a = out[1] as {
-      content: Array<{ type?: string; id?: string; input?: { inputArg?: string } }>;
+      content: Array<{ type?: string; id?: string; arguments?: { inputArg?: string } }>;
     };
     const tc = a.content.find((c) => c.type === 'toolCall');
     expect(tc?.id).toBe('call-0');
-    expect(tc?.input?.inputArg).toBe(bulk);
+    expect(tc?.arguments?.inputArg).toBe(bulk);
   });
 
-  it('summarizes a large toolCall.input for older turns outside the window', async () => {
+  it('summarizes a large toolCall.arguments for older turns outside the window', async () => {
     const transform = buildTransformContext();
     const bulk = 'a'.repeat(30_000);
     const messages: AgentMessage[] = [userMsg('build')];
@@ -119,13 +122,19 @@ describe('buildTransformContext — size-based block compaction with recent-turn
       content: Array<{
         type?: string;
         id?: string;
-        input?: { _summarized?: boolean; _origBytes?: number };
+        arguments?: {
+          __codesign_stripped?: string;
+          __codesign_original_bytes?: number;
+        };
       }>;
     };
     const tc = oldAssistant.content.find((c) => c.type === 'toolCall');
     expect(tc?.id).toBe('call-old');
-    expect(tc?.input?._summarized).toBe(true);
-    expect(tc?.input?._origBytes ?? 0).toBeGreaterThan(20_000);
+    // Directive string instead of a `_summarized: true` flag, so the model
+    // can't echo the placeholder as a fresh tool call.
+    expect(tc?.arguments?.__codesign_stripped).toMatch(/REDACTED/);
+    expect(tc?.arguments?.__codesign_stripped).toMatch(/DO NOT reproduce/);
+    expect(tc?.arguments?.__codesign_original_bytes ?? 0).toBeGreaterThan(20_000);
   });
 
   it('keeps a large toolResult verbatim inside the recent window', async () => {
@@ -276,7 +285,7 @@ describe('buildTransformContext — active-file exemption (backlog-2 #3)', () =>
               type: 'toolCall',
               id: `web-${i}`,
               name: 'read_url',
-              input: { url: 'https://example.com' },
+              arguments: { url: 'https://example.com' },
             },
           ],
         } as unknown as AgentMessage,

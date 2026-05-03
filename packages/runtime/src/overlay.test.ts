@@ -360,3 +360,174 @@ describe('OVERLAY_SCRIPT rect broadcast', () => {
     expect(entries[0]?.selector).toBe('#live');
   });
 });
+
+// ---------------------------------------------------------------------------
+// HIGHLIGHT_SRC_LINE → __edit_cursor__ rect broadcast.
+// Powers the follow-the-edit overlay in the preview iframe. The overlay
+// queries [data-src-line] elements, picks the deepest one whose line is
+// in [startLine, endLine], and broadcasts its rect under the synthetic key
+// `__edit_cursor__`. Renderer reads liveRects['__edit_cursor__'] to position
+// the halo + tool pill.
+// ---------------------------------------------------------------------------
+
+interface FakeSrcLineEl {
+  id: string;
+  tagName: string;
+  dataset: Record<string, string>;
+  parentElement: null;
+  previousElementSibling: null;
+  getAttribute: (name: string) => string | null;
+  getBoundingClientRect: () => DOMRect;
+}
+
+function makeSrcLineEl(opts: {
+  id: string;
+  line: number;
+  rect: DOMRect;
+}): FakeSrcLineEl {
+  return {
+    id: opts.id,
+    tagName: 'DIV',
+    dataset: { srcLine: String(opts.line) },
+    parentElement: null,
+    previousElementSibling: null,
+    getAttribute: (name) => (name === 'data-src-line' ? String(opts.line) : null),
+    getBoundingClientRect: () => opts.rect,
+  };
+}
+
+function runOverlayForCursor(elements: FakeSrcLineEl[]): {
+  windowListeners: Map<string, (e: unknown) => void>;
+  parent: { postMessage: (msg: unknown) => void };
+  postedToParent: Array<Record<string, unknown>>;
+  runRaf: () => void;
+} {
+  const documentListeners = new Map<string, (e: unknown) => void>();
+  const windowListeners = new Map<string, (e: unknown) => void>();
+  const posted: Array<Record<string, unknown>> = [];
+  const parent = { postMessage: (msg: unknown) => posted.push(msg as Record<string, unknown>) };
+  const fakeDocument = {
+    body: {},
+    addEventListener: (type: string, fn: (e: unknown) => void) => {
+      documentListeners.set(type, fn);
+    },
+    removeEventListener: () => {},
+    querySelector: (sel: string) => {
+      // Only `#id` selectors come through here from getXPath() resolution.
+      if (sel.startsWith('#')) {
+        const id = sel.slice(1);
+        return elements.find((el) => el.id === id) ?? null;
+      }
+      return null;
+    },
+    querySelectorAll: (sel: string) => {
+      // Used only for `[data-src-line]` discovery in HIGHLIGHT_SRC_LINE.
+      if (sel === '[data-src-line]') return elements;
+      return [];
+    },
+    evaluate: () => ({ singleNodeValue: null }),
+  };
+  let pendingRaf: (() => void) | null = null;
+  const fakeWindow = {
+    addEventListener: (type: string, fn: (e: unknown) => void) => {
+      windowListeners.set(type, fn);
+    },
+    parent,
+    requestAnimationFrame: (fn: () => void) => {
+      pendingRaf = fn;
+      return 1;
+    },
+  };
+  const fakeSetInterval = () => 1;
+  const sandbox = new Function(
+    'window',
+    'document',
+    'console',
+    'setInterval',
+    `with (window) { ${OVERLAY_SCRIPT} }`,
+  );
+  sandbox(fakeWindow, fakeDocument, { warn: () => {} }, fakeSetInterval);
+  return {
+    windowListeners,
+    parent,
+    postedToParent: posted,
+    runRaf: () => {
+      const fn = pendingRaf;
+      pendingRaf = null;
+      if (fn) fn();
+    },
+  };
+}
+
+describe('OVERLAY_SCRIPT HIGHLIGHT_SRC_LINE', () => {
+  it('picks the deepest [data-src-line] element in range and broadcasts its rect under __edit_cursor__', () => {
+    // Two elements both within the requested range; the one with the higher
+    // data-src-line is the deeper child and should win.
+    const outer = makeSrcLineEl({ id: 'outer', line: 5, rect: makeRect(0, 0, 200, 200) });
+    const inner = makeSrcLineEl({ id: 'inner', line: 8, rect: makeRect(40, 40, 60, 60) });
+    const h = runOverlayForCursor([outer, inner]);
+
+    h.windowListeners.get('message')?.({
+      source: h.parent,
+      data: { __codesign: true, type: 'HIGHLIGHT_SRC_LINE', startLine: 5, endLine: 10 },
+    });
+    h.runRaf();
+
+    const rectMsg = h.postedToParent.find((m) => m['type'] === 'ELEMENT_RECTS');
+    expect(rectMsg).toBeDefined();
+    const entries = rectMsg?.['entries'] as Array<{
+      selector: string;
+      rect: Record<string, number>;
+    }>;
+    const cursorEntry = entries.find((e) => e.selector === '__edit_cursor__');
+    expect(cursorEntry).toBeDefined();
+    // Inner element wins (higher line in range).
+    expect(cursorEntry?.rect).toMatchObject({ top: 40, left: 40, width: 60, height: 60 });
+  });
+
+  it('drops the cursor when no element falls within the requested range', () => {
+    const el = makeSrcLineEl({ id: 'a', line: 100, rect: makeRect(0, 0, 10, 10) });
+    const h = runOverlayForCursor([el]);
+
+    h.windowListeners.get('message')?.({
+      source: h.parent,
+      data: { __codesign: true, type: 'HIGHLIGHT_SRC_LINE', startLine: 5, endLine: 10 },
+    });
+    h.runRaf();
+
+    // No matching element → the broadcast contains no __edit_cursor__ entry.
+    const rectMsg = h.postedToParent.find((m) => m['type'] === 'ELEMENT_RECTS');
+    if (rectMsg !== undefined) {
+      const entries = rectMsg['entries'] as Array<{ selector: string }>;
+      expect(entries.find((e) => e.selector === '__edit_cursor__')).toBeUndefined();
+    }
+  });
+
+  it('rejects HIGHLIGHT_SRC_LINE from non-parent sources (trust boundary)', () => {
+    const el = makeSrcLineEl({ id: 'a', line: 7, rect: makeRect(0, 0, 10, 10) });
+    const h = runOverlayForCursor([el]);
+
+    // Forged source — not window.parent.
+    h.windowListeners.get('message')?.({
+      source: {},
+      data: { __codesign: true, type: 'HIGHLIGHT_SRC_LINE', startLine: 5, endLine: 10 },
+    });
+    h.runRaf();
+
+    expect(h.postedToParent).toHaveLength(0);
+  });
+
+  it('ignores malformed HIGHLIGHT_SRC_LINE (non-numeric lines)', () => {
+    const el = makeSrcLineEl({ id: 'a', line: 7, rect: makeRect(0, 0, 10, 10) });
+    const h = runOverlayForCursor([el]);
+
+    h.windowListeners.get('message')?.({
+      source: h.parent,
+      data: { __codesign: true, type: 'HIGHLIGHT_SRC_LINE', startLine: 'oops', endLine: 10 },
+    });
+    h.runRaf();
+
+    // Treated as no-op — cursor cleared, no broadcast posted (no watched selectors either).
+    expect(h.postedToParent).toHaveLength(0);
+  });
+});

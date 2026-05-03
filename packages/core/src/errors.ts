@@ -15,7 +15,7 @@
  * layer logs them with `reason`.
  */
 
-import { looksLikeGatewayMissingMessagesApi } from '@open-codesign/providers';
+import { extractHttpStatus, looksLikeGatewayMissingMessagesApi } from '@open-codesign/providers';
 import type { ProviderId, WireApi } from '@open-codesign/shared';
 import { CodesignError, ERROR_CODES } from '@open-codesign/shared';
 
@@ -36,25 +36,10 @@ const EXTRA_KEY_HELP_URL: Record<string, string> = {
 const OPENAI_URL_PATTERN = /https?:\/\/(?:platform\.openai\.com|openai\.com)\/[^\s)<>"']*/gi;
 const GENERIC_HINT = "Check your provider's API key settings.";
 
-function statusFromError(err: unknown): number | undefined {
-  if (typeof err !== 'object' || err === null) return undefined;
-  const candidates = [
-    (err as { status?: unknown }).status,
-    (err as { statusCode?: unknown }).statusCode,
-    (err as { response?: { status?: unknown } }).response?.status,
-  ];
-  for (const c of candidates) {
-    if (typeof c === 'number' && Number.isFinite(c)) return c;
-  }
-  if (err instanceof Error) {
-    const m = /\b(\d{3})\b/.exec(err.message);
-    if (m?.[1]) {
-      const n = Number(m[1]);
-      if (n >= 400 && n < 600) return n;
-    }
-  }
-  return undefined;
-}
+// Single source of truth for HTTP status extraction lives in
+// @open-codesign/providers. Re-aliased so call sites in this file stay
+// readable.
+const statusFromError = extractHttpStatus;
 
 function lookupKeyHelpUrl(provider: string | undefined): string | undefined {
   if (!provider) return undefined;

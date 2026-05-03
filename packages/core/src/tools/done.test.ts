@@ -180,31 +180,32 @@ describe('done tool', () => {
     expect(b1.details.status).toBe('ok'); // tool B starts fresh — own counter
   });
 
-  it('flags stray content after ReactDOM.createRoot render (JSX)', async () => {
+  // Removed 2026-04-28: the static "Unexpected content after ReactDOM..."
+  // and bracket-balance heuristics ran on the WHOLE file (HTML + JSX) and
+  // produced repeated false positives on valid artifacts — JSX text content
+  // and the trailing `</script></body></html>` confused both checks. Babel
+  // is the actual parser at runtime; real syntax errors surface via
+  // console.error in the BrowserWindow verifier. See findJsxStructuralIssues
+  // in done.ts for the rationale.
+
+  it('does NOT flag a valid JSX artifact wrapped in HTML even though the source ends with </html>', async () => {
     const fs = makeFs({
-      'index.html': `const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{}/*EDITMODE-END*/;
+      'index.html': `<!doctype html><html lang="en"><body>
+<div id="root"></div>
+<script type="text/babel">
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{}/*EDITMODE-END*/;
 function App() { return <div>Hi</div>; }
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
-| // stray pipe character that breaks Babel`,
+</script>
+</body></html>`,
     });
     const tool = makeDoneTool(fs);
-    const res = await tool.execute('id-syntax-tail', {});
-    expect(res.details.status).toBe('has_errors');
-    expect(
-      res.details.errors.some((e) => /Unexpected content after ReactDOM/.test(e.message)),
-    ).toBe(true);
-  });
-
-  it('flags unbalanced braces in JSX', async () => {
-    const fs = makeFs({
-      'index.html': `const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{}/*EDITMODE-END*/;
-function App() { return <div>Hi</div>; }}
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);`,
-    });
-    const tool = makeDoneTool(fs);
-    const res = await tool.execute('id-syntax-brace', {});
-    expect(res.details.status).toBe('has_errors');
-    expect(res.details.errors.some((e) => /Unbalanced braces/.test(e.message))).toBe(true);
+    const res = await tool.execute('id-jsx-html-wrapper', {});
+    // No "Unexpected content", no "Unbalanced parens/braces" — this is the
+    // exact shape the agent emits for the iPhone-frame template (see
+    // 2026-04-28 trace moix9ivu) which previously caused 3 retry loops.
+    expect(res.details.errors.some((e) => /Unexpected content after/.test(e.message))).toBe(false);
+    expect(res.details.errors.some((e) => /Unbalanced/.test(e.message))).toBe(false);
   });
 
   it('flags missing ReactDOM.createRoot call when content is JSX-shaped', async () => {

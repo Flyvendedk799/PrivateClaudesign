@@ -20,7 +20,7 @@ import {
   type ModelRef,
   type WireApi,
 } from '@open-codesign/shared';
-import { normalizeProviderError } from './errors';
+import { extractHttpStatus, normalizeProviderError } from './errors';
 import { looksLikeGatewayMissingMessagesApi } from './gateway-compat';
 import { type GenerateOptions, type GenerateResult, complete } from './index';
 
@@ -44,10 +44,22 @@ export interface CompleteWithRetryOptions {
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_BASE_DELAY_MS = 500;
 
+/**
+ * Status 529 = Anthropic capacity throttling. Overload windows last 5–30s, so
+ * the default 3 attempts × 500ms exponential base (≈1.5–3.5s wall-clock) gives
+ * up well before the dust settles. Bump to 5 attempts and a 1500ms minimum
+ * spacing — total wall-clock ≈ 6–24s, which catches the typical window.
+ */
+const OVERLOAD_RETRY_BUDGET = 5;
+const OVERLOAD_MIN_RETRY_AFTER_MS = 1500;
+
 export interface RetryDecision {
   retry: boolean;
   reason: string;
   retryAfterMs?: number;
+  /** Override the caller's `maxRetries` cap for this attempt. Used for
+   *  overload-class errors where a longer retry budget is warranted. */
+  retryBudget?: number;
 }
 
 const RETRYABLE_NET_CODES = new Set([
@@ -75,6 +87,20 @@ function classifyByStatus(status: number, err: unknown, wire?: WireApi): RetryDe
     // for unrelated reasons and should retry normally.
     if (wire === 'anthropic' && looksLikeGatewayMissingMessagesApi(err)) {
       return { retry: false, reason: 'gateway does not implement Messages API' };
+    }
+    if (status === 529) {
+      // Capacity throttling — give it a longer budget and floor the spacing
+      // so the 5 attempts span enough wall-clock to outlast a typical
+      // overload window. Existing Retry-After header (if any) still wins
+      // when it's longer than our floor.
+      const headerHint = extractRetryAfterMs(err);
+      const retryAfterMs = Math.max(OVERLOAD_MIN_RETRY_AFTER_MS, headerHint ?? 0);
+      return {
+        retry: true,
+        reason: `server error (${status})`,
+        retryAfterMs,
+        retryBudget: OVERLOAD_RETRY_BUDGET,
+      };
     }
     return { retry: true, reason: `server error (${status})` };
   }
@@ -108,26 +134,10 @@ export function classifyError(err: unknown, wire?: WireApi): RetryDecision {
   return { retry: false, reason: errorMessage(err) };
 }
 
-function extractStatus(err: unknown): number | undefined {
-  if (typeof err !== 'object' || err === null) return undefined;
-  const candidates = [
-    (err as { status?: unknown }).status,
-    (err as { statusCode?: unknown }).statusCode,
-    (err as { response?: { status?: unknown } }).response?.status,
-  ];
-  for (const c of candidates) {
-    if (typeof c === 'number' && Number.isFinite(c)) return c;
-  }
-  // CodesignError messages may embed the status: "HTTP 503 …"
-  if (err instanceof CodesignError) {
-    const m = /\b(\d{3})\b/.exec(err.message);
-    if (m?.[1]) {
-      const n = Number(m[1]);
-      if (n >= 400 && n < 600) return n;
-    }
-  }
-  return undefined;
-}
+// Local alias kept so this file's call sites (`extractStatus(err)`) stay
+// readable — the canonical implementation lives in errors.ts and is shared
+// with normalizeProviderError + remapProviderError.
+const extractStatus = extractHttpStatus;
 
 function extractRetryAfterMs(err: unknown): number | undefined {
   if (typeof err !== 'object' || err === null) return undefined;
@@ -220,7 +230,11 @@ function buildRetryInfo(
 }
 
 function shouldStop(decision: RetryDecision, attempt: number, maxRetries: number): boolean {
-  return !decision.retry || attempt >= maxRetries;
+  // A per-decision retryBudget overrides the caller's cap so transient classes
+  // with predictable recovery windows (529 overload) can ride a longer queue
+  // without forcing every other call to take the same hit.
+  const cap = Math.max(maxRetries, decision.retryBudget ?? 0);
+  return !decision.retry || attempt >= cap;
 }
 
 export interface BackoffOptions {
@@ -237,6 +251,33 @@ export interface BackoffOptions {
 }
 
 /**
+ * Process-wide one-shot guard for the synthetic-overload dev knob. Cleared
+ * once the synthetic error has been thrown so subsequent generations behave
+ * normally — set the env var, restart the app, run one generation to verify
+ * the retry path works end-to-end, then continue working.
+ */
+let syntheticOverloadArmed: boolean | undefined;
+
+function shouldFireSyntheticOverload(): boolean {
+  if (syntheticOverloadArmed === undefined) {
+    syntheticOverloadArmed =
+      typeof process !== 'undefined' &&
+      process.env?.['OPEN_CODESIGN_DEV_FORCE_OVERLOAD_ONCE'] === '1';
+  }
+  if (!syntheticOverloadArmed) return false;
+  syntheticOverloadArmed = false;
+  return true;
+}
+
+/**
+ * Test-only reset hook for the one-shot synthetic-overload guard. Production
+ * callers don't need this — the env-var read latches once per process.
+ */
+export function resetSyntheticOverloadForTests(): void {
+  syntheticOverloadArmed = undefined;
+}
+
+/**
  * Generic retry wrapper. `completeWithRetry` is a thin wrapper around this that
  * adds provider-error normalization + structured logging. Call this directly
  * when you need first-turn retry semantics around an arbitrary transient-prone
@@ -249,11 +290,27 @@ export async function withBackoff<T>(fn: () => Promise<T>, opts: BackoffOptions 
   const signal = opts.signal;
 
   let lastError: unknown;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  // Hard ceiling for the for-loop so a malicious/buggy classify cannot return
+  // an unbounded retryBudget and pin the loop forever. The per-decision cap
+  // is honoured up to this ceiling.
+  const ABSOLUTE_CEILING = 10;
+  for (let attempt = 1; attempt <= ABSOLUTE_CEILING; attempt++) {
     if (signal?.aborted) {
       throw new CodesignError('Generation aborted by user', ERROR_CODES.PROVIDER_ABORTED);
     }
     try {
+      // Dev-only: force a synthetic overloaded_error on the very first attempt
+      // so the retry path can be verified end-to-end without waiting for
+      // Anthropic to actually be overloaded. Gated behind an env var, fires
+      // once per process, then disarms. The body uses Anthropic's wire shape
+      // so the same parseUpstreamErrorMessage → 529 → retry classification
+      // chain is exercised.
+      if (attempt === 1 && shouldFireSyntheticOverload()) {
+        throw new CodesignError(
+          '{"type":"error","error":{"type":"overloaded_error","message":"Synthetic overload (dev knob)"},"request_id":"req_synthetic_dev"}',
+          ERROR_CODES.PROVIDER_ERROR,
+        );
+      }
       return await fn();
     } catch (err) {
       lastError = err;
@@ -266,7 +323,8 @@ export async function withBackoff<T>(fn: () => Promise<T>, opts: BackoffOptions 
         }
         throw err;
       }
-      const info = buildRetryInfo(attempt, maxRetries, decision, baseDelayMs);
+      const cap = Math.max(maxRetries, decision.retryBudget ?? 0);
+      const info = buildRetryInfo(attempt, cap, decision, baseDelayMs);
       opts.onRetry?.(info);
       await sleepWithAbort(info.delayMs, signal);
     }

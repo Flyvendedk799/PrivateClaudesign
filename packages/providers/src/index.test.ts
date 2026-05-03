@@ -598,6 +598,54 @@ describe('complete', () => {
       ),
     ).rejects.toMatchObject({ code: 'MODEL_RETURNED_ONLY_THINKING' });
   });
+
+  it('attaches inferred status to the thrown error when stream reports an Anthropic overloaded_error', async () => {
+    // pi-ai's stream consumes the HTTP response and reports failures via
+    // `stopReason: 'error'` + the raw JSON body in `errorMessage`. Recovering
+    // a numeric status from the structured error type lets the retry layer
+    // classify the failure as transient instead of failing fast.
+    getModelMock.mockReturnValue({
+      id: 'claude-sonnet-4-6',
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+    });
+    completeSimpleMock.mockImplementationOnce(async () => ({
+      role: 'assistant',
+      content: [],
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: 'error',
+      errorMessage:
+        '{"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_xyz"}',
+      timestamp: Date.now(),
+    }));
+
+    let caught: unknown;
+    try {
+      await complete(
+        { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
+        [{ role: 'user', content: 'hi' }],
+        { apiKey: 'sk-ant-test' },
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeDefined();
+    expect((caught as { status?: number }).status).toBe(529);
+    expect((caught as { code?: string }).code).toBe('PROVIDER_OVERLOADED');
+    // Friendly copy: the provider's human message + request id, not the raw
+    // JSON body the user previously saw in the error dialog.
+    expect((caught as Error).message).toBe('Overloaded (request id: req_xyz)');
+  });
 });
 
 describe('complete — openai-responses strict instructions', () => {

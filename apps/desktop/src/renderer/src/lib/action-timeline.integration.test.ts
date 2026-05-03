@@ -39,6 +39,7 @@ describe('action timeline wiring', () => {
       modelPrimary: 'claude-sonnet-4-6',
       baseUrl: null,
       designSystem: null,
+      activeKeyExpiresAt: null,
     });
     const entries = snapshotTimeline();
     expect(entries.some((e) => e.type === 'onboarding.complete')).toBe(true);

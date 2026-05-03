@@ -462,6 +462,13 @@ export interface OnboardingState {
   modelPrimary: string | null;
   baseUrl: string | null;
   designSystem: StoredDesignSystem | null;
+  /** Unix-ms expiry of the active provider's OAuth access token, when
+   *  known. Null for static API keys (which don't expire) or when the
+   *  active provider doesn't store an expiry (legacy imports).
+   *  Surfaced to the renderer so sendPrompt can do a pre-flight warning
+   *  if the token is within ~5 min of expiring — without this, runs
+   *  silently fail mid-stream when the upstream returns 401. (F1.) */
+  activeKeyExpiresAt: number | null;
 }
 
 export interface ProviderShortlist {

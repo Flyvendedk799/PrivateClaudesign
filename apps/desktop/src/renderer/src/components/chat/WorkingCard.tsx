@@ -13,7 +13,7 @@ import {
   Sparkles,
   Wrench,
 } from 'lucide-react';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { summarizeToolCall } from '../../lib/tool-narrative';
 
 export interface WorkingCardProps {
@@ -44,10 +44,28 @@ export function WorkingCard({ calls }: WorkingCardProps) {
  * before rendering one of these so the checklist sits where the agent actually
  * called the tool, not pinned to the end of the cluster.
  */
-export function InlineTodoList({ call }: { call: ChatToolCallPayload }) {
+export function InlineTodoList({
+  call,
+  isLatest = false,
+  isGenerating = false,
+}: {
+  call: ChatToolCallPayload;
+  /** Whether this is the most recent set_todos in the chat. Older lists
+   *  never get the inferred in-progress promotion (their work is done). */
+  isLatest?: boolean;
+  /** Whether the agent is currently working (an active run is in flight).
+   *  When true AND this is the latest list AND there are pending items but
+   *  no explicit in_progress, we visually promote the first pending item
+   *  so the user sees forward motion without having to wait for the agent
+   *  to call set_todos again. The model often batches todo updates at the
+   *  end of a multi-step refactor (2026-04-28 traces had 90 turns between
+   *  set_todos calls); the inference bridges the dead air. */
+  isGenerating?: boolean;
+}) {
   const todos = useMemo(() => extractTodos(call), [call]);
   if (todos.length === 0) return null;
-  return <TodoListView todos={todos} />;
+  const inferInProgress = isLatest && isGenerating;
+  return <TodoListView todos={todos} inferInProgress={inferInProgress} />;
 }
 
 interface TodoItem {
@@ -207,10 +225,46 @@ export function buildRows(calls: ChatToolCallPayload[]): ToolRow[] {
 
 /* ── Todo checklist card ────────────────────────────────────────────── */
 
-function TodoListView({ todos }: { todos: TodoItem[] }) {
+function TodoListView({
+  todos,
+  inferInProgress = false,
+}: {
+  todos: TodoItem[];
+  inferInProgress?: boolean;
+}) {
+  // Inference: if the agent hasn't marked anything in_progress and the run
+  // is active, treat the first pending item as visually in_progress so the
+  // checklist shows motion. Real agent state always wins.
+  const hasExplicitInProgress = todos.some((t) => t.status === 'in_progress');
+  const firstPendingIdx =
+    inferInProgress && !hasExplicitInProgress ? todos.findIndex((t) => t.status === 'pending') : -1;
+  const effectiveStatus = (idx: number, t: TodoItem): TodoItem['status'] =>
+    idx === firstPendingIdx ? 'in_progress' : t.status;
   const done = todos.filter((it) => it.status === 'completed').length;
   const total = todos.length;
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  // D2 — track which todos JUST flipped to completed since the last render
+  // and apply a one-shot scale+glow animation to the checkbox. The
+  // animation is purely visual feedback (the CSS class auto-removes via
+  // the keyframe's natural end). We key by index+text so ordered lists
+  // don't false-positive when an item is renamed.
+  const prevStatusRef = useRef<Map<string, TodoItem['status']>>(new Map());
+  const justChecked = useMemo(() => {
+    const out = new Set<string>();
+    const prev = prevStatusRef.current;
+    todos.forEach((t, i) => {
+      const key = `${i}::${t.text}`;
+      const before = prev.get(key);
+      if (before !== 'completed' && t.status === 'completed') out.add(key);
+    });
+    return out;
+  }, [todos]);
+  useEffect(() => {
+    const next = new Map<string, TodoItem['status']>();
+    todos.forEach((t, i) => next.set(`${i}::${t.text}`, t.status));
+    prevStatusRef.current = next;
+  }, [todos]);
 
   return (
     <div className="rounded-[var(--radius-md)] border border-[var(--color-border-muted)] bg-[var(--color-surface)] px-[var(--space-3)] py-[var(--space-2_5)] space-y-[var(--space-2)]">
@@ -232,33 +286,47 @@ function TodoListView({ todos }: { todos: TodoItem[] }) {
       </div>
       {/* Items */}
       <div className="space-y-[3px]">
-        {todos.map((todo, i) => (
-          <div
-            key={`${i}-${todo.text.slice(0, 12)}`}
-            className="flex items-start gap-[var(--space-2)] text-[12.5px] leading-[1.4]"
-          >
-            {todo.status === 'completed' ? (
-              <span className="mt-[2px] inline-flex items-center justify-center w-[14px] h-[14px] rounded-[3px] bg-[var(--color-accent)] shrink-0">
-                <Check className="w-[10px] h-[10px] text-white" strokeWidth={3} />
-              </span>
-            ) : todo.status === 'in_progress' ? (
-              <span className="mt-[2px] inline-block w-[14px] h-[14px] rounded-[3px] border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/10 shrink-0 animate-pulse" />
-            ) : (
-              <span className="mt-[2px] inline-block w-[14px] h-[14px] rounded-[3px] border border-[var(--color-border)] shrink-0" />
-            )}
-            <span
-              className={
-                todo.status === 'completed'
-                  ? 'line-through text-[var(--color-text-muted)]'
-                  : todo.status === 'in_progress'
-                    ? 'text-[var(--color-text-primary)] font-medium'
-                    : 'text-[var(--color-text-primary)]'
-              }
+        {todos.map((todo, i) => {
+          const status = effectiveStatus(i, todo);
+          return (
+            <div
+              key={`${i}-${todo.text.slice(0, 12)}`}
+              className="flex items-start gap-[var(--space-2)] text-[12.5px] leading-[1.4]"
             >
-              {todo.text}
-            </span>
-          </div>
-        ))}
+              {(() => {
+                const animateCheck = justChecked.has(`${i}::${todo.text}`);
+                if (status === 'completed') {
+                  return (
+                    <span
+                      className={`mt-[2px] inline-flex items-center justify-center w-[14px] h-[14px] rounded-[3px] bg-[var(--color-accent)] shrink-0 ${animateCheck ? 'codesign-todo-check-in' : ''}`}
+                    >
+                      <Check className="w-[10px] h-[10px] text-white" strokeWidth={3} />
+                    </span>
+                  );
+                }
+                if (status === 'in_progress') {
+                  return (
+                    <span className="mt-[2px] inline-block w-[14px] h-[14px] rounded-[3px] border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/10 shrink-0 animate-pulse" />
+                  );
+                }
+                return (
+                  <span className="mt-[2px] inline-block w-[14px] h-[14px] rounded-[3px] border border-[var(--color-border)] shrink-0" />
+                );
+              })()}
+              <span
+                className={
+                  status === 'completed'
+                    ? `line-through text-[var(--color-text-muted)] ${justChecked.has(`${i}::${todo.text}`) ? 'codesign-todo-strike-in' : ''}`
+                    : status === 'in_progress'
+                      ? 'text-[var(--color-text-primary)] font-medium'
+                      : 'text-[var(--color-text-primary)]'
+                }
+              >
+                {todo.text}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

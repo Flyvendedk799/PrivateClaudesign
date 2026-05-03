@@ -18,6 +18,7 @@ import {
   looksLikeClaudeOAuthToken,
   shouldForceClaudeCodeIdentity,
 } from './claude-code-compat';
+import { errorCodeForUpstreamType, parseUpstreamErrorMessage } from './errors';
 import { normalizeGeminiModelId } from './gemini-compat';
 
 /** Subset of pi-ai's `ThinkingLevel` we expose. Maps directly to its `reasoning`
@@ -435,10 +436,22 @@ export async function complete(
   const result = await stream.result();
 
   if (result.stopReason === 'error') {
-    throw new CodesignError(
-      result.errorMessage ?? 'Provider returned an error',
-      ERROR_CODES.PROVIDER_ERROR,
-    );
+    const rawMessage = result.errorMessage ?? 'Provider returned an error';
+    const upstream = parseUpstreamErrorMessage(rawMessage);
+    // pi-ai consumes the HTTP response and only forwards the JSON body, so the
+    // retry classifier loses the status. Recover it from the structured error
+    // type so transient classes (overloaded_error → 529, rate_limit_error →
+    // 429) actually retry instead of surfacing on the first try. Also map the
+    // provider's `error.type` to a CodesignError code so the renderer's
+    // friendly-copy lookup keys off something more precise than PROVIDER_ERROR.
+    const code =
+      upstream !== undefined ? errorCodeForUpstreamType(upstream.type) : 'PROVIDER_ERROR';
+    const message = formatUpstreamErrorMessage(rawMessage, upstream);
+    const err = new CodesignError(message, code);
+    if (upstream !== undefined) {
+      (err as { status?: number }).status = upstream.status;
+    }
+    throw err;
   }
 
   // Thinking/thought blocks are the model's internal reasoning — Anthropic
@@ -474,6 +487,21 @@ export async function complete(
     cacheCreationInputTokens: cacheWrite,
     costUsd: result.usage?.cost?.total ?? 0,
   };
+}
+
+/**
+ * Build a clean user-facing message from an upstream error. When we recognise
+ * the provider's structured shape, prefer the human-readable provider message
+ * over the raw JSON body and tack the request id on so support tickets can
+ * cross-reference. Unrecognised shapes fall back to the raw text.
+ */
+function formatUpstreamErrorMessage(
+  rawMessage: string,
+  upstream: ReturnType<typeof parseUpstreamErrorMessage>,
+): string {
+  if (upstream === undefined) return rawMessage;
+  const base = upstream.providerMessage ?? upstream.type;
+  return upstream.requestId ? `${base} (request id: ${upstream.requestId})` : base;
 }
 
 function validateCodexImageInputs(opts: GenerateOptions): void {
@@ -585,7 +613,20 @@ export {
   withClaudeCodeIdentity,
 } from './claude-code-compat';
 
-export { completeWithRetry, classifyError, sleepWithAbort, withBackoff } from './retry';
+export {
+  classifyError,
+  completeWithRetry,
+  resetSyntheticOverloadForTests,
+  sleepWithAbort,
+  withBackoff,
+} from './retry';
+export {
+  errorCodeForUpstreamType,
+  extractHttpStatus,
+  normalizeProviderError,
+  parseUpstreamErrorMessage,
+} from './errors';
+export type { NormalizedProviderError, ParsedUpstreamError } from './errors';
 export type {
   BackoffOptions,
   CompleteWithRetryOptions,

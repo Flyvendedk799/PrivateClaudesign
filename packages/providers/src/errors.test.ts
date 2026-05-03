@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { type NormalizedProviderError, normalizeProviderError } from './errors';
+import {
+  type NormalizedProviderError,
+  errorCodeForUpstreamType,
+  normalizeProviderError,
+  parseUpstreamErrorMessage,
+} from './errors';
 
 describe('normalizeProviderError', () => {
   it('extracts status, request id, and message from OpenAI-style error', () => {
@@ -103,5 +108,68 @@ describe('normalizeProviderError', () => {
       expect(result.upstream_message).not.toContain('AIzaSy0000');
       expect(result.upstream_message).not.toContain('AKIA0000');
     }
+  });
+});
+
+describe('parseUpstreamErrorMessage', () => {
+  it('maps overloaded_error to 529 and surfaces providerMessage + requestId', () => {
+    const body =
+      '{"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_011CaYWRaams9fnrKSYkZ3dN"}';
+    expect(parseUpstreamErrorMessage(body)).toEqual({
+      status: 529,
+      type: 'overloaded_error',
+      providerMessage: 'Overloaded',
+      requestId: 'req_011CaYWRaams9fnrKSYkZ3dN',
+    });
+  });
+
+  it('maps rate_limit_error to 429', () => {
+    const body = '{"type":"error","error":{"type":"rate_limit_error","message":"slow"}}';
+    expect(parseUpstreamErrorMessage(body)).toEqual({
+      status: 429,
+      type: 'rate_limit_error',
+      providerMessage: 'slow',
+      requestId: undefined,
+    });
+  });
+
+  it('maps authentication_error to 401', () => {
+    const body = '{"type":"error","error":{"type":"authentication_error","message":"bad key"}}';
+    expect(parseUpstreamErrorMessage(body)).toEqual({
+      status: 401,
+      type: 'authentication_error',
+      providerMessage: 'bad key',
+      requestId: undefined,
+    });
+  });
+
+  it('returns undefined for non-JSON messages', () => {
+    expect(parseUpstreamErrorMessage('Provider returned an error')).toBeUndefined();
+    expect(parseUpstreamErrorMessage('')).toBeUndefined();
+  });
+
+  it('returns undefined for JSON without an error.type', () => {
+    expect(parseUpstreamErrorMessage('{"foo":"bar"}')).toBeUndefined();
+    expect(parseUpstreamErrorMessage('{"error":{}}')).toBeUndefined();
+  });
+
+  it('returns undefined for unrecognised error types (so we fall back to existing rules)', () => {
+    const body = '{"type":"error","error":{"type":"some_future_error","message":"x"}}';
+    expect(parseUpstreamErrorMessage(body)).toBeUndefined();
+  });
+});
+
+describe('errorCodeForUpstreamType', () => {
+  it('maps overloaded_error to PROVIDER_OVERLOADED', () => {
+    expect(errorCodeForUpstreamType('overloaded_error')).toBe('PROVIDER_OVERLOADED');
+  });
+  it('maps rate_limit_error to PROVIDER_RATE_LIMITED', () => {
+    expect(errorCodeForUpstreamType('rate_limit_error')).toBe('PROVIDER_RATE_LIMITED');
+  });
+  it('maps authentication_error to PROVIDER_AUTH_MISSING', () => {
+    expect(errorCodeForUpstreamType('authentication_error')).toBe('PROVIDER_AUTH_MISSING');
+  });
+  it('falls back to PROVIDER_ERROR for unknown types', () => {
+    expect(errorCodeForUpstreamType('some_future_error')).toBe('PROVIDER_ERROR');
   });
 });

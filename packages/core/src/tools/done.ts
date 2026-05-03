@@ -177,80 +177,6 @@ function findJsxStructuralIssues(src: string): DoneError[] {
     });
   }
 
-  // Brace / paren / bracket balance across the whole file. String-aware so
-  // JSX string literals and template literals don't confuse the counter.
-  const counters = { '(': 0, '{': 0, '[': 0 };
-  let inStr: '"' | "'" | '`' | null = null;
-  let escaped = false;
-  let inLineComment = false;
-  let inBlockComment = false;
-  for (let i = 0; i < src.length; i += 1) {
-    const ch = src[i];
-    const next = src[i + 1];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (inLineComment) {
-      if (ch === '\n') inLineComment = false;
-      continue;
-    }
-    if (inBlockComment) {
-      if (ch === '*' && next === '/') {
-        inBlockComment = false;
-        i += 1;
-      }
-      continue;
-    }
-    if (inStr) {
-      if (ch === '\\') {
-        escaped = true;
-      } else if (ch === inStr) {
-        inStr = null;
-      }
-      continue;
-    }
-    if (ch === '/' && next === '/') {
-      inLineComment = true;
-      i += 1;
-      continue;
-    }
-    if (ch === '/' && next === '*') {
-      inBlockComment = true;
-      i += 1;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === '`') {
-      inStr = ch;
-      continue;
-    }
-    if (ch === '(' || ch === '{' || ch === '[') {
-      counters[ch] += 1;
-      continue;
-    }
-    if (ch === ')') counters['('] -= 1;
-    else if (ch === '}') counters['{'] -= 1;
-    else if (ch === ']') counters['['] -= 1;
-  }
-  if (counters['('] !== 0) {
-    issues.push({
-      message: `Unbalanced parentheses: ${counters['(']} extra '(' (negative = extra ')').`,
-      source: 'syntax',
-    });
-  }
-  if (counters['{'] !== 0) {
-    issues.push({
-      message: `Unbalanced braces: ${counters['{']} extra '{' (negative = extra '}').`,
-      source: 'syntax',
-    });
-  }
-  if (counters['['] !== 0) {
-    issues.push({
-      message: `Unbalanced brackets: ${counters['[']} extra '[' (negative = extra ']').`,
-      source: 'syntax',
-    });
-  }
-
   // Required JSX anchors — without them the runtime can't mount.
   if (!/ReactDOM\.createRoot\s*\(/.test(src)) {
     issues.push({
@@ -265,32 +191,19 @@ function findJsxStructuralIssues(src: string): DoneError[] {
     });
   }
 
-  // After the final ReactDOM.createRoot(...).render(...) call there should
-  // only be whitespace or comments. Stray tokens here are the exact failure
-  // mode that produced "Unexpected token (line:0)" in production.
-  const renderRe = /ReactDOM\.createRoot\([\s\S]*?\)\s*\.render\([\s\S]*?\)\s*;?/g;
-  let lastRender: RegExpExecArray | null = null;
-  let match = renderRe.exec(src);
-  while (match !== null) {
-    lastRender = match;
-    match = renderRe.exec(src);
-  }
-  if (lastRender) {
-    const tail = src.slice(lastRender.index + lastRender[0].length);
-    // Strip /* ... */ and // ... comments + whitespace and see what's left.
-    const stripped = tail
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/^\s*\/\/[^\n]*$/gm, '')
-      .trim();
-    if (stripped.length > 0) {
-      const lineno = src.slice(0, lastRender.index + lastRender[0].length).split('\n').length;
-      issues.push({
-        message: `Unexpected content after ReactDOM.createRoot(...).render(...): "${stripped.slice(0, 80)}${stripped.length > 80 ? '…' : ''}"`,
-        lineno,
-        source: 'syntax',
-      });
-    }
-  }
+  // Bracket balance + "no content after render" — both removed 2026-04-28.
+  // The bracket counter ran against the full HTML+JSX source; JSX tags and
+  // text content (parens/braces in prose between tags) routinely confused
+  // it into off-by-one false positives. The "unexpected content after
+  // render" check ran on the whole file too — it tripped on the normal
+  // `</script></body></html>` HTML tail. Both produced "Unbalanced
+  // parentheses" / "Unexpected content" errors that triggered the agent
+  // into 5+ redundant str_replace iterations on perfectly valid artifacts
+  // (see 2026-04-28 trace moix9ivu, 25-min run with 4 done() retries).
+  // Babel-standalone IS the parser at runtime; if there's a real syntax
+  // problem the BrowserWindow surfaces it via console.error and the
+  // runtime verifier catches it. Heuristic bracket counting on JSX
+  // without a real parser is unreliable; defer to Babel.
 
   return issues;
 }
@@ -327,6 +240,113 @@ const MAX_HAS_ERRORS_ROUNDS = 3;
  *  4th call (4 actual checks + 4 throws the model ignored). This ceiling
  *  escalates the throw message so a runaway pattern is unmistakable. */
 const MAX_TOTAL_DONE_CALLS = 6;
+
+/**
+ * Run the static + optional runtime checks on a single file and return
+ * structured errors. Pure — no state, no logging, idempotent. Shared
+ * between the terminal `done` tool (which adds acceptance / force-accept
+ * gating) and the cheaper `verify_artifact` tool (which just returns the
+ * checks for in-flight self-correction). Extracted 2026-04-28 — see
+ * Group C1.
+ */
+async function runArtifactChecks(
+  fs: TextEditorFsCallbacks,
+  runtimeVerify: DoneRuntimeVerifier | undefined,
+  path: string,
+): Promise<{ found: boolean; content?: string; errors: DoneError[] }> {
+  const file = fs.view(path);
+  if (file === null) {
+    return {
+      found: false,
+      errors: [{ message: `File not found: ${path}`, source: 'fs' }],
+    };
+  }
+  const knownFiles = new Set<string>();
+  try {
+    for (const f of fs.listDir('.')) {
+      if (f !== path) knownFiles.add(f);
+    }
+  } catch {
+    /* single-file pattern, no siblings */
+  }
+  const isJsxArtifact = isReactBabelArtifact(file.content);
+  const errors: DoneError[] = [
+    ...findJsxStructuralIssues(file.content),
+    ...(isJsxArtifact ? [] : findUnclosedTags(file.content)),
+    ...findDuplicateIds(file.content),
+    ...(isJsxArtifact ? [] : findMissingAlt(file.content)),
+    ...runHeuristics(file.content, knownFiles),
+  ];
+  if (runtimeVerify) {
+    try {
+      const runtimeErrors = await runtimeVerify(file.content);
+      errors.push(...runtimeErrors);
+    } catch (err) {
+      errors.push({
+        message: `Runtime verifier failed: ${err instanceof Error ? err.message : String(err)}`,
+        source: 'runtime',
+      });
+    }
+  }
+  return { found: true, content: file.content, errors };
+}
+
+/**
+ * verify_artifact — cheap, idempotent, in-flight check. Same lint +
+ * runtime verifier as `done` but DOES NOT consume the acceptance counter
+ * or end the run. Use this between sections so the agent can confirm
+ * everything renders before calling `done` once at the end. Without it,
+ * agents historically used `done` itself as the feedback loop, eating
+ * ~2 s per call and incrementing the force-accept counter (see 2026-04-28
+ * trace moj4w21j: 3 done calls, 35-turn fix loop after the first one).
+ */
+const VerifyParams = Type.Object({
+  path: Type.Optional(Type.String()),
+});
+
+export interface VerifyDetails {
+  status: 'ok' | 'has_errors';
+  path: string;
+  errors: DoneError[];
+}
+
+export function makeVerifyArtifactTool(
+  fs: TextEditorFsCallbacks,
+  runtimeVerify?: DoneRuntimeVerifier,
+): AgentTool<typeof VerifyParams, VerifyDetails> {
+  return {
+    name: 'verify_artifact',
+    label: 'Verify (no commit)',
+    description:
+      'Run the same lint + runtime checks as `done`, but DO NOT end the run. ' +
+      'Use this freely between sections to confirm a partial artifact still ' +
+      'renders without errors before doing the next edit. Idempotent and ' +
+      'lighter than `done` — costs ~600 ms vs ~2 s, and never increments ' +
+      "the run's acceptance counter. Returns { status, errors[] } same shape " +
+      'as `done`. Default path is "index.html". Call `done` ONCE at the very ' +
+      'end of the run when you are sure the artifact is final.',
+    parameters: VerifyParams,
+    async execute(_id, params): Promise<AgentToolResult<VerifyDetails>> {
+      const path = params.path ?? 'index.html';
+      const result = await runArtifactChecks(fs, runtimeVerify, path);
+      const fatal = result.errors.filter((e) => !ADVISORY_SOURCES.has(e.source ?? ''));
+      const status: VerifyDetails['status'] = fatal.length === 0 ? 'ok' : 'has_errors';
+      const summary =
+        status === 'ok'
+          ? result.found
+            ? `verify ok — ${result.content?.length ?? 0} bytes, no fatal issues`
+            : 'verify ok'
+          : `has_errors\n${fatal
+              .map((e) => `- ${e.message}${e.lineno ? ` (line ${e.lineno})` : ''}`)
+              .slice(0, 8)
+              .join('\n')}`;
+      return {
+        content: [{ type: 'text', text: summary }],
+        details: { status, path, errors: result.errors },
+      };
+    },
+  };
+}
 
 export function makeDoneTool(
   fs: TextEditorFsCallbacks,

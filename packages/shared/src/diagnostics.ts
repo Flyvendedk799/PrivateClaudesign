@@ -198,7 +198,7 @@ export interface GenerateFailureContext {
  *   - Everything else → generic unknown hypothesis
  */
 
-function looksLikeTruncatedStream(message: string): boolean {
+export function looksLikeTruncatedStream(message: string): boolean {
   return (
     /stream\s*(ended|closed)/i.test(message) ||
     /premature\s*close/i.test(message) ||
@@ -304,6 +304,26 @@ export function diagnoseGenerateFailure(ctx: GenerateFailureContext): Diagnostic
       provider: ctx.provider,
       baseUrl: ctx.baseUrl ?? '',
     });
+  }
+
+  // Transient stream termination — the upstream cut the SSE stream mid-
+  // response without an HTTP error code. Common during long agent runs:
+  // Anthropic's edge can drop a streaming connection on internal limits,
+  // brief rate-limit windows, or network blips between the user and the
+  // edge. Distinct from the openai-responses+custom-baseUrl relay-bug
+  // path above (which is a third-party gateway misconfiguration). The
+  // user's only correct action here is to retry; surface that explicitly
+  // instead of letting the toast show a bare "terminated" with no
+  // guidance. See 2026-04-28 trace moj4apr3 (turn 3 of an Anthropic
+  // run died with stopReason=error / message="terminated", agent state
+  // was clean, retry of the same prompt succeeded immediately).
+  if (status === undefined && looksLikeTruncatedStream(message)) {
+    return [
+      {
+        cause: 'diagnostics.cause.transientStreamCut',
+        suggestedFix: { label: 'diagnostics.fix.waitAndRetry' },
+      },
+    ];
   }
 
   return [{ cause: 'diagnostics.cause.unknown' }];

@@ -58,6 +58,15 @@ interface AgentScript {
    * behavior that flattens getApiKey throws into `errorMessage: string`).
    */
   invokeGetApiKey?: boolean;
+  /**
+   * When set, the first N prompt() calls push a stopReason='error' assistant
+   * message with `streamErrorMessage` instead of the normal success message.
+   * Mirrors pi-agent-core's behaviour of swallowing stream-level upstream
+   * failures (Anthropic 529 / 429) into the final assistant message.
+   * Subsequent calls fall through to the normal success path.
+   */
+  streamErrorTimes?: number;
+  streamErrorMessage?: string;
 }
 
 let scriptedAgent: AgentScript = { assistantText: '' };
@@ -140,6 +149,41 @@ vi.mock('@mariozechner/pi-agent-core', () => {
           this.emit({ type: 'agent_end', messages: [failMsg] });
           return;
         }
+      }
+
+      // Stream-level error simulation: pi-agent-core flattens upstream stream
+      // failures (Anthropic 529 / 429 etc.) into a final assistant message
+      // with stopReason='error' rather than throwing. Returning early here —
+      // BEFORE pushing the user message — means the only newly-added entry is
+      // the error itself, which is the exact precondition our agent.ts code
+      // requires to lift the error into a retryable throw.
+      if (
+        scriptedAgent.streamErrorTimes !== undefined &&
+        this.call.prompts.length <= scriptedAgent.streamErrorTimes
+      ) {
+        const errorMsg: AgentMessage = {
+          role: 'assistant',
+          // biome-ignore lint/suspicious/noExplicitAny: same as below.
+          api: 'anthropic-messages' as any,
+          // biome-ignore lint/suspicious/noExplicitAny: same.
+          provider: 'anthropic' as any,
+          model: 'mock-model',
+          content: [],
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: 'error',
+          errorMessage: scriptedAgent.streamErrorMessage ?? 'stream error',
+          timestamp: Date.now(),
+        };
+        this.state.messages.push(errorMsg);
+        this.emit({ type: 'agent_end', messages: [errorMsg] });
+        return;
       }
 
       this.emit({ type: 'agent_start' });
@@ -643,6 +687,84 @@ describe('generateViaAgent() — first-turn retry', () => {
         apiKey: 'sk-test',
       }),
     ).rejects.toBeTruthy();
+    expect(agentCalls[0]?.prompts.length).toBe(1);
+  });
+
+  it('lifts a stream-level overloaded_error into a retryable throw and succeeds on the second attempt', async () => {
+    // pi-agent-core flattens upstream stream errors into a stopReason='error'
+    // assistant message instead of throwing. Without lifting, withBackoff
+    // never sees the failure and the user gets a one-shot 529 in the dialog.
+    vi.useFakeTimers();
+    try {
+      scriptedAgent = {
+        assistantText: RESPONSE_WITH_ARTIFACT,
+        streamErrorTimes: 1,
+        streamErrorMessage:
+          '{"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_xyz"}',
+      };
+      const onRetry = vi.fn();
+      const promise = generateViaAgent(
+        {
+          prompt: 'design a meditation app',
+          history: [],
+          model: MODEL,
+          apiKey: 'sk-test',
+        },
+        { onRetry },
+      );
+      await vi.runAllTimersAsync();
+      const result = await promise;
+      expect(result.artifacts).toHaveLength(1);
+      expect(agentCalls[0]?.prompts.length).toBe(2);
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(onRetry.mock.calls[0]?.[0].reason).toMatch(/server error \(529\)/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lifts a stream-level rate_limit_error into a retryable throw', async () => {
+    vi.useFakeTimers();
+    try {
+      scriptedAgent = {
+        assistantText: RESPONSE_WITH_ARTIFACT,
+        streamErrorTimes: 1,
+        streamErrorMessage: '{"type":"error","error":{"type":"rate_limit_error","message":"slow"}}',
+      };
+      const onRetry = vi.fn();
+      const promise = generateViaAgent(
+        {
+          prompt: 'design a dashboard',
+          history: [],
+          model: MODEL,
+          apiKey: 'sk-test',
+        },
+        { onRetry },
+      );
+      await vi.runAllTimersAsync();
+      await promise;
+      expect(agentCalls[0]?.prompts.length).toBe(2);
+      expect(onRetry.mock.calls[0]?.[0].reason).toMatch(/rate-limited \(429\)/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry a stream-level authentication_error (4xx)', async () => {
+    scriptedAgent = {
+      assistantText: '',
+      streamErrorTimes: 5,
+      streamErrorMessage:
+        '{"type":"error","error":{"type":"authentication_error","message":"bad key"}}',
+    };
+    await expect(
+      generateViaAgent({
+        prompt: 'design a dashboard',
+        history: [],
+        model: MODEL,
+        apiKey: 'sk-test',
+      }),
+    ).rejects.toMatchObject({ code: 'PROVIDER_AUTH_MISSING' });
     expect(agentCalls[0]?.prompts.length).toBe(1);
   });
 

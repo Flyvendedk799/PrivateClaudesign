@@ -175,6 +175,36 @@ describe('createRuntimeTextEditorFs', () => {
     }
   });
 
+  it('strips view line-number prefix from old_str on miss and retries (recovery path)', async () => {
+    // Reproduces the 2026-04-28 trace where the agent copy-pasted view
+    // output verbatim into old_str — including the `   142  ` line prefix
+    // that view prepends — and got a string of "old_str not found" errors
+    // it described as "JSX encoding issues". The fs now strips the prefix
+    // and retries before failing.
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'PrefixRecovery');
+    const sendEvent = vi.fn();
+    const logger = { error: vi.fn() };
+    const { fs } = createRuntimeTextEditorFs({
+      db,
+      designId: design.id,
+      generationId: 'gen-prefix-recovery',
+      logger,
+      previousHtml: null,
+      sendEvent,
+    });
+
+    const file = '<main>\n  <h1>Welcome</h1>\n  <p>Hi</p>\n</main>\n';
+    await fs.create('index.html', file);
+    // Simulating what a model copy-pastes from view's output:
+    // `   2    <h1>Welcome</h1>` (4-padded line number + two spaces).
+    const prefixed = '   2    <h1>Welcome</h1>';
+    await fs.strReplace('index.html', prefixed, '  <h1>Updated</h1>');
+    expect(viewDesignFile(db, design.id, 'index.html')?.content).toBe(
+      '<main>\n  <h1>Updated</h1>\n  <p>Hi</p>\n</main>\n',
+    );
+  });
+
   it('updates db and disk for fs.strReplace in a bound workspace', async () => {
     const db = initInMemoryDb();
     const design = createDesign(db, 'Workspace');

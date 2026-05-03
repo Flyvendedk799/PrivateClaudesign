@@ -90,4 +90,24 @@ ReactDOM.createRoot(document.getElementById("root")).render(<App/>);`;
     const wrappedTwice = buildSrcdoc(wrapped);
     expect(wrappedTwice).toBe(wrapped);
   });
+
+  it('enables the transform-react-jsx-source plugin on the agent script', () => {
+    // Plugin is required so React.createElement calls receive __source props
+    // with line numbers — input to the data-src-line tagger that powers the
+    // follow-the-edit cursor.
+    const out = buildSrcdoc(jsxArtifact);
+    expect(out).toContain('data-plugins="transform-react-jsx-source"');
+  });
+
+  it('injects the data-src-line tagger before the agent script (ordering matters)', () => {
+    // The tagger patches React.createElement; if the agent's text/babel
+    // script were transpiled and run first, the patch wouldn't see the
+    // initial render's createElement calls. Order: tagger → babel → agent.
+    const out = buildSrcdoc(jsxArtifact);
+    const taggerIdx = out.indexOf('__codesignSrcLineWrapped');
+    const agentScriptIdx = out.indexOf('AGENT_BODY_BEGIN');
+    expect(taggerIdx).toBeGreaterThan(0);
+    expect(agentScriptIdx).toBeGreaterThan(0);
+    expect(taggerIdx).toBeLessThan(agentScriptIdx);
+  });
 });

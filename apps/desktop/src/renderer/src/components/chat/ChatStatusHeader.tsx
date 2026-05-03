@@ -135,6 +135,16 @@ export function ChatStatusHeader() {
   // has the prior context.
   const noEventsYet = lastEventAt === null;
 
+  // D3 — when no specific tool is running yet, show the active todo label
+  // in the activity line so the user always sees what step the run is on.
+  // The agent often goes 5-30 s between tool calls (LLM round-trip) and
+  // the prior copy ("Waiting for model first token…") didn't tell the
+  // user *which step* — useful because the agent's published checklist
+  // is the source of truth for "what's being attempted right now".
+  const activeTodoIdx = todos.findIndex((it) => !it.done);
+  const activeTodoLabel =
+    activeTodoIdx >= 0 ? truncateLabel(todos[activeTodoIdx]?.text ?? '') : null;
+
   let activity: string;
   if (transitioning && isChunked) {
     activity = `Transitioning to chunk ${chunkProgress.chunkIndex}…`;
@@ -144,14 +154,18 @@ export function ChatStatusHeader() {
     activity = 'Streaming response…';
   } else if (lastTurnStartAt !== null && now - lastTurnStartAt < 30_000) {
     const sinceTurn = Math.floor((now - lastTurnStartAt) / 1000);
-    activity = `Waiting for model first token… (${sinceTurn}s)`;
+    activity = activeTodoLabel
+      ? `Working on: ${activeTodoLabel} · ${sinceTurn}s`
+      : `Waiting for model first token… (${sinceTurn}s)`;
   } else if (lastEventAt !== null) {
     const sinceEvent = Math.floor((now - lastEventAt) / 1000);
-    activity = `Quiet for ${sinceEvent}s — model still composing…`;
+    activity = activeTodoLabel
+      ? `Working on: ${activeTodoLabel} · quiet ${sinceEvent}s`
+      : `Quiet for ${sinceEvent}s — model still composing…`;
   } else if (isRefinement && noEventsYet) {
     activity = 'Reading existing design…';
   } else {
-    activity = 'Working…';
+    activity = activeTodoLabel ? `Working on: ${activeTodoLabel}` : 'Working…';
   }
 
   // Show the spinner whenever we don't have a fresh text_delta (a stream
@@ -159,6 +173,22 @@ export function ChatStatusHeader() {
   const showSpinner = !(lastTextDeltaAt !== null && now - lastTextDeltaAt < 2_000);
 
   const doneCount = todos.filter((it) => it.done).length;
+
+  // Surface the turn count once a run is past the "definitely not stuck"
+  // threshold. The 2026-04-29 trace ran 30 turns / 6m40s; without a count
+  // the user sees "Working…" forever and assumes the run hung. Threshold
+  // chosen so short refinements don't get noisy "(turn 3)" badges.
+  const TURN_COUNT_THRESHOLD = 10;
+  const turnCount = agentLiveness?.turnCount ?? 0;
+  const showTurnCount = turnCount >= TURN_COUNT_THRESHOLD;
+
+  // Surface a per-run failure tally once the agent has retried 3+ times.
+  // Most healthy runs have 0-2 failures total; 3+ signals thrashing (cap
+  // violations, drift loops). The 2026-04-29 mokhzyr8 trace hit 9 failures
+  // in 57 turns — the user had no mid-run signal that the run was unhealthy.
+  const RUN_FAILURE_THRESHOLD = 3;
+  const runFailureCount = agentLiveness?.runFailureCount ?? 0;
+  const showRunFailures = runFailureCount >= RUN_FAILURE_THRESHOLD;
 
   return (
     <div
@@ -183,6 +213,24 @@ export function ChatStatusHeader() {
         ) : null}
         <span className="font-medium text-[var(--color-text-primary)] truncate flex-1">
           {activity}
+          {showTurnCount ? (
+            <span
+              className="ml-[var(--space-2)] font-normal text-[var(--color-text-muted)] tabular-nums"
+              aria-label={`Turn ${turnCount}`}
+              title="Number of model turns in this run"
+            >
+              · turn {turnCount}
+            </span>
+          ) : null}
+          {showRunFailures ? (
+            <span
+              className="ml-[var(--space-2)] inline-flex items-center gap-[3px] rounded-full bg-[var(--color-warning)]/15 px-[var(--space-1)] font-medium tabular-nums text-[var(--color-warning)]"
+              aria-label={`${runFailureCount} tool retries this run`}
+              title="Tools have failed and been retried this many times. High counts often indicate the agent is thrashing on cap violations or drift."
+            >
+              {runFailureCount} {runFailureCount === 1 ? 'retry' : 'retries'}
+            </span>
+          ) : null}
         </span>
         {showSpinner ? (
           <span className="flex items-center gap-[3px] shrink-0" aria-label="Agent is working">

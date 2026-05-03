@@ -1,38 +1,77 @@
 # Artifact type awareness
 
-Before any visual decision, classify the request into exactly one artifact type. The type drives layout density, section count, copy register, and which patterns are mandatory vs. forbidden. A "minimal" landing page and a "minimal" case study are not the same shape.
+Before any visual decision, classify the brief. Classification drives layout density, section count, copy register, and which patterns are mandatory vs. forbidden. A "minimal" landing page and a "minimal" case study are not the same shape.
 
-## Type taxonomy
+## Classification protocol — apply to ANY brief
 
-| Type | Cue words in the brief | Primary job |
-|---|---|---|
-| `landing` | landing, homepage, marketing site, hero, launch | Convert a stranger in 8 seconds |
-| `case_study` | case study, customer story, success story, 客户案例, one-pager about a customer | Prove the product worked, with evidence |
-| `dashboard` | dashboard, admin, console, ops, internal tool | Surface state and enable action |
-| `pricing` | pricing, plans, tiers, compare plans | Make the buyer choose a tier |
-| `slide` | slide, deck, pitch, keynote, slide deck (one slide per artifact) | Communicate one idea on one rectangle |
-| `email` | email, newsletter, transactional, drip | Read in an inbox preview pane |
-| `one_pager` | one-pager, brief, summary, fact sheet (no customer angle) | Brief a busy reader in 60 seconds |
-| `report` | report, whitepaper, study, analysis | Walk through findings with substance |
+Run these two questions before reading the type table below. The table is a reference for common shapes; the protocol is the actual rule and applies to every brief, including ones the table doesn't list (recipe site, event invitation page, course catalog, settings UI, fitness tracker, restaurant menu, gallery, lookbook, season schedule, lesson plan, podcast site, government form, ticket booking, …).
 
-If the brief blends two types (e.g. "case study landing page"), pick the one whose conversion job is primary. When unsure, prefer the more content-dense type — sparse output is the worse failure mode.
+**Q1 — Primary job.** What does the artifact need to do for the reader? Pick the closest:
+- **Convert** — turn a stranger into a buyer / signup / lead. (landing, hero, marketing, sales)
+- **Convince** — prove that something happened or is true with evidence. (case study, report, white paper, post-mortem)
+- **Showcase** — present a body of work or items so the reader can browse and judge. (portfolio, gallery, lookbook, store, menu, course catalog, recipe site)
+- **Operate** — surface live state and enable action on it. (dashboard, admin, console, ops tool, settings UI)
+- **Decide** — help the reader choose between options. (pricing, comparison, plans, feature matrix)
+- **Communicate** — deliver one specific message on a constrained format. (single slide, single email, single fact sheet)
+- **Inform** — walk the reader through a structured body of information. (recipe, lesson, FAQ, schedule, agenda, profile, event details, syllabus)
+- **Engage** — invite the reader into an experience. (event invitation, RSVP page, gameplay UI, interactive narrative)
 
-## Density floor (minimum sections per type)
+**Q2 — Subject density.** How much real content does the brief imply?
+- **Heavy** (6–8 distinct sections) — a customer story, a multi-feature product page, a long-form report, a multi-collection portfolio.
+- **Standard** (5–6 sections) — most "site" or "page" briefs: landing, portfolio, dashboard, recipe site, event page.
+- **Light** (1–2 sections) — single slide, single email, single card, single screen of a flow.
 
-The floor is the lower bound. Each section must carry real content — a title, a body or visual, and optional supporting elements. A "section" is a distinct semantic block, not a div.
+The intersection of Q1 + Q2 yields a section count and a structural skeleton. Do this BEFORE consulting the table — the table is a sanity check, not a permission list.
 
-| Type | Min sections | Required structural beats |
-|---|---|---|
-| `landing` | 5 | hero · value props (3+) · social proof · feature deep-dive · CTA |
-| `case_study` | 6 | hero with customer name + result · before/after metrics · challenge · solution · pull quote · closing CTA / contact |
-| `dashboard` | 5 | top bar with global state · KPI strip (4+ tiles) · primary chart · secondary table or list · activity / detail panel |
-| `pricing` | 4 | headline · tier grid (3 tiers minimum, with feature matrix or per-tier feature list) · FAQ or comparison · CTA |
-| `slide` | 1 | one rectangle, one idea, hierarchy across at least three type sizes |
-| `email` | 5 | preheader · headline · body with one image or accent · CTA · footer |
-| `one_pager` | 6 | hero · supporting block 1 · supporting block 2 · supporting block 3 · evidence (numbers, quote, or chart) · CTA |
-| `report` | 7 | cover · TL;DR · finding 1 · finding 2 · finding 3 · methodology · conclusion |
+## First-principles section synthesis (when no table row fits)
 
-If the design would render fewer sections than the floor, the design is wrong — add depth before shipping.
+If the brief is one the table doesn't cover, generate the structure by asking: "what would a real, polished version of this need so the reader can complete the primary job?" Examples (NOT exhaustive — apply the same quality bar to whatever brief you receive):
+
+- **Recipe site** → hero with featured recipe · recipe grid (≥6 cards: name, time, difficulty, thumbnail) · category browse · about the cook / kitchen · seasonal collection or technique deep-dive · footer
+- **Event invitation page** → hero with name + date + place · agenda or schedule · speakers / lineup · venue / travel · FAQ or details · RSVP / ticket CTA
+- **Course catalog** → hero with the program tagline · course grid (≥6 cards) · learning paths or tracks · instructor profiles · enrollment FAQ · CTA
+- **Settings UI** → top bar with account context · primary settings group (≥5 rows) · secondary settings group · destructive actions panel · save bar
+- **Game UI** → top HUD (state) · main play area · action bar · status / inventory · settings access
+- **Lesson page** → hero with lesson title + duration + level · learning objectives · lesson body (≥3 segments with examples) · practice prompt or quiz · related lessons · footer
+
+The pattern is always the same: an entry point (hero/intro), a body with the primary content (multiple parallel items or sequential blocks), supporting context (about, evidence, related), and an exit (CTA, footer, save). 5+ semantic blocks for any "page" or "site" brief — 1–2 only for genuinely single-message formats (single slide, single email).
+
+## Type table (reference for common shapes)
+
+These are the most common briefs we see. When your classification matches one of these, prefer this row's beats. When it doesn't, fall back to the protocol above.
+
+| Type | Primary job | Min sections | Required structural beats |
+|---|---|---|---|
+| `landing` | Convert | 5 | hero · value props (3+) · social proof · feature deep-dive · CTA |
+| `portfolio` | Showcase | 6 | hero / reel · selected work (≥4 project cards with title + type + year + thumbnail) · about / bio · services or capabilities (≥3) · client list / testimonial · contact / hire CTA |
+| `case_study` | Convince | 6 | hero with customer name + result · before/after metrics · challenge · solution · pull quote · closing CTA |
+| `dashboard` | Operate | 5 | top bar with global state · KPI strip (4+ tiles) · primary chart · secondary table or list · activity / detail panel |
+| `pricing` | Decide | 4 | headline · tier grid (3 tiers minimum) · FAQ or comparison · CTA |
+| `slide` | Communicate | 1 | one rectangle, one idea, hierarchy across ≥3 type sizes |
+| `email` | Communicate | 5 | preheader · headline · body with one image or accent · CTA · footer |
+| `one_pager` | Communicate | 6 | hero · 3 supporting blocks · evidence (numbers, quote, or chart) · CTA |
+| `report` | Convince | 7 | cover · TL;DR · finding 1 · finding 2 · finding 3 · methodology · conclusion |
+
+If the brief blends two rows (e.g. "case study landing page"), pick the one whose primary job is primary. When unsure, prefer the more content-dense option — sparse output is the worse failure mode.
+
+## Universal density floor (always applies)
+
+Any artifact that's "page-shaped" (rendered for a desktop / tablet / mobile viewport, scrollable, multi-section) has a hard floor of **5 distinct semantic sections** with real content. This applies whether your classification landed on a table row or you synthesized the structure from first principles.
+
+Each section must carry: a heading or label · a body (copy, list, grid, or visual) · enough specificity that the reader can act on it. A "section" is a distinct semantic block (`<section>`, `<header>`, `<footer>`, etc.), not a div.
+
+The only exemptions to the 5-section floor: `slide` (1 section), `email` (constrained format, still ≥5 if there's anywhere near room), single-card / single-screen briefs. If you're not sure whether you're exempt — you're not. Ship at the floor.
+
+## Content / effect ratio (always applies)
+
+If a single technical effect — a Three.js scene, a complex inline SVG illustration, a video background, a hero animation, a procedurally-generated graphic, a long script-tag for one feature — accounts for more than **50%** of `index.html`'s bytes, the priority is inverted. The artifact IS the structure; effects are decoration.
+
+Symptoms of inversion (any one means stop and rebalance):
+- The Three.js / animation / SVG block is longer than all the JSX/HTML structural sections combined.
+- More than half the file is one `<script>` block doing one effect.
+- The user could remove the effect and lose almost no content.
+
+If you spot the inversion mid-build, STOP, finish the missing sections with real copy, then continue. A user saying "the animation is cool but where's the [portfolio / recipe / dashboard / lesson]?" means the run failed even if `done` returned ok.
 
 ## Comparison patterns (mandatory when triggered)
 

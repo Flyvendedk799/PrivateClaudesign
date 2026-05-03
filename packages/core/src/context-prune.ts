@@ -115,11 +115,15 @@ function compactAssistant(
       return { ...block, text: stubText(text, 'prior assistant output dropped') };
     }
     if (type === 'toolCall' && toolLimit !== null) {
-      const input = block['input'];
+      // pi-ai's ToolCall uses `arguments`. Older AgentMessage flows used
+      // `input`. Read either; write to whichever field was actually
+      // populated so we don't leave a stale large copy on the other field.
+      const args = block['arguments'] ?? block['input'];
+      const fieldName = block['arguments'] !== undefined ? 'arguments' : 'input';
       let origBytes = 0;
       let preview = '';
       try {
-        const serialized = JSON.stringify(input ?? null);
+        const serialized = JSON.stringify(args ?? null);
         origBytes = serialized.length;
         preview = serialized.slice(0, 80);
       } catch {
@@ -127,9 +131,19 @@ function compactAssistant(
       }
       if (origBytes <= toolLimit) return block;
       changed = true;
+      // 2026-04-29 traces (mokhzyr8, mokivxgx) showed Sonnet 4.6 echoing the
+      // old `{ _summarized: true, _origBytes, _preview }` placeholder as a
+      // fresh tool call's arguments — validation then fails with "missing
+      // command/path". Namespaced keys + a directive string make the
+      // placeholder visibly redacted history rather than a template.
       return {
         ...block,
-        input: { _summarized: true, _origBytes: origBytes, _preview: preview },
+        [fieldName]: {
+          __codesign_stripped:
+            'PRIOR TOOL INPUT REDACTED — original was too large for the rolling context window. DO NOT reproduce this shape as a new tool call; the original arguments are gone. If you need the file state, call view() or list_files() instead.',
+          __codesign_original_bytes: origBytes,
+          __codesign_preview: preview,
+        },
       };
     }
     return block;
@@ -172,9 +186,16 @@ export function findActiveFile(messages: AgentMessage[]): string | null {
     for (const block of original.content) {
       if (block?.['type'] !== 'toolCall') continue;
       if (block['name'] !== TEXT_EDITOR_TOOL_NAME) continue;
-      const input = block['input'];
-      if (typeof input !== 'object' || input === null) continue;
-      const path = (input as Record<string, unknown>)['path'];
+      // pi-ai's ToolCall stores params on `arguments`. Older code paths used
+      // `input`; accept both so this stays robust if pi-agent-core ever
+      // normalizes back. Without this fallback, active-file pruning silently
+      // never fires (see 2026-04-28 trace moix9ivu — 5 consecutive `view`
+      // calls because aggressive pruning didn't preserve the active file).
+      const args =
+        (block['arguments'] as Record<string, unknown> | undefined) ??
+        (block['input'] as Record<string, unknown> | undefined);
+      if (typeof args !== 'object' || args === null) continue;
+      const path = args['path'];
       if (typeof path === 'string' && path.length > 0) return path;
     }
   }
@@ -203,9 +224,11 @@ export function buildActiveFileResultIds(
     for (const block of original.content) {
       if (block?.['type'] !== 'toolCall') continue;
       if (block['name'] !== TEXT_EDITOR_TOOL_NAME) continue;
-      const input = block['input'];
-      if (typeof input !== 'object' || input === null) continue;
-      const path = (input as Record<string, unknown>)['path'];
+      const args =
+        (block['arguments'] as Record<string, unknown> | undefined) ??
+        (block['input'] as Record<string, unknown> | undefined);
+      if (typeof args !== 'object' || args === null) continue;
+      const path = args['path'];
       if (path !== activeFile) continue;
       const id = block['id'];
       if (typeof id === 'string' && id.length > 0) {
