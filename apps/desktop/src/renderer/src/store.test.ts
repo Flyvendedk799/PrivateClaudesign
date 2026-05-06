@@ -1387,6 +1387,7 @@ describe('requestNewSession (in-design new conversation)', () => {
     expect(newSession).toHaveBeenCalledWith('design-1');
 
     const state = useCodesignStore.getState();
+    expect(state.currentChatSessionId).toBe(3);
     expect(state.lastUsage).toBeNull();
     expect(state.agentLiveness).toBeNull();
     expect(state.pendingToolCalls).toEqual([]);
@@ -1421,5 +1422,76 @@ describe('requestNewSession (in-design new conversation)', () => {
       variant: 'error',
       description: 'db locked',
     });
+  });
+});
+
+describe('switchChatSession', () => {
+  beforeAll(async () => {
+    await initI18n('en');
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sets the active chat session through IPC and clears per-run state', async () => {
+    const setSession = vi.fn().mockResolvedValue({ sessionId: 0 });
+    vi.stubGlobal('window', {
+      codesign: { chat: { setSession } },
+      setTimeout,
+    });
+    useCodesignStore.setState({
+      currentDesignId: 'design-1',
+      currentChatSessionId: 2,
+      isGenerating: false,
+      lastUsage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        costUsd: 0.01,
+        cachedInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      },
+      pendingToolCalls: [
+        {
+          toolName: 'foo',
+          toolCallId: 'a',
+          args: {},
+          status: 'done',
+          startedAt: '2026-05-06T00:00:00.000Z',
+          verbGroup: 'Working',
+        },
+      ],
+      streamingAssistantText: { designId: 'design-1', text: 'partial' },
+      errorMessage: 'old error',
+      toasts: [],
+    });
+
+    const result = await useCodesignStore.getState().switchChatSession(0);
+    expect(result).toBe(true);
+    expect(setSession).toHaveBeenCalledWith('design-1', 0);
+    expect(useCodesignStore.getState()).toMatchObject({
+      currentChatSessionId: 0,
+      lastUsage: null,
+      pendingToolCalls: [],
+      streamingAssistantText: null,
+      errorMessage: null,
+    });
+  });
+
+  it('does not switch while generating', async () => {
+    const setSession = vi.fn();
+    vi.stubGlobal('window', {
+      codesign: { chat: { setSession } },
+      setTimeout,
+    });
+    useCodesignStore.setState({
+      currentDesignId: 'design-1',
+      currentChatSessionId: 2,
+      isGenerating: true,
+    });
+
+    const result = await useCodesignStore.getState().switchChatSession(0);
+    expect(result).toBe(false);
+    expect(setSession).not.toHaveBeenCalled();
   });
 });

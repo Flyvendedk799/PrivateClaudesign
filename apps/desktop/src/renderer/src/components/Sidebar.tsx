@@ -1,7 +1,7 @@
 import { useT } from '@open-codesign/i18n';
 import type { DesignSnapshot, LocalInputFile, OnboardingState } from '@open-codesign/shared';
 import { summarizeSnapshotDiff } from '@open-codesign/shared';
-import { FolderOpen, Link2, MessageSquarePlus, Paperclip, X } from 'lucide-react';
+import { FolderOpen, Link2, MessageSquare, MessageSquarePlus, Paperclip, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgentStream } from '../hooks/useAgentStream';
 import { useCodesignStore } from '../store';
@@ -67,6 +67,12 @@ function ContextIcon({ icon }: { icon: ComposerContextItem['icon'] }) {
   return <FolderOpen className="w-3.5 h-3.5" aria-hidden />;
 }
 
+interface ConversationTab {
+  sessionId: number;
+  label: string;
+  title: string;
+}
+
 /**
  * Sidebar v2 — chat-style conversation pane.
  *
@@ -96,6 +102,8 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
 
   const chatMessages = useCodesignStore((s) => s.chatMessages);
   const chatLoaded = useCodesignStore((s) => s.chatLoaded);
+  const currentChatSessionId = useCodesignStore((s) => s.currentChatSessionId);
+  const switchChatSession = useCodesignStore((s) => s.switchChatSession);
   const streamingAssistantText = useCodesignStore((s) => s.streamingAssistantText);
   const streamingThinking = useCodesignStore((s) => s.streamingThinking);
   const streamingToolDraft = useCodesignStore((s) => s.streamingToolDraft);
@@ -175,6 +183,37 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
     return out;
   }, [designSnapshots]);
 
+  const conversationTabs = useMemo<ConversationTab[]>(() => {
+    const ids = new Set<number>([currentChatSessionId]);
+    for (const msg of chatMessages) ids.add(msg.sessionId ?? 0);
+    return [...ids]
+      .sort((a, b) => a - b)
+      .map((sessionId, index) => {
+        const firstUser = chatMessages.find(
+          (msg) => (msg.sessionId ?? 0) === sessionId && msg.kind === 'user',
+        );
+        const rawTitle =
+          (firstUser?.payload as { text?: string } | null | undefined)?.text?.trim() ?? '';
+        const fallback = t('chat.newSession.tabFallback', { number: String(index + 1) });
+        const title = rawTitle.length > 0 ? rawTitle : fallback;
+        return {
+          sessionId,
+          label:
+            rawTitle.length > 0
+              ? rawTitle.length > 24
+                ? `${rawTitle.slice(0, 24).trim()}...`
+                : rawTitle
+              : fallback,
+          title,
+        };
+      });
+  }, [chatMessages, currentChatSessionId, t]);
+
+  const visibleChatMessages = useMemo(
+    () => chatMessages.filter((msg) => (msg.sessionId ?? 0) === currentChatSessionId),
+    [chatMessages, currentChatSessionId],
+  );
+
   // plan0305 P3.2 — running design total ("$0.34 across 4 runs"). Re-fetched
   // when the active design changes or a generation just completed; bypassed
   // during streaming so we don't churn the renderer on every token.
@@ -206,12 +245,40 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
     >
       {/* Header — clean, no collapse */}
       <div className="h-[var(--space-3)] shrink-0" />
-      {/* In-design "new conversation" affordance — only shown when a
-          design is loaded and the chat has at least one row. Past
-          rows stay visible above a divider; the next prompt ships
-          with empty history (saves tokens / clears cache). */}
+      {/* In-design conversation tabs. A new conversation stays inside the
+          same project/design but gets its own active session pointer, so
+          follow-up prompts only see the selected tab's transcript. */}
       {currentDesignId !== null && chatMessages.length > 0 ? (
-        <div className="flex justify-end px-[var(--space-4)] pb-[var(--space-2)]">
+        <div className="flex items-center gap-[var(--space-2)] px-[var(--space-4)] pb-[var(--space-2)]">
+          <div
+            className="min-w-0 flex-1 flex items-center gap-[4px] overflow-x-auto"
+            role="tablist"
+            aria-label={t('chat.newSession.tabsAria')}
+          >
+            {conversationTabs.map((tab) => {
+              const active = tab.sessionId === currentChatSessionId;
+              return (
+                <button
+                  key={tab.sessionId}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  disabled={isGenerating}
+                  title={tab.title}
+                  onClick={() => void switchChatSession(tab.sessionId)}
+                  className={[
+                    'inline-flex max-w-[150px] shrink-0 items-center gap-[5px] rounded-[var(--radius-2)] border px-[var(--space-2)] py-[3px] text-[11.5px] transition-colors disabled:opacity-50 disabled:pointer-events-none',
+                    active
+                      ? 'border-[var(--color-accent)]/45 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]'
+                      : 'border-transparent text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-background-tertiary,_rgba(0,0,0,0.04))]',
+                  ].join(' ')}
+                >
+                  <MessageSquare className="w-[12px] h-[12px] shrink-0" aria-hidden />
+                  <span className="truncate">{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
           <button
             type="button"
             onClick={() => void requestNewSession()}
@@ -231,7 +298,7 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
         <div className="flex-1 overflow-y-auto px-[var(--space-4)] py-[var(--space-4)]">
           <ChatStatusHeader />
           <ChatMessageList
-            messages={chatMessages}
+            messages={visibleChatMessages}
             loading={!chatLoaded}
             isGenerating={isGenerating}
             pendingToolCalls={pendingToolCalls}

@@ -28,6 +28,7 @@ import {
   renameDesign,
   restoreSnapshotFiles,
   seedDesignFilesFromLatestSnapshot,
+  setDesignCurrentSession,
   setDesignPromptAssistMetadata,
   setDesignThumbnail,
   snapshotDesignFiles,
@@ -946,6 +947,27 @@ describe('chat session partitioning (in-design new conversation)', () => {
     expect(() => newChatSession(db, 'no-such-design')).toThrow();
   });
 
+  it('can switch the active session back to an earlier conversation', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'first' } });
+    newChatSession(db, d.id);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'second' } });
+
+    expect(setDesignCurrentSession(db, d.id, 0)).toBe(0);
+    expect(getDesignCurrentSession(db, d.id)).toBe(0);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'continued' } });
+
+    expect(listChatMessages(db, d.id).map((r) => r.sessionId)).toEqual([0, 1, 0]);
+    expect(setDesignCurrentSession(db, d.id, 1)).toBe(1);
+  });
+
+  it('throws when switching to a future session', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    expect(() => setDesignCurrentSession(db, d.id, 4)).toThrow();
+  });
+
   it('listChatMessages returns rows from all sessions (renderer filters per session)', () => {
     const db = makeDb();
     const d = createDesign(db);
@@ -955,6 +977,17 @@ describe('chat session partitioning (in-design new conversation)', () => {
     appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 's1-a' } });
     const all = listChatMessages(db, d.id);
     expect(all.map((r) => r.sessionId)).toEqual([0, 0, 1]);
+  });
+
+  it('newChatSession stays monotonic after continuing an older conversation', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 's0' } });
+    expect(newChatSession(db, d.id)).toBe(1);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 's1' } });
+    setDesignCurrentSession(db, d.id, 0);
+
+    expect(newChatSession(db, d.id)).toBe(2);
   });
 });
 

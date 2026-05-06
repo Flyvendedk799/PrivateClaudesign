@@ -144,6 +144,8 @@
     "newSession": {
       "label": "New conversation",
       "tooltip": "Start a fresh conversation in this design (clears LLM context — saves tokens, frees cache, keeps the preview).",
+      "tabsAria": "Project conversations",
+      "tabFallback": "Chat {{number}}",
       "previousSessionDivider": "Previous conversation",
       "blocked": {
         "title": "Generation in flight",
@@ -151,7 +153,10 @@
       },
       "success": {
         "title": "New conversation started",
-        "description": "The next prompt ships with empty history. Past messages stay visible above."
+        "description": "The next prompt ships with empty history. Past conversations stay available as tabs."
+      },
+      "switchFailed": {
+        "title": "Couldn't switch conversation"
       },
       "failed": {
         "title": "Couldn't start a new conversation",

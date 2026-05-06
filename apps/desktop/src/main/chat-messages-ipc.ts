@@ -18,6 +18,7 @@ import {
   newChatSession,
   seedChatFromSnapshots,
   seedDesignFilesFromLatestSnapshot,
+  setDesignCurrentSession,
   updateChatToolCallStatus,
 } from './snapshots-db';
 
@@ -126,6 +127,28 @@ function parseUpdateToolStatus(raw: unknown): {
   };
 }
 
+function parseSetSession(raw: unknown): { designId: string; sessionId: number } {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new CodesignError(
+      'chat:v1:set-session expects an object payload',
+      ERROR_CODES.IPC_BAD_INPUT,
+    );
+  }
+  const r = raw as Record<string, unknown>;
+  requireSchemaV1(r, 'chat:v1:set-session');
+  if (typeof r['designId'] !== 'string' || r['designId'].trim().length === 0) {
+    throw new CodesignError('designId must be a non-empty string', ERROR_CODES.IPC_BAD_INPUT);
+  }
+  if (
+    typeof r['sessionId'] !== 'number' ||
+    !Number.isInteger(r['sessionId']) ||
+    r['sessionId'] < 0
+  ) {
+    throw new CodesignError('sessionId must be a non-negative integer', ERROR_CODES.IPC_BAD_INPUT);
+  }
+  return { designId: r['designId'], sessionId: r['sessionId'] };
+}
+
 export const CHAT_MESSAGES_CHANNELS_V1 = [
   'chat:v1:list',
   'chat:v1:append',
@@ -133,6 +156,7 @@ export const CHAT_MESSAGES_CHANNELS_V1 = [
   'chat:update-tool-status:v1',
   'chat:v1:new-session',
   'chat:v1:current-session',
+  'chat:v1:set-session',
 ] as const;
 
 export function registerChatMessagesIpc(db: Database): void {
@@ -205,6 +229,24 @@ export function registerChatMessagesIpc(db: Database): void {
   ipcMain.handle('chat:v1:current-session', (_e: unknown, raw: unknown): { sessionId: number } => {
     const designId = parseDesignId(raw, 'chat:v1:current-session');
     return { sessionId: getDesignCurrentSession(db, designId) };
+  });
+
+  ipcMain.handle('chat:v1:set-session', (_e: unknown, raw: unknown): { sessionId: number } => {
+    const input = parseSetSession(raw);
+    try {
+      const sessionId = setDesignCurrentSession(db, input.designId, input.sessionId);
+      logger.info('chat.set_session', { designId: input.designId, sessionId });
+      return { sessionId };
+    } catch (err) {
+      logger.error('chat.set_session.fail', {
+        designId: input.designId,
+        sessionId: input.sessionId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      throw new CodesignError('Failed to switch chat session', ERROR_CODES.IPC_DB_ERROR, {
+        cause: err,
+      });
+    }
   });
 
   ipcMain.handle('chat:update-tool-status:v1', (_e: unknown, raw: unknown): { ok: true } => {

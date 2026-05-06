@@ -1206,7 +1206,11 @@ export function newChatSession(db: Database, designId: string): number {
     if (row === undefined) {
       throw new Error(`newChatSession: design ${designId} not found`);
     }
-    const next = (row.current_session_id ?? 0) + 1;
+    const chatRow = db
+      .prepare('SELECT MAX(session_id) AS max_session_id FROM chat_messages WHERE design_id = ?')
+      .get(designId) as { max_session_id: number | null } | undefined;
+    const maxKnown = Math.max(row.current_session_id ?? 0, chatRow?.max_session_id ?? 0);
+    const next = maxKnown + 1;
     db.prepare('UPDATE designs SET current_session_id = ?, updated_at = ? WHERE id = ?').run(
       next,
       new Date().toISOString(),
@@ -1223,6 +1227,34 @@ export function getDesignCurrentSession(db: Database, designId: string): number 
     | { current_session_id: number | null }
     | undefined;
   return row?.current_session_id ?? 0;
+}
+
+/** Move the design's active conversation pointer to an existing session. */
+export function setDesignCurrentSession(db: Database, designId: string, sessionId: number): number {
+  if (!Number.isInteger(sessionId) || sessionId < 0) {
+    throw new Error(`setDesignCurrentSession: invalid session ${sessionId}`);
+  }
+  return db.transaction((): number => {
+    const row = db.prepare('SELECT current_session_id FROM designs WHERE id = ?').get(designId) as
+      | { current_session_id: number | null }
+      | undefined;
+    if (row === undefined) {
+      throw new Error(`setDesignCurrentSession: design ${designId} not found`);
+    }
+    const chatRow = db
+      .prepare('SELECT MAX(session_id) AS max_session_id FROM chat_messages WHERE design_id = ?')
+      .get(designId) as { max_session_id: number | null } | undefined;
+    const maxKnown = Math.max(row.current_session_id ?? 0, chatRow?.max_session_id ?? 0);
+    if (sessionId > maxKnown) {
+      throw new Error(`setDesignCurrentSession: session ${sessionId} does not exist`);
+    }
+    db.prepare('UPDATE designs SET current_session_id = ?, updated_at = ? WHERE id = ?').run(
+      sessionId,
+      new Date().toISOString(),
+      designId,
+    );
+    return sessionId;
+  })();
 }
 
 /**

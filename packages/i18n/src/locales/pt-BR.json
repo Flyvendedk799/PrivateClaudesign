@@ -140,7 +140,29 @@
     "sendAnywhere": "em qualquer lugar",
     "send": "Enviar prompt",
     "stop": "Parar geração",
-    "placeholderRich": "Descreva um design… tente 'Pitch deck para uma startup fintech'"
+    "placeholderRich": "Descreva um design… tente 'Pitch deck para uma startup fintech'",
+    "newSession": {
+      "label": "Nova conversa",
+      "tooltip": "Comece uma conversa nova neste design (limpa o contexto do LLM, economiza tokens, libera cache e mantém a prévia).",
+      "tabsAria": "Conversas do projeto",
+      "tabFallback": "Chat {{number}}",
+      "previousSessionDivider": "Conversa anterior",
+      "blocked": {
+        "title": "Geração em andamento",
+        "description": "Pare ou aguarde a execução atual antes de iniciar uma nova conversa."
+      },
+      "success": {
+        "title": "Nova conversa iniciada",
+        "description": "O próximo prompt será enviado sem histórico. As conversas antigas ficam em suas abas."
+      },
+      "switchFailed": {
+        "title": "Não foi possível trocar de conversa"
+      },
+      "failed": {
+        "title": "Não foi possível iniciar uma nova conversa",
+        "description": "Tente novamente — o design não foi alterado."
+      }
+    }
   },
   "sidebar": {
     "localContext": "Contexto local",

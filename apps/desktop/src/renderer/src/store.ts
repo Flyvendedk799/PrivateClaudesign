@@ -420,6 +420,7 @@ interface CodesignState {
   // Sidebar v2 chat state
   chatMessages: ChatMessageRow[];
   chatLoaded: boolean;
+  currentChatSessionId: number;
   /** In-flight tool calls that haven't completed yet. Purely in-memory —
    *  only persisted to SQLite when the result arrives (done/error). */
   pendingToolCalls: ChatToolCallPayload[];
@@ -678,6 +679,7 @@ interface CodesignState {
   loadChatForCurrentDesign: () => Promise<void>;
   appendChatMessage: (input: ChatAppendInput) => Promise<ChatMessageRow | null>;
   clearChatLocal: () => void;
+  switchChatSession: (sessionId: number) => Promise<boolean>;
   setStreamingAssistantText: (value: { designId: string; text: string } | null) => void;
   setStreamingThinking: (value: { designId: string; text: string } | null) => void;
   setStreamingToolDraft: (
@@ -1987,6 +1989,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
 
   chatMessages: [],
   chatLoaded: false,
+  currentChatSessionId: 0,
   sidebarCollapsed: false,
 
   comments: [],
@@ -2116,9 +2119,15 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     if (!input.silent && input._autoRetried !== true && !input.skipPromptAssist) {
       const designId = get().currentDesignId;
       if (designId !== null) {
+        const currentSessionId = get().currentChatSessionId;
         const lastUserMsg = [...get().chatMessages]
           .reverse()
-          .find((m) => m.designId === designId && m.kind === 'user');
+          .find(
+            (m) =>
+              m.designId === designId &&
+              m.kind === 'user' &&
+              (m.sessionId ?? 0) === currentSessionId,
+          );
         if (lastUserMsg !== undefined) {
           const lastText = (lastUserMsg.payload as { text?: string } | null)?.text ?? '';
           const ageMs = Date.now() - new Date(lastUserMsg.createdAt).getTime();
@@ -2667,6 +2676,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         streamingToolDraft: null,
         streamingToolResults: {},
         errorMessage: null,
+        currentChatSessionId: result.sessionId,
       });
       get().pushToast({
         variant: 'info',
@@ -3043,6 +3053,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         designsViewOpen: false,
         chatMessages: [],
         chatLoaded: false,
+        currentChatSessionId: 0,
         pendingToolCalls: [],
         comments: [],
         commentsLoaded: false,
@@ -3124,6 +3135,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         designsViewOpen: false,
         chatMessages: [],
         chatLoaded: false,
+        currentChatSessionId: 0,
         pendingToolCalls: [],
         comments: [],
         commentsLoaded: false,
@@ -3186,6 +3198,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         designsViewOpen: false,
         chatMessages: [],
         chatLoaded: false,
+        currentChatSessionId: 0,
         pendingToolCalls: [],
         comments: [],
         commentsLoaded: false,
@@ -3548,17 +3561,22 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     if (!window.codesign) return;
     const designId = get().currentDesignId;
     if (!designId) {
-      set({ chatMessages: [], chatLoaded: true });
+      set({ chatMessages: [], chatLoaded: true, currentChatSessionId: 0 });
       return;
     }
     try {
       // Seed existing designs' chat history from snapshots on first open.
       await window.codesign.chat.seedFromSnapshots(designId);
-      const rows = await window.codesign.chat.list(designId);
+      const [rows, current] = await Promise.all([
+        window.codesign.chat.list(designId),
+        typeof window.codesign.chat.currentSession === 'function'
+          ? window.codesign.chat.currentSession(designId).catch(() => ({ sessionId: 0 }))
+          : Promise.resolve({ sessionId: 0 }),
+      ]);
       // Guard against a design switch happening while the IPC was in flight —
       // we'd otherwise render the previous design's chat into the new one.
       if (get().currentDesignId !== designId) return;
-      set({ chatMessages: rows, chatLoaded: true });
+      set({ chatMessages: rows, chatLoaded: true, currentChatSessionId: current.sessionId });
     } catch (err) {
       const msg = err instanceof Error ? err.message : tr('errors.unknown');
       console.warn('[open-codesign] loadChatForCurrentDesign failed:', msg);
@@ -3584,7 +3602,39 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   },
 
   clearChatLocal() {
-    set({ chatMessages: [], chatLoaded: false });
+    set({ chatMessages: [], chatLoaded: false, currentChatSessionId: 0 });
+  },
+
+  async switchChatSession(sessionId: number) {
+    if (!window.codesign) return false;
+    const designId = get().currentDesignId;
+    if (!designId || get().isGenerating) return false;
+    if (sessionId === get().currentChatSessionId) return true;
+    const setSession = window.codesign.chat.setSession;
+    if (typeof setSession !== 'function') return false;
+    try {
+      const result = await setSession(designId, sessionId);
+      set({
+        currentChatSessionId: result.sessionId,
+        agentLiveness: null,
+        lastUsage: null,
+        pendingToolCalls: [],
+        streamingAssistantText: null,
+        streamingThinking: null,
+        streamingToolDraft: null,
+        streamingToolResults: {},
+        errorMessage: null,
+      });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : tr('errors.unknown');
+      get().pushToast({
+        variant: 'error',
+        title: tr('chat.newSession.switchFailed.title'),
+        description: msg,
+      });
+      return false;
+    }
   },
 
   setStreamingAssistantText(value) {

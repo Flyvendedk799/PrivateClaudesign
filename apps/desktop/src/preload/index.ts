@@ -645,6 +645,12 @@ const api = {
         schemaVersion: 1,
         designId,
       }) as Promise<{ sessionId: number }>,
+    setSession: (designId: string, sessionId: number) =>
+      ipcRenderer.invoke('chat:v1:set-session', {
+        schemaVersion: 1,
+        designId,
+        sessionId,
+      }) as Promise<{ sessionId: number }>,
     updateToolStatus: (input: {
       designId: string;
       seq: number;

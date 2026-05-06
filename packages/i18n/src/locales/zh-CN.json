@@ -140,7 +140,29 @@
     "sendAnywhere": "任意位置发送",
     "send": "发送提示词",
     "stop": "停止生成",
-    "placeholderRich": "描述你想要的设计… 试试「AI 创业公司的落地页」"
+    "placeholderRich": "描述你想要的设计… 试试「AI 创业公司的落地页」",
+    "newSession": {
+      "label": "新对话",
+      "tooltip": "在此设计中开始一段新对话（清空 LLM 上下文，节省 token，释放缓存，并保留预览）。",
+      "tabsAria": "项目对话",
+      "tabFallback": "聊天 {{number}}",
+      "previousSessionDivider": "上一段对话",
+      "blocked": {
+        "title": "正在生成",
+        "description": "请先停止或等待当前生成完成，再开始新对话。"
+      },
+      "success": {
+        "title": "已开始新对话",
+        "description": "下一条提示词将不带历史发送。旧对话会保留在各自的标签页中。"
+      },
+      "switchFailed": {
+        "title": "无法切换对话"
+      },
+      "failed": {
+        "title": "无法开始新对话",
+        "description": "请重试，当前设计没有改变。"
+      }
+    }
   },
   "sidebar": {
     "localContext": "本地上下文",
