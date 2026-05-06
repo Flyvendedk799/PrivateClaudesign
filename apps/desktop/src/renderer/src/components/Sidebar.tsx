@@ -1,7 +1,7 @@
 import { useT } from '@open-codesign/i18n';
 import type { DesignSnapshot, LocalInputFile, OnboardingState } from '@open-codesign/shared';
 import { summarizeSnapshotDiff } from '@open-codesign/shared';
-import { FolderOpen, Link2, Paperclip, X } from 'lucide-react';
+import { FolderOpen, Link2, MessageSquarePlus, Paperclip, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgentStream } from '../hooks/useAgentStream';
 import { useCodesignStore } from '../store';
@@ -84,6 +84,7 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
   );
   const cancelGeneration = useCodesignStore((s) => s.cancelGeneration);
   const requestWrapUp = useCodesignStore((s) => s.requestWrapUp);
+  const requestNewSession = useCodesignStore((s) => s.requestNewSession);
   const inputFiles = useCodesignStore((s) => s.inputFiles);
   const referenceUrl = useCodesignStore((s) => s.referenceUrl);
   const setReferenceUrl = useCodesignStore((s) => s.setReferenceUrl);
@@ -205,6 +206,25 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
     >
       {/* Header — clean, no collapse */}
       <div className="h-[var(--space-3)] shrink-0" />
+      {/* In-design "new conversation" affordance — only shown when a
+          design is loaded and the chat has at least one row. Past
+          rows stay visible above a divider; the next prompt ships
+          with empty history (saves tokens / clears cache). */}
+      {currentDesignId !== null && chatMessages.length > 0 ? (
+        <div className="flex justify-end px-[var(--space-4)] pb-[var(--space-2)]">
+          <button
+            type="button"
+            onClick={() => void requestNewSession()}
+            disabled={isGenerating}
+            title={t('chat.newSession.tooltip')}
+            aria-label={t('chat.newSession.label')}
+            className="inline-flex items-center gap-[4px] rounded-[var(--radius-2)] px-[var(--space-2)] py-[2px] text-[var(--text-xs)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-background-tertiary,_rgba(0,0,0,0.04))] disabled:opacity-50 disabled:pointer-events-none transition-colors"
+          >
+            <MessageSquarePlus className="w-[12px] h-[12px]" aria-hidden />
+            <span>{t('chat.newSession.label')}</span>
+          </button>
+        </div>
+      ) : null}
 
       <>
         {/* Chat scroll area */}

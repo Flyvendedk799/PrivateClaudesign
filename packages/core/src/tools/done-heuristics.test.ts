@@ -361,3 +361,34 @@ describe('runHeuristics integration', () => {
     }
   });
 });
+
+describe('game artifact heuristics', () => {
+  it('suppresses round-number 100% placeholder copy for canvas HUD math', () => {
+    const src = '<style>.hp-fill { width: 100%; }</style><canvas id="game"></canvas>';
+    const r = runHeuristics(src, new Set(), { artifactType: 'game' });
+    expect(r.some((e) => e.source === 'content.placeholder' && /100%/.test(e.message))).toBe(false);
+  });
+
+  it('keeps other placeholder-content warnings for games', () => {
+    const r = runHeuristics('<canvas></canvas><p>Lorem ipsum</p>', new Set(), {
+      artifactType: 'game',
+    });
+    expect(r.some((e) => e.source === 'content.placeholder' && /Lorem/.test(e.message))).toBe(true);
+  });
+
+  it('suppresses responsive and document-outline advisories for canvas games', () => {
+    const src = '<html lang="en"><head><title>Game</title></head><body><h2>HUD</h2></body></html>';
+    const r = runHeuristics(src, new Set(), { artifactType: 'game' });
+    const sources = new Set(r.map((e) => e.source));
+    expect(sources.has('responsive.no_signals')).toBe(false);
+    expect(sources.has('a11y.heading_skip')).toBe(false);
+    expect(sources.has('a11y.no_main_landmark')).toBe(false);
+  });
+
+  it('keeps WCAG-A control failures for games with DOM controls', () => {
+    const r = runHeuristics('<button><svg /></button><canvas></canvas>', new Set(), {
+      artifactType: 'game',
+    });
+    expect(r.some((e) => e.source === 'a11y.button_no_name')).toBe(true);
+  });
+});

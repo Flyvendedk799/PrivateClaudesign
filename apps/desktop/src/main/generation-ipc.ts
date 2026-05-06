@@ -24,6 +24,30 @@ export function cancelGenerationRequest(
   logIpc.info('generate.cancelled', { id: raw });
 }
 
+/**
+ * Backlog-3 §5 — soft-cancel for checkpoint. Sets a per-generationId
+ * flag instead of aborting immediately. The agent loop's `turn_end`
+ * subscriber polls `getCheckpointHint` and triggers a clean abort at
+ * the next safe boundary (post-turn_end), so the in-flight turn's
+ * assistant message + tool results commit to chat_messages before the
+ * controller fires. Resume from chat_messages then sees a complete
+ * transcript with no half-written turns.
+ */
+export function requestCheckpointAbort(
+  raw: unknown,
+  hints: Map<string, boolean>,
+  logIpc: CancellationLogger,
+): void {
+  if (typeof raw !== 'string') {
+    throw new CodesignError(
+      'cancel-generation expects a generationId string',
+      ERROR_CODES.IPC_BAD_INPUT,
+    );
+  }
+  hints.set(raw, true);
+  logIpc.info('generate.cancel.checkpoint_requested', { id: raw });
+}
+
 export interface GenerationTimeoutLogger {
   warn: (event: string, payload: Record<string, unknown>) => void;
 }

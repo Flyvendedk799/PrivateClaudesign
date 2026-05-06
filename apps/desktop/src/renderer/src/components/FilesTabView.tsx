@@ -164,6 +164,7 @@ function formatBytes(n: number | undefined): string {
 export function FilesTabView() {
   const t = useT();
   const currentDesignId = useCodesignStore((s) => s.currentDesignId);
+  const currentDesignEngine = useCodesignStore((s) => s.currentDesignEngine);
   const previewHtml = useCodesignStore((s) => s.previewHtml);
   const openFileTab = useCodesignStore((s) => s.openCanvasFileTab);
   const interactionMode = useCodesignStore((s) => s.interactionMode);
@@ -302,7 +303,11 @@ export function FilesTabView() {
             <iframe
               ref={iframeRef}
               title={`design-preview-${selectedPath ?? ''}`}
-              sandbox="allow-scripts"
+              sandbox={
+                currentDesignEngine !== null
+                  ? 'allow-scripts allow-pointer-lock allow-fullscreen'
+                  : 'allow-scripts'
+              }
               srcDoc={srcDoc}
               onLoad={() => {
                 const win = iframeRef.current?.contentWindow;

@@ -210,6 +210,35 @@ function applySchema(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_run_usage_design ON run_usage(design_id, created_at);
 
+    -- Backlog-3 §10 — per-design / global budget caps. id='global' for
+    -- the catch-all entry; otherwise a designId. Either limit field
+    -- may be NULL to mean "no cap". alert_at_pct fires the threshold
+    -- toast when cumulative cost crosses the percentage. All
+    -- enforcement is informational; we never block a run.
+    CREATE TABLE IF NOT EXISTS budgets (
+      id                  TEXT PRIMARY KEY,
+      schema_version      INTEGER NOT NULL DEFAULT 1,
+      daily_limit_usd     REAL,
+      per_design_limit_usd REAL,
+      alert_at_pct        INTEGER NOT NULL DEFAULT 80,
+      updated_at          TEXT NOT NULL
+    );
+
+    -- Backlog-3 §10 — daily roll-up of run_usage so the cost
+    -- dashboard can render a 7-day sparkline without scanning every
+    -- run row. Date is YYYY-MM-DD in local time. Updated by
+    -- recordRunUsage at run completion via UPSERT.
+    CREATE TABLE IF NOT EXISTS daily_usage (
+      date                TEXT PRIMARY KEY,
+      schema_version      INTEGER NOT NULL DEFAULT 1,
+      cost_usd            REAL NOT NULL DEFAULT 0,
+      input_tokens        INTEGER NOT NULL DEFAULT 0,
+      output_tokens       INTEGER NOT NULL DEFAULT 0,
+      cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+      run_count           INTEGER NOT NULL DEFAULT 0,
+      updated_at          TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS user_skills (
       id                 TEXT PRIMARY KEY,
       schema_version     INTEGER NOT NULL DEFAULT 1,
@@ -281,6 +310,26 @@ function applyAdditiveMigrations(db: Database): void {
   );
   if (!chatCols.includes('schema_version')) {
     db.exec('ALTER TABLE chat_messages ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1');
+  }
+  // session_id — partitions a design's chat history into independent
+  // conversations. Bumped by `chat:v1:new-session` so the user can drop
+  // out of a long thread (memory / token / cache cost) without losing
+  // the design itself. Existing rows backfill to 0; new rows inherit
+  // the design's `current_session_id`. The history-builder filters to
+  // the current session before sending to the LLM, so prior sessions
+  // are still visible in the UI but don't pay token cost.
+  if (!chatCols.includes('session_id')) {
+    db.exec('ALTER TABLE chat_messages ADD COLUMN session_id INTEGER NOT NULL DEFAULT 0');
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_chat_design_session ON chat_messages(design_id, session_id, seq)',
+    );
+  }
+  // designs.current_session_id — the active session pointer that
+  // `appendChatMessage` stamps onto every new row. Bumped by
+  // `newChatSession`. Existing designs default to 0 so legacy rows
+  // (also session_id=0) remain visible.
+  if (!designCols.includes('current_session_id')) {
+    db.exec('ALTER TABLE designs ADD COLUMN current_session_id INTEGER NOT NULL DEFAULT 0');
   }
 
   // diagnostic_events v2 — add `context_json` (TEXT, nullable) so rows from
@@ -508,6 +557,9 @@ interface DesignRow {
    *  skipped/never saw the assist dialog. May be undefined on rows
    *  written before the additive migration backfilled the column. */
   prompt_assist_metadata: string | null | undefined;
+  /** In-design new-conversation pointer; absent on rows older than the
+   *  session_id migration. Treated as 0 for those rows. */
+  current_session_id: number | null | undefined;
 }
 
 interface SnapshotRow {
@@ -561,6 +613,10 @@ function rowToDesign(row: DesignRow): Design {
     deletedAt: row.deleted_at ?? null,
     workspacePath: row.workspace_path ?? null,
     promptAssistMetadata,
+    currentSessionId:
+      typeof row.current_session_id === 'number' && Number.isFinite(row.current_session_id)
+        ? row.current_session_id
+        : 0,
   };
 }
 
@@ -878,6 +934,30 @@ export function getSnapshotFiles(db: Database, snapshotId: string): SnapshotFile
   ).map(rowToSnapshotFile);
 }
 
+/** Boot-time / first-open seeding for multi-file designs.
+ *  Idempotent — only fires when the design has zero rows in
+ *  `design_files`. Walks the most-recent snapshot of the design and
+ *  replays its captured tree into `design_files` so the iframe (and
+ *  the Files panel) sees the full multi-file artifact even after an
+ *  app restart. Returns the number of files restored, or 0 if the
+ *  design already has files / has no snapshots / has no captured
+ *  files. Mirror of `seedChatFromSnapshots` for the file tree. */
+export function seedDesignFilesFromLatestSnapshot(db: Database, designId: string): number {
+  const existing = db
+    .prepare('SELECT COUNT(*) AS n FROM design_files WHERE design_id = ?')
+    .get(designId) as { n: number };
+  if (existing.n > 0) return 0;
+  const latest = db
+    .prepare('SELECT id FROM design_snapshots WHERE design_id = ? ORDER BY created_at DESC LIMIT 1')
+    .get(designId) as { id: string } | undefined;
+  if (latest === undefined) return 0;
+  const filesInSnapshot = db
+    .prepare('SELECT COUNT(*) AS n FROM design_snapshot_files WHERE snapshot_id = ?')
+    .get(latest.id) as { n: number };
+  if (filesInSnapshot.n === 0) return 0;
+  return restoreSnapshotFiles(db, designId, latest.id);
+}
+
 /** Replace the live `design_files` rows for `designId` with the bundle that
  *  was captured against `snapshotId`. Used by snapshot-restore to rewind
  *  the workspace to the state recorded against an earlier snapshot. */
@@ -970,6 +1050,9 @@ interface ChatMessageRowDb {
   /** May be undefined on rows written before the additive migration backfilled
    *  the column. Treated as schema 1 for those rows. */
   schema_version: number | null | undefined;
+  /** May be undefined on rows written before the session_id additive
+   *  migration. Treated as 0 for those rows. */
+  session_id: number | null | undefined;
 }
 
 /** Forward-migrate a chat_messages row read from disk to the current writer
@@ -1009,6 +1092,10 @@ function rowToChatMessage(row: ChatMessageRowDb): ChatMessageRow {
   // (status='error' set on failed tool calls). Coerced to one of the
   // supported literals so downstream type-narrowing works.
   const reportedVersion: 1 | 2 = persistedVersion === 1 ? 1 : 2;
+  const sessionId =
+    typeof migrated.session_id === 'number' && Number.isFinite(migrated.session_id)
+      ? migrated.session_id
+      : 0;
   return {
     schemaVersion: reportedVersion,
     id: migrated.id,
@@ -1018,6 +1105,7 @@ function rowToChatMessage(row: ChatMessageRowDb): ChatMessageRow {
     payload,
     snapshotId: migrated.snapshot_id,
     createdAt: migrated.created_at,
+    sessionId,
   };
 }
 
@@ -1051,6 +1139,10 @@ export function listChatMessages(db: Database, designId: string): ChatMessageRow
  * Atomically append a chat_messages row with a monotonically increasing seq.
  * seq is computed inside the transaction from COALESCE(MAX(seq), -1) + 1 so
  * concurrent appenders can't collide on the UNIQUE (design_id, seq) index.
+ *
+ * The `session_id` is stamped from the design's `current_session_id`
+ * (Improver1 follow-up: in-design "new conversation"). Callers don't pass
+ * session_id explicitly — it's the active pointer at write time.
  */
 export function appendChatMessage(db: Database, input: ChatAppendInput): ChatMessageRow {
   const now = new Date().toISOString();
@@ -1065,10 +1157,14 @@ export function appendChatMessage(db: Database, input: ChatAppendInput): ChatMes
         'SELECT COALESCE(MAX(seq), -1) + 1 AS nextSeq FROM chat_messages WHERE design_id = ?',
       )
       .get(input.designId) as { nextSeq: number };
+    const sessRow = db
+      .prepare('SELECT current_session_id FROM designs WHERE id = ?')
+      .get(input.designId) as { current_session_id: number | null } | undefined;
+    const sessionId = sessRow?.current_session_id ?? 0;
     const info = db
       .prepare(
-        `INSERT INTO chat_messages (design_id, seq, kind, payload, snapshot_id, created_at, schema_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chat_messages (design_id, seq, kind, payload, snapshot_id, created_at, schema_version, session_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.designId,
@@ -1078,6 +1174,7 @@ export function appendChatMessage(db: Database, input: ChatAppendInput): ChatMes
         snapshotId,
         now,
         schemaVersion,
+        sessionId,
       );
     const row = db.prepare('SELECT * FROM chat_messages WHERE id = ?').get(info.lastInsertRowid) as
       | ChatMessageRowDb
@@ -1086,6 +1183,46 @@ export function appendChatMessage(db: Database, input: ChatAppendInput): ChatMes
     return rowToChatMessage(row);
   });
   return tx();
+}
+
+/**
+ * Bump the design's `current_session_id`. Subsequent `appendChatMessage`
+ * calls inherit the new value, so the agent's history-builder filtering
+ * by the design's current session sees an empty list — which is the
+ * point: a fresh conversation that pays zero token cost for prior
+ * tool-call transcripts. Existing rows keep their old session_id
+ * intact and remain visible in the chat list (with a session divider
+ * in the UI).
+ *
+ * Returns the new session id. Idempotency: each call increments by 1;
+ * callers that want "ensure a fresh session" should call once per user
+ * action, not on every render.
+ */
+export function newChatSession(db: Database, designId: string): number {
+  return db.transaction((): number => {
+    const row = db.prepare('SELECT current_session_id FROM designs WHERE id = ?').get(designId) as
+      | { current_session_id: number | null }
+      | undefined;
+    if (row === undefined) {
+      throw new Error(`newChatSession: design ${designId} not found`);
+    }
+    const next = (row.current_session_id ?? 0) + 1;
+    db.prepare('UPDATE designs SET current_session_id = ?, updated_at = ? WHERE id = ?').run(
+      next,
+      new Date().toISOString(),
+      designId,
+    );
+    return next;
+  })();
+}
+
+/** Read the design's active session pointer. Renderer uses this to
+ *  filter the chat list when building the LLM history payload. */
+export function getDesignCurrentSession(db: Database, designId: string): number {
+  const row = db.prepare('SELECT current_session_id FROM designs WHERE id = ?').get(designId) as
+    | { current_session_id: number | null }
+    | undefined;
+  return row?.current_session_id ?? 0;
 }
 
 /**
@@ -1835,6 +1972,122 @@ export function recordRunUsage(db: Database, input: RunUsageInput): void {
     input.modelId ?? null,
     now,
   );
+  // Backlog-3 §10 — roll up the daily_usage row for today (local
+  // tz). UPSERT so the same date accumulates across runs. ISO date
+  // YYYY-MM-DD in local time; the dashboard's 7-day sparkline reads
+  // this directly without scanning run_usage.
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  const dateKey = `${yyyy}-${mm}-${dd}`;
+  db.prepare(
+    `INSERT INTO daily_usage (
+       date, schema_version, cost_usd, input_tokens, output_tokens,
+       cached_input_tokens, run_count, updated_at
+     ) VALUES (?, 1, ?, ?, ?, ?, 1, ?)
+     ON CONFLICT(date) DO UPDATE SET
+       cost_usd            = cost_usd + excluded.cost_usd,
+       input_tokens        = input_tokens + excluded.input_tokens,
+       output_tokens       = output_tokens + excluded.output_tokens,
+       cached_input_tokens = cached_input_tokens + excluded.cached_input_tokens,
+       run_count           = run_count + 1,
+       updated_at          = excluded.updated_at`,
+  ).run(
+    dateKey,
+    input.costUsd,
+    input.inputTokens,
+    input.outputTokens,
+    input.cachedInputTokens,
+    now,
+  );
+}
+
+/** Backlog-3 §10 — budget settings (id='global' or a designId). */
+export interface BudgetRecord {
+  id: string;
+  dailyLimitUsd: number | null;
+  perDesignLimitUsd: number | null;
+  alertAtPct: number;
+}
+
+/** Read a budget by id (`'global'` or a design id). Returns null when no
+ *  row exists — caller treats that as "no cap". */
+export function getBudget(db: Database, id: string): BudgetRecord | null {
+  const row = db
+    .prepare(
+      'SELECT id, daily_limit_usd, per_design_limit_usd, alert_at_pct FROM budgets WHERE id = ?',
+    )
+    .get(id) as
+    | {
+        id: string;
+        daily_limit_usd: number | null;
+        per_design_limit_usd: number | null;
+        alert_at_pct: number;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    id: row.id,
+    dailyLimitUsd: row.daily_limit_usd,
+    perDesignLimitUsd: row.per_design_limit_usd,
+    alertAtPct: row.alert_at_pct,
+  };
+}
+
+/** Upsert a budget. Pass null to clear a limit; the row stays with the
+ *  remaining fields populated. */
+export function upsertBudget(db: Database, input: BudgetRecord): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO budgets (id, schema_version, daily_limit_usd, per_design_limit_usd, alert_at_pct, updated_at)
+     VALUES (?, 1, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       daily_limit_usd      = excluded.daily_limit_usd,
+       per_design_limit_usd = excluded.per_design_limit_usd,
+       alert_at_pct         = excluded.alert_at_pct,
+       updated_at           = excluded.updated_at`,
+  ).run(input.id, input.dailyLimitUsd, input.perDesignLimitUsd, input.alertAtPct, now);
+}
+
+export interface DailyUsageRecord {
+  date: string;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  runCount: number;
+}
+
+/** Read the last `daysBack` daily_usage rows including today, ordered
+ *  oldest → newest. Missing days are NOT padded — the caller fills
+ *  zeros if needed (the dashboard does this for the sparkline). */
+export function listDailyUsage(db: Database, daysBack: number): DailyUsageRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT date, cost_usd, input_tokens, output_tokens, cached_input_tokens, run_count
+       FROM daily_usage
+       ORDER BY date DESC
+       LIMIT ?`,
+    )
+    .all(Math.max(1, Math.min(365, daysBack))) as Array<{
+    date: string;
+    cost_usd: number;
+    input_tokens: number;
+    output_tokens: number;
+    cached_input_tokens: number;
+    run_count: number;
+  }>;
+  return rows
+    .map((r) => ({
+      date: r.date,
+      costUsd: r.cost_usd,
+      inputTokens: r.input_tokens,
+      outputTokens: r.output_tokens,
+      cachedInputTokens: r.cached_input_tokens,
+      runCount: r.run_count,
+    }))
+    .reverse();
 }
 
 /** Sum of all run_usage rows belonging to one design. Returns zeroes when

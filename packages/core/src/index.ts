@@ -186,6 +186,27 @@ export interface GenerateInput {
    *  (backlog-1 #9). Forwarded into composeSystemPrompt so refinement
    *  turns also see the original picks. */
   promptAssist?: PromptAssistMetadata | undefined;
+  /** Turn-0 strategy. Default true: force `tool_choice='any'` +
+   *  thinking disabled on turn 0 so the model MUST emit a tool call
+   *  (set_todos / choose_engine / text_editor.create) before any
+   *  reasoning. Without this, Sonnet 4.6's adaptive thinking can
+   *  spend the entire 65K output budget on thinking blocks and never
+   *  emit a tool call — see the 2026-05-06 first-person-shooter run.
+   *  Subsequent turns re-enable adaptive thinking for tool-result
+   *  reasoning. Set false to opt out for model families where turn-0
+   *  thinking measurably outperforms an immediate set_todos. */
+  forceToolsTurn0?: boolean | undefined;
+  /** Backlog-3 §5 — checkpoint-cancel poll. When the IPC sets the
+   *  per-generationId hint, the agent's turn_end subscriber reads it
+   *  here and triggers a clean abort at the next safe boundary. The
+   *  poll is sync because turn_end fires synchronously — pi-agent-core
+   *  awaits the subscriber callback before scheduling the next turn. */
+  getCheckpointHint?: (() => boolean) | undefined;
+  /** Backlog-3 §7 — when true and total turns ≥ 8, run verify_artifact
+   *  every Nth str_replace and inject the result as a synthetic
+   *  toolResult on the agent's next turn. Off by default until A/B
+   *  evidence shows convergence improvement. */
+  incrementalVerify?: boolean | undefined;
   logger?: CoreLogger | undefined;
 }
 
@@ -268,6 +289,7 @@ interface ModelRunInput {
   allowKeyless?: boolean | undefined;
   reasoningLevel?: ReasoningLevel | undefined;
   cacheRetention?: CacheRetention | undefined;
+  artifactType?: 'design' | 'game' | undefined;
   signal?: AbortSignal | undefined;
   onRetry?: ((info: RetryReason) => void) | undefined;
   /** @see ApplyCommentInput.onTextDelta */
@@ -477,7 +499,8 @@ async function runModel(input: ModelRunInput): Promise<GenerateOutput> {
           // Per-provider override (set in Settings → cache retention) wins
           // over the 'short' default. pi-ai's default is also 'short', so
           // pinning this explicitly survives a future pi-ai default change.
-          cacheRetention: input.cacheRetention ?? 'short',
+          cacheRetention:
+            input.cacheRetention ?? (input.artifactType === 'game' ? 'long' : 'short'),
           ...(input.onTextDelta !== undefined ? { onTextDelta: input.onTextDelta } : {}),
         },
         {
@@ -795,6 +818,7 @@ export async function generate(input: GenerateInput): Promise<GenerateOutput> {
     allowKeyless: input.allowKeyless,
     reasoningLevel: input.reasoningLevel,
     cacheRetention: input.cacheRetention,
+    artifactType: input.artifactType,
     signal: input.signal,
     onRetry: input.onRetry,
     messages,

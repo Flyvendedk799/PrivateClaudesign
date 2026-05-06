@@ -11,6 +11,9 @@ interface AgentCall {
   prompts: Array<{ message: unknown }>;
   listeners: Array<(e: AgentEvent) => void>;
   aborted: boolean;
+  /** Improver1 §3 — captured agent.steer() calls so tests can assert
+   *  the stuck-detector emitted the right reminder. */
+  steers: Array<{ role: string; content: string; timestamp: number }>;
 }
 
 const agentCalls: AgentCall[] = [];
@@ -76,7 +79,7 @@ vi.mock('@mariozechner/pi-agent-core', () => {
     readonly state: { messages: AgentMessage[] };
     private readonly call: AgentCall;
     constructor(options: AgentOptions) {
-      this.call = { options, prompts: [], listeners: [], aborted: false };
+      this.call = { options, prompts: [], listeners: [], aborted: false, steers: [] };
       agentCalls.push(this.call);
       const seed = (options.initialState?.messages ?? []) as AgentMessage[];
       this.state = { messages: [...seed] };
@@ -235,6 +238,9 @@ vi.mock('@mariozechner/pi-agent-core', () => {
     }
     abort(): void {
       this.call.aborted = true;
+    }
+    steer(msg: { role: string; content: string; timestamp: number }): void {
+      this.call.steers.push(msg);
     }
     private emit(e: AgentEvent): void {
       for (const l of this.call.listeners) l(e);
@@ -853,6 +859,63 @@ describe('generateViaAgent() — per-run safety budget', () => {
   });
 });
 
+describe('generateViaAgent() — zero-output guard', () => {
+  it('throws MODEL_RETURNED_ONLY_THINKING when assistant produced no text and no artifact', async () => {
+    // The 2026-05-06 first-person shooter wave-defense run exhibited this:
+    // 1 turn, 0 tool calls, 0 streamed text deltas, outputTokens hit the
+    // 65,536 cap (model spent everything on extended thinking). Without
+    // this guard, generate() returned `{ artifacts: [], message: "" }`
+    // and the renderer happily rendered "Done" with an empty iframe.
+    scriptedAgent = { assistantText: '' };
+    await expect(
+      generateViaAgent(
+        {
+          prompt: 'create a first-person shooter wave defense',
+          history: [],
+          model: MODEL,
+          apiKey: 'sk-test',
+        },
+        { tools: [] },
+      ),
+    ).rejects.toMatchObject({ code: ERROR_CODES.MODEL_RETURNED_ONLY_THINKING });
+  });
+
+  it('does NOT throw when assistant produced text but no artifact', async () => {
+    // Pure-text response without an <artifact> tag is still meaningful
+    // output (e.g. a "here's the plan, ready to start?" first turn).
+    // The guard should NOT fire — only the no-text + no-artifact case is
+    // the runaway-thinking signature.
+    scriptedAgent = { assistantText: 'Here is the design summary…' };
+    const result = await generateViaAgent(
+      {
+        prompt: 'design a hero section',
+        history: [],
+        model: MODEL,
+        apiKey: 'sk-test',
+      },
+      { tools: [] },
+    );
+    expect(result.message).toContain('Here is the design summary');
+    expect(result.artifacts).toHaveLength(0);
+  });
+
+  it('does NOT throw when assistant produced an artifact but no prose', async () => {
+    // Tool-only run that delivered the artifact via the parser. Message
+    // is empty but `collected.artifacts.length > 0` keeps the guard quiet.
+    scriptedAgent = { assistantText: RESPONSE_WITH_ARTIFACT };
+    const result = await generateViaAgent(
+      {
+        prompt: 'design a hero',
+        history: [],
+        model: MODEL,
+        apiKey: 'sk-test',
+      },
+      { tools: [] },
+    );
+    expect(result.artifacts).toHaveLength(1);
+  });
+});
+
 describe('FRAME_TEMPLATES — device frame starter assets', () => {
   it('exposes iphone, ipad, watch, android, and macos-safari frames as JSX modules with EDITMODE markers', async () => {
     const { FRAME_TEMPLATES } = await import('./frames/index.js');
@@ -1003,5 +1066,535 @@ describe('chatMessageToAgentMessage — Gameimprove §1 tool transcript persiste
       name: 'text_editor',
       arguments: {},
     });
+  });
+});
+
+describe('generateViaAgent() — stuck-detector — Improver1 §3', () => {
+  it('region-repeat gate: fires steer after 3 failed edits on the same content target across str_replace + patch', async () => {
+    // Today's run-1 thrash on `// ── Body bob + head ──` lines
+    // 1346-1392: 4 mixed str_replace + patch failures didn't trigger
+    // the original args-hash detector because the args differed
+    // between attempts. The new content-bucket gate fires when 3
+    // failures share the same path + first-non-empty-line probe.
+    const probeLine = '// ── Body bob + head ──';
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      events: [
+        // 1st attempt — str_replace whose old_str leads with the
+        // probe line.
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'sr-1',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'str_replace',
+            path: 'index.html',
+            old_str: `${probeLine}\n  const bob = 0;`,
+            new_str: 'X',
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'sr-1',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'old_str not found',
+          isError: true,
+        },
+        // 2nd attempt — patch with expectedOriginal leading with the
+        // SAME probe line. Same content bucket → same target.
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'p-1',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'index.html',
+            hunks: [
+              {
+                startLine: 1346,
+                endLine: 1392,
+                replacement: 'X',
+                expectedOriginal: `${probeLine}\n  const bob = 0;\n  // …more`,
+              },
+            ],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'p-1',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'mismatch',
+          isError: true,
+        },
+        // 3rd attempt — patch again, same probe line.
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'p-2',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'index.html',
+            hunks: [
+              {
+                startLine: 1340,
+                endLine: 1390,
+                replacement: 'X',
+                expectedOriginal: `${probeLine}\n different content here`,
+              },
+            ],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'p-2',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'mismatch',
+          isError: true,
+        },
+      ],
+    };
+    await generateViaAgent({
+      prompt: 'fix the body bob',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    const steers = agentCalls[0]?.steers ?? [];
+    expect(steers).toHaveLength(1);
+    expect(steers[0]?.content).toMatch(/index\.html/);
+    expect(steers[0]?.content).toMatch(/failed \d+ attempts to edit/i);
+    expect(steers[0]?.content).toMatch(/view.*range/i);
+    // Last attempt carried lines 1340-1390 → message includes them.
+    expect(steers[0]?.content).toMatch(/lines 1340-1390/);
+  });
+
+  it('region-repeat gate does NOT fire when failures target different content blocks', async () => {
+    // Three failures, different content probe each time → different
+    // buckets, no individual bucket reaches threshold.
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      events: [
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'a',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'index.html',
+            hunks: [
+              { startLine: 100, endLine: 110, replacement: 'X', expectedOriginal: '// HEADER' },
+            ],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'a',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'fail',
+          isError: true,
+        },
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'b',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'index.html',
+            hunks: [
+              { startLine: 500, endLine: 510, replacement: 'X', expectedOriginal: '// FOOTER' },
+            ],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'b',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'fail',
+          isError: true,
+        },
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'c',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'index.html',
+            hunks: [
+              { startLine: 1000, endLine: 1010, replacement: 'X', expectedOriginal: '// BODY' },
+            ],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'c',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'fail',
+          isError: true,
+        },
+      ],
+    };
+    await generateViaAgent({
+      prompt: 'edits',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    expect(agentCalls[0]?.steers).toHaveLength(0);
+  });
+
+  it('region-repeat gate does NOT fire on successful tool calls (only failures count)', async () => {
+    // Same content bucket on each attempt. Different replacement so
+    // the args-repeat detector doesn't fire either. Verify the
+    // region-repeat path requires isError=true.
+    const probeLine = '// SECTION X';
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      events: [
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'ok-1',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'index.html',
+            hunks: [
+              { startLine: 100, endLine: 110, replacement: 'A', expectedOriginal: probeLine },
+            ],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'ok-1',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'edit applied',
+          isError: false,
+        },
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'ok-2',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'index.html',
+            hunks: [
+              { startLine: 100, endLine: 110, replacement: 'B', expectedOriginal: probeLine },
+            ],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'ok-2',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'edit applied',
+          isError: false,
+        },
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'ok-3',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'index.html',
+            hunks: [
+              { startLine: 100, endLine: 110, replacement: 'C', expectedOriginal: probeLine },
+            ],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'ok-3',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'edit applied',
+          isError: false,
+        },
+      ],
+    };
+    await generateViaAgent({
+      prompt: 'edits',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    expect(agentCalls[0]?.steers).toHaveLength(0);
+  });
+
+  it('args-repeat gate (original Backlog-3 §3) still fires for identical tool calls 3× in 5 turns', async () => {
+    // Same tool, identical args 3 times. The original detector should
+    // fire even before the region detector accumulates (no isError
+    // events here).
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      events: [
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'x',
+          toolName: 'set_todos',
+          args: { items: [{ text: 'do thing', checked: false }] },
+        },
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'y',
+          toolName: 'set_todos',
+          args: { items: [{ text: 'do thing', checked: false }] },
+        },
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'z',
+          toolName: 'set_todos',
+          args: { items: [{ text: 'do thing', checked: false }] },
+        },
+      ],
+    };
+    await generateViaAgent({
+      prompt: 'do thing',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    const steers = agentCalls[0]?.steers ?? [];
+    expect(steers).toHaveLength(1);
+    expect(steers[0]?.content).toMatch(/repeated the same tool call/i);
+  });
+
+  it('only one steer fires per run (no double-fire when both gates would trigger)', async () => {
+    // Same args triplet (would trip args-repeat) on the same line range
+    // (also trips region-repeat after isError). Verify only ONE steer.
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      events: [
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'a',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'f.html',
+            hunks: [{ startLine: 50, endLine: 60, replacement: 'X' }],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'a',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'fail',
+          isError: true,
+        },
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'b',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'f.html',
+            hunks: [{ startLine: 50, endLine: 60, replacement: 'X' }],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'b',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'fail',
+          isError: true,
+        },
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'c',
+          toolName: 'str_replace_based_edit_tool',
+          args: {
+            command: 'patch',
+            path: 'f.html',
+            hunks: [{ startLine: 50, endLine: 60, replacement: 'X' }],
+          },
+        },
+        {
+          type: 'tool_execution_end',
+          toolCallId: 'c',
+          toolName: 'str_replace_based_edit_tool',
+          result: 'fail',
+          isError: true,
+        },
+      ],
+    };
+    await generateViaAgent({
+      prompt: 'edits',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    expect(agentCalls[0]?.steers).toHaveLength(1);
+  });
+});
+
+describe('generateViaAgent() — convergence-detector — Improver1 §7', () => {
+  /** Build a script of N small-edit turns on `path` with no
+   *  verify_artifact between them. Each turn = a turn_start, a tiny
+   *  str_replace tool start, then a turn_end. Returns the AgentEvent
+   *  array suitable for scriptedAgent.events. */
+  function scriptSmallEditTurns(path: string, n: number): Array<Record<string, unknown>> {
+    const events: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < n; i += 1) {
+      events.push({ type: 'turn_start' });
+      events.push({
+        type: 'tool_execution_start',
+        toolCallId: `e${i}`,
+        toolName: 'str_replace_based_edit_tool',
+        args: { command: 'str_replace', path, old_str: 'a', new_str: 'b' },
+      });
+      events.push({ type: 'turn_end' });
+    }
+    return events;
+  }
+
+  it('fires convergence steer after 25+ turns of small edits on a single file with no verify', async () => {
+    const events = scriptSmallEditTurns('index.html', 30);
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      // biome-ignore lint/suspicious/noExplicitAny: AgentEvent literal shapes.
+      events: events as any,
+    };
+    await generateViaAgent({
+      prompt: 'iterate forever',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    const steers = agentCalls[0]?.steers ?? [];
+    const convergenceSteer = steers.find((s) =>
+      /converged or the requirement is unclear/i.test(s.content),
+    );
+    expect(convergenceSteer).toBeDefined();
+    expect(convergenceSteer?.content).toMatch(/index\.html/);
+    expect(convergenceSteer?.content).toMatch(/verify_artifact/);
+    expect(convergenceSteer?.content).toMatch(/done/);
+  });
+
+  it('does NOT fire under the 25-turn floor', async () => {
+    const events = scriptSmallEditTurns('index.html', 10);
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      // biome-ignore lint/suspicious/noExplicitAny: AgentEvent literal shapes.
+      events: events as any,
+    };
+    await generateViaAgent({
+      prompt: 'short run',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    const steers = agentCalls[0]?.steers ?? [];
+    const convergenceSteer = steers.find((s) =>
+      /converged or the requirement is unclear/i.test(s.content),
+    );
+    expect(convergenceSteer).toBeUndefined();
+  });
+
+  it('does NOT fire when a verify_artifact landed inside the 5-turn lookback', async () => {
+    // 22 small edits + one verify_artifact + 3 more small edits = 26
+    // turns total (above the 25-turn floor) but the verify still
+    // sits inside the rolling 5-turn window — steer must NOT fire.
+    const events: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 22; i += 1) {
+      events.push({ type: 'turn_start' });
+      events.push({
+        type: 'tool_execution_start',
+        toolCallId: `e${i}`,
+        toolName: 'str_replace_based_edit_tool',
+        args: { command: 'str_replace', path: 'index.html', old_str: 'a', new_str: 'b' },
+      });
+      events.push({ type: 'turn_end' });
+    }
+    // Turn 23 — verify_artifact
+    events.push({ type: 'turn_start' });
+    events.push({
+      type: 'tool_execution_start',
+      toolCallId: 'v1',
+      toolName: 'verify_artifact',
+      args: {},
+    });
+    events.push({ type: 'turn_end' });
+    // Turns 24-26 — three more small edits. Buffer at turn 26 holds
+    // [22, 23, 24, 25, 26] — turn 23's verify is still in window.
+    for (let i = 0; i < 3; i += 1) {
+      events.push({ type: 'turn_start' });
+      events.push({
+        type: 'tool_execution_start',
+        toolCallId: `e2-${i}`,
+        toolName: 'str_replace_based_edit_tool',
+        args: { command: 'str_replace', path: 'index.html', old_str: 'a', new_str: 'b' },
+      });
+      events.push({ type: 'turn_end' });
+    }
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      // biome-ignore lint/suspicious/noExplicitAny: AgentEvent literal shapes.
+      events: events as any,
+    };
+    await generateViaAgent({
+      prompt: 'with verify',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    const steers = agentCalls[0]?.steers ?? [];
+    const convergenceSteer = steers.find((s) =>
+      /converged or the requirement is unclear/i.test(s.content),
+    );
+    expect(convergenceSteer).toBeUndefined();
+  });
+
+  it('does NOT fire when edits span MULTIPLE files', async () => {
+    // 30 small edits, alternating between two files — purpose was
+    // "still working", not "narrow tweaking".
+    const events: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 30; i += 1) {
+      events.push({ type: 'turn_start' });
+      events.push({
+        type: 'tool_execution_start',
+        toolCallId: `e${i}`,
+        toolName: 'str_replace_based_edit_tool',
+        args: {
+          command: 'str_replace',
+          path: i % 2 === 0 ? 'index.html' : 'styles.css',
+          old_str: 'a',
+          new_str: 'b',
+        },
+      });
+      events.push({ type: 'turn_end' });
+    }
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      // biome-ignore lint/suspicious/noExplicitAny: AgentEvent literal shapes.
+      events: events as any,
+    };
+    await generateViaAgent({
+      prompt: 'multi file',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    const steers = agentCalls[0]?.steers ?? [];
+    const convergenceSteer = steers.find((s) =>
+      /converged or the requirement is unclear/i.test(s.content),
+    );
+    expect(convergenceSteer).toBeUndefined();
+  });
+
+  it('only fires once per run (one-shot)', async () => {
+    const events = scriptSmallEditTurns('index.html', 40);
+    scriptedAgent = {
+      assistantText: RESPONSE_WITH_ARTIFACT,
+      // biome-ignore lint/suspicious/noExplicitAny: AgentEvent literal shapes.
+      events: events as any,
+    };
+    await generateViaAgent({
+      prompt: 'long run',
+      history: [],
+      model: MODEL,
+      apiKey: 'sk-test',
+    });
+    const convergenceSteers = (agentCalls[0]?.steers ?? []).filter((s) =>
+      /converged or the requirement is unclear/i.test(s.content),
+    );
+    expect(convergenceSteers).toHaveLength(1);
   });
 });

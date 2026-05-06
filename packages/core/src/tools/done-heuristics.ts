@@ -32,22 +32,32 @@
  */
 import type { DoneError } from './done.js';
 
-const PLACEHOLDER_PATTERNS: Array<{ re: RegExp; label: string }> = [
+export type HeuristicArtifactType = 'design' | 'game';
+
+const PLACEHOLDER_PATTERNS: Array<{ re: RegExp; label: string; gameSuppress?: boolean }> = [
   { re: /\bLorem ipsum\b/i, label: 'Lorem ipsum text' },
   { re: /\bplaceholder text\b/i, label: 'literal "placeholder text"' },
   { re: /\b(jane |john )?doe\b/i, label: 'placeholder name (Jane/John Doe)' },
   // "100%" standalone (not a CSS width value like `width: 100%`). The lookbehind
   // skips style attributes / CSS rules; this catches "100% satisfaction" copy.
-  { re: /(?<![\w:-])100%(?!\s*[;,)}])/i, label: 'round-number "100%" placeholder copy' },
+  {
+    re: /(?<![\w:-])100%(?!\s*[;,)}])/i,
+    label: 'round-number "100%" placeholder copy',
+    gameSuppress: true,
+  },
   // Round-number dates that scream stub data.
   { re: /\b(Jan|January) 1,?\s*2020\b/i, label: 'placeholder date Jan 1 2020' },
   { re: /\b2020-01-01\b/, label: 'placeholder date 2020-01-01' },
   { re: /\$1\.00\b/, label: 'placeholder price $1.00' },
 ];
 
-export function scanContentQuality(src: string): DoneError[] {
+export function scanContentQuality(
+  src: string,
+  options: { artifactType?: HeuristicArtifactType } = {},
+): DoneError[] {
   const out: DoneError[] = [];
-  for (const { re, label } of PLACEHOLDER_PATTERNS) {
+  for (const { re, label, gameSuppress } of PLACEHOLDER_PATTERNS) {
+    if (options.artifactType === 'game' && gameSuppress === true) continue;
     const m = re.exec(src);
     if (m === null) continue;
     const lineno = src.slice(0, m.index).split('\n').length;
@@ -375,14 +385,22 @@ export function scanDarkModeSupport(src: string): DoneError[] {
  *  `knownFiles` is the set of paths in the design's virtual fs (excluding
  *  the file being scanned), used by scanLocalRefs to validate cross-file
  *  references. Pass an empty Set when not running in a multi-file context. */
-export function runHeuristics(src: string, knownFiles: Set<string> = new Set()): DoneError[] {
+export function runHeuristics(
+  src: string,
+  knownFiles: Set<string> = new Set(),
+  options: { artifactType?: HeuristicArtifactType } = {},
+): DoneError[] {
+  const isGame = options.artifactType === 'game';
+  const fatalA11y = isGame
+    ? scanA11yFatal(src).filter((e) => e.source !== 'a11y.no_main_landmark')
+    : scanA11yFatal(src);
   return [
-    ...scanContentQuality(src),
+    ...scanContentQuality(src, options),
     ...scanInteractivity(src),
-    ...scanA11yFatal(src),
+    ...fatalA11y,
     ...scanA11yAdvisory(src),
-    ...scanHeadingHierarchy(src),
-    ...scanResponsiveSignals(src),
+    ...(isGame ? [] : scanHeadingHierarchy(src)),
+    ...(isGame ? [] : scanResponsiveSignals(src)),
     ...scanDarkModeSupport(src),
     ...scanLocalRefs(src, knownFiles),
   ];

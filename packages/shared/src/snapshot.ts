@@ -59,6 +59,11 @@ export const DesignV1 = z.object({
   /** Per-design constraints captured by the prompt-assist interstitial.
    *  Optional — long prompts skip the dialog entirely and leave this null. */
   promptAssistMetadata: PromptAssistMetadataV1.nullable().default(null).optional(),
+  /** In-design "new conversation" pointer — see snapshots-db.newChatSession.
+   *  Optional in the inferred type so legacy fixtures don't have to set it;
+   *  consumers read it via `design.currentSessionId ?? 0` or fetch fresh via
+   *  the dedicated IPC. The DB always materialises a value (default 0). */
+  currentSessionId: z.number().int().nonnegative().optional(),
 });
 export type Design = z.infer<typeof DesignV1>;
 
@@ -78,6 +83,10 @@ export const ChatMessageKind = z.enum([
   'tool_call',
   'artifact_delivered',
   'error',
+  // Backlog-3 §5 — cancel-checkpoint row. Written when the user clicks
+  // "Stop & checkpoint"; payload carries enough state to resume from
+  // the same design with the prior agent's history rehydrated.
+  'checkpoint',
 ]);
 export type ChatMessageKind = z.infer<typeof ChatMessageKind>;
 
@@ -101,6 +110,14 @@ export const ChatMessageRowV1 = z.object({
   payload: z.unknown(),
   snapshotId: z.string().nullable(),
   createdAt: z.string(),
+  /** Partition key for the in-design "new conversation" feature. Rows
+   *  written before that feature shipped read back as 0 (the default
+   *  bucket). The history-builder filters to the design's
+   *  `current_session_id` before sending to the LLM, so prior sessions
+   *  are visible in the UI but pay no token cost on subsequent runs.
+   *  Optional in the inferred type so fixtures predating the field
+   *  don't have to be updated; the DB always materialises a value. */
+  sessionId: z.number().int().nonnegative().optional(),
 });
 export type ChatMessageRow = z.infer<typeof ChatMessageRowV1>;
 
@@ -143,6 +160,7 @@ export interface ChatArtifactDeliveredPayload {
 export interface ChatErrorPayload {
   message: string;
   code?: string;
+  runId?: string;
 }
 export interface ChatToolCallPayload {
   toolName: string;

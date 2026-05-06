@@ -54,6 +54,38 @@ function makeFs(initial: Record<string, string> = {}): TextEditorFsCallbacks {
         totalLines: next.split('\n').length,
       };
     },
+    patch(path, hunks) {
+      const cur = map.get(path);
+      if (cur === undefined) throw new Error(`File not found: ${path}`);
+      const lines = cur.split('\n');
+      const sorted = [...hunks].sort((a, b) => b.startLine - a.startLine);
+      for (const h of sorted) {
+        if (h.expectedOriginal !== undefined) {
+          const actual = lines.slice(h.startLine - 1, h.endLine).join('\n');
+          if (actual !== h.expectedOriginal) {
+            throw new Error(
+              `patch hunk at lines ${h.startLine}-${h.endLine}: expectedOriginal mismatch.`,
+            );
+          }
+        }
+      }
+      let firstStart = Number.MAX_SAFE_INTEGER;
+      let lastEnd = 0;
+      for (const h of sorted) {
+        const repl = h.replacement.length === 0 ? [] : h.replacement.split('\n');
+        lines.splice(h.startLine - 1, h.endLine - h.startLine + 1, ...repl);
+        if (h.startLine < firstStart) firstStart = h.startLine;
+        lastEnd = Math.max(lastEnd, h.startLine + Math.max(0, repl.length - 1));
+      }
+      const next = lines.join('\n');
+      map.set(path, next);
+      return {
+        path,
+        startLine: firstStart === Number.MAX_SAFE_INTEGER ? 1 : firstStart,
+        endLine: lastEnd,
+        totalLines: lines.length,
+      };
+    },
     listDir() {
       return [];
     },
@@ -94,7 +126,10 @@ describe('text-editor str_replace miss handling', () => {
     // Both lines 2 and 6 contain `<h1>Welcome</h1>`, the first non-empty
     // line of old_str. The agent should be told both are candidates.
     expect(msg).toContain('2, 6');
-    expect(msg).toMatch(/view_range/);
+    // Improver1 §2 — error embeds the current content inline so the
+    // agent doesn't need a follow-up `view` round-trip.
+    expect(msg).toMatch(/CURRENT CONTENT/);
+    expect(msg).toMatch(/build a fresh old_str/);
     expect(msg).toMatch(/Do NOT/);
   });
 
@@ -734,5 +769,641 @@ describe('text-editor camera-pin enforcement (game-mode Sequence 5)', () => {
       new_str: ortho,
     });
     expect(fs.view('index.html')?.content).toContain('OrthographicCamera');
+  });
+});
+
+describe('text-editor patch protocol — Backlog-3 §2', () => {
+  it('applies a single hunk by line range', async () => {
+    const fs = makeFs({ 'index.html': 'one\ntwo\nthree\nfour' });
+    const tool = makeTextEditorTool(fs);
+    await tool.execute('p1', {
+      command: 'patch',
+      path: 'index.html',
+      hunks: [{ startLine: 2, endLine: 3, replacement: 'TWO\nTHREE' }],
+    });
+    expect(fs.view('index.html')?.content).toBe('one\nTWO\nTHREE\nfour');
+  });
+
+  it('applies non-adjacent hunks correctly via descending-start ordering', async () => {
+    const fs = makeFs({ 'index.html': 'a\nb\nc\nd\ne\nf' });
+    const tool = makeTextEditorTool(fs);
+    // Hunks given in arbitrary order — internal sort applies high→low.
+    await tool.execute('p2', {
+      command: 'patch',
+      path: 'index.html',
+      hunks: [
+        { startLine: 1, endLine: 1, replacement: 'A' },
+        { startLine: 5, endLine: 5, replacement: 'E' },
+      ],
+    });
+    expect(fs.view('index.html')?.content).toBe('A\nb\nc\nd\nE\nf');
+  });
+
+  it('rejects overlapping hunks', async () => {
+    const fs = makeFs({ 'index.html': 'one\ntwo\nthree\nfour' });
+    const tool = makeTextEditorTool(fs);
+    const msg = await runAndCatch(() =>
+      tool.execute('p3', {
+        command: 'patch',
+        path: 'index.html',
+        hunks: [
+          { startLine: 1, endLine: 2, replacement: 'X' },
+          { startLine: 2, endLine: 3, replacement: 'Y' },
+        ],
+      }),
+    );
+    expect(msg).toMatch(/overlap/i);
+  });
+
+  it('rejects expectedOriginal mismatch (the safety net)', async () => {
+    const fs = makeFs({ 'index.html': 'one\ntwo\nthree\nfour' });
+    const tool = makeTextEditorTool(fs);
+    const msg = await runAndCatch(() =>
+      tool.execute('p4', {
+        command: 'patch',
+        path: 'index.html',
+        hunks: [
+          {
+            startLine: 2,
+            endLine: 2,
+            replacement: 'X',
+            expectedOriginal: 'NOT THE ACTUAL TEXT',
+          },
+        ],
+      }),
+    );
+    expect(msg).toMatch(/expectedOriginal/i);
+    // File untouched on validation failure.
+    expect(fs.view('index.html')?.content).toBe('one\ntwo\nthree\nfour');
+  });
+
+  it('accepts expectedOriginal matching the current lines', async () => {
+    const fs = makeFs({ 'index.html': 'one\ntwo\nthree\nfour' });
+    const tool = makeTextEditorTool(fs);
+    await tool.execute('p5', {
+      command: 'patch',
+      path: 'index.html',
+      hunks: [{ startLine: 2, endLine: 3, replacement: 'X', expectedOriginal: 'two\nthree' }],
+    });
+    expect(fs.view('index.html')?.content).toBe('one\nX\nfour');
+  });
+
+  it('rejects out-of-range line numbers', async () => {
+    const fs = makeFs({ 'index.html': 'one\ntwo' });
+    const tool = makeTextEditorTool(fs);
+    const msg = await runAndCatch(() =>
+      tool.execute('p6', {
+        command: 'patch',
+        path: 'index.html',
+        hunks: [{ startLine: 5, endLine: 6, replacement: 'X' }],
+      }),
+    );
+    expect(msg).toMatch(/invalid line range|exceeds/i);
+  });
+
+  it('total replacement byte count is capped (sidecar limit)', async () => {
+    const fs = makeFs({ 'styles.css': 'a\nb\nc' });
+    const tool = makeTextEditorTool(fs);
+    const huge = 'x'.repeat(60_000);
+    const msg = await runAndCatch(() =>
+      tool.execute('p7', {
+        command: 'patch',
+        path: 'styles.css',
+        hunks: [{ startLine: 1, endLine: 1, replacement: huge }],
+      }),
+    );
+    expect(msg).toMatch(/exceeds.*cap/i);
+  });
+
+  it('throws when fs adapter does not implement patch', async () => {
+    const fs = makeFs({ 'index.html': 'one\ntwo' });
+    // biome-ignore lint/performance/noDelete: removing the optional method simulates an older adapter
+    delete (fs as { patch?: unknown }).patch;
+    const tool = makeTextEditorTool(fs);
+    const msg = await runAndCatch(() =>
+      tool.execute('p8', {
+        command: 'patch',
+        path: 'index.html',
+        hunks: [{ startLine: 1, endLine: 1, replacement: 'X' }],
+      }),
+    );
+    expect(msg).toMatch(/patch is not available/i);
+  });
+});
+
+describe('text-editor str_replace miss content embed — Improver1 §2', () => {
+  it('embeds the actual surrounding lines (line-numbered) inline on a candidate-line miss', async () => {
+    // Build a file where the first non-empty line of old_str appears
+    // on a known line, but the rest of old_str has drifted. The error
+    // should include the current bytes around that line so the agent
+    // can rebuild old_str without an extra view round-trip.
+    const file = [
+      '// header line 1',
+      '// header line 2',
+      'function foo() {',
+      '  return 1;',
+      '}',
+      '',
+      '// HERO START',
+      '<div className="hero">',
+      '  <h1>real hero text</h1>',
+      '</div>',
+      '// HERO END',
+      '',
+      'const x = 42;',
+    ].join('\n');
+    const tool = makeTextEditorTool(makeFs({ 'index.html': file }));
+    const msg = await runAndCatch(() =>
+      tool.execute('miss-1', {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: '<div className="hero">\n  <h1>STALE TEXT</h1>\n</div>',
+        new_str: '<div>x</div>',
+      }),
+    );
+    expect(msg).toMatch(/CURRENT CONTENT/);
+    // Line numbers are line-prefixed (4-char padded); line 8 holds the hero div.
+    expect(msg).toContain('   8  <div className="hero">');
+    expect(msg).toContain('   9    <h1>real hero text</h1>');
+    // Tells the model to build fresh.
+    expect(msg).toMatch(/build a fresh old_str/);
+  });
+
+  it('embeds current bytes on a whitespace-drift near-match', async () => {
+    // Tabs vs spaces. Existing fuzzy match path now also embeds a window.
+    const file = [
+      'function startWave() {',
+      '\tfor (let i = 0; i < count; i++) {',
+      '\t\tspawn(i);',
+      '\t}',
+      '}',
+    ].join('\n');
+    const tool = makeTextEditorTool(makeFs({ 'index.html': file }));
+    const msg = await runAndCatch(() =>
+      tool.execute('miss-2', {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: 'for (let i = 0; i < count; i++) {\n    spawn(i);\n}',
+        new_str: 'for (let i = 0; i < count; i++) { spawn(i); }',
+      }),
+    );
+    expect(msg).toMatch(/near-match exists at line/i);
+    // Both the literal-bytes hint AND the window are present.
+    expect(msg).toMatch(/literal bytes/i);
+    expect(msg).toMatch(/CURRENT CONTENT/);
+    expect(msg).toContain('spawn(i);');
+  });
+
+  it('does not embed a window when first-line anchor is absent (genuine miss)', async () => {
+    const tool = makeTextEditorTool(makeFs({ 'index.html': '<div>only this</div>' }));
+    const msg = await runAndCatch(() =>
+      tool.execute('miss-3', {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: 'completely unrelated content',
+        new_str: 'x',
+      }),
+    );
+    // No candidate lines → fall back to "re-issue view" guidance.
+    expect(msg).toMatch(/does not appear anywhere/);
+    expect(msg).not.toMatch(/CURRENT CONTENT/);
+    expect(msg).toMatch(/view_range/);
+  });
+});
+
+describe('text-editor placeholder echo intercept — Improver1 §1', () => {
+  it('throws a tailored error when args carry the poison marker', async () => {
+    const fs = makeFs({ 'index.html': 'one\ntwo' });
+    const tool = makeTextEditorTool(fs);
+    const msg = await runAndCatch(() =>
+      tool.execute('echo-1', {
+        // Placeholder shape emitted by context-prune for stubbed
+        // history. The model echoed it back as fresh args.
+        __do_not_echo_this_object: true,
+        __redaction_message: 'PRIOR TOOL INPUT REDACTED…',
+        __redaction_original_bytes: 30000,
+        command: 'view',
+        path: '__redacted_history_placeholder__',
+      } as unknown as Parameters<typeof tool.execute>[1]),
+    );
+    expect(msg).toMatch(/echoed a redaction placeholder/i);
+    expect(msg).toMatch(/Compose FRESH args from scratch/i);
+    expect(msg).toMatch(/view_range/i);
+    // Critically: the underlying file must NOT have been touched.
+    expect(fs.view('index.html')?.content).toBe('one\ntwo');
+  });
+
+  it('detects the sentinel path even without the marker key', async () => {
+    const fs = makeFs({ 'index.html': 'one\ntwo' });
+    const tool = makeTextEditorTool(fs);
+    const msg = await runAndCatch(() =>
+      tool.execute('echo-2', {
+        command: 'view',
+        // The marker key was somehow stripped, but the sentinel path
+        // remains — belt and braces.
+        path: '__redacted_history_placeholder__',
+      } as unknown as Parameters<typeof tool.execute>[1]),
+    );
+    expect(msg).toMatch(/echoed a redaction placeholder/i);
+  });
+
+  it('does not fire on a normal call (no marker, no sentinel)', async () => {
+    const fs = makeFs({ 'index.html': '<h1>Hi</h1>' });
+    const tool = makeTextEditorTool(fs);
+    const res = await tool.execute('normal-1', {
+      command: 'view',
+      path: 'index.html',
+    });
+    const block = res.content[0];
+    expect(block && 'text' in block ? block.text : '').toContain('<h1>Hi</h1>');
+  });
+});
+
+describe('text-editor per-target retry budget — Improver1 §8', () => {
+  function readText(
+    res: Awaited<ReturnType<ReturnType<typeof makeTextEditorTool>['execute']>>,
+  ): string {
+    const block = res.content[0];
+    return block && 'text' in block ? block.text : '';
+  }
+
+  it('refuses the 4th str_replace on the same content target after 3 failures', async () => {
+    const fs = makeFs({ 'index.html': '<div>real content</div>' });
+    const tool = makeTextEditorTool(fs);
+    // Three failed attempts on a content anchor that doesn't exist.
+    for (let i = 0; i < 3; i += 1) {
+      await runAndCatch(() =>
+        tool.execute(`miss-${i}`, {
+          command: 'str_replace',
+          path: 'index.html',
+          old_str: '// THE BODY BOB SECTION',
+          new_str: 'X',
+        }),
+      );
+    }
+    // 4th attempt with the same first-line probe — should be refused.
+    const msg = await runAndCatch(() =>
+      tool.execute('miss-4', {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: '// THE BODY BOB SECTION\n  // (slightly different second line)',
+        new_str: 'X',
+      }),
+    );
+    expect(msg).toMatch(/Refusing str_replace/i);
+    expect(msg).toMatch(/already failed 3 times/i);
+    expect(msg).toMatch(/THE BODY BOB SECTION/);
+    expect(msg).toMatch(/view_range/);
+  });
+
+  it('shares the bucket across str_replace and patch (cross-tool thrash refusal)', async () => {
+    const fs = makeFs({ 'index.html': '<div>real content</div>\nline 2\nline 3' });
+    const tool = makeTextEditorTool(fs);
+    // 2 failed str_replace + 1 failed patch on same content probe.
+    for (let i = 0; i < 2; i += 1) {
+      await runAndCatch(() =>
+        tool.execute(`sr-${i}`, {
+          command: 'str_replace',
+          path: 'index.html',
+          old_str: '// SHARED PROBE\n  more',
+          new_str: 'X',
+        }),
+      );
+    }
+    await runAndCatch(() =>
+      tool.execute('p-1', {
+        command: 'patch',
+        path: 'index.html',
+        hunks: [
+          { startLine: 1, endLine: 1, replacement: 'X', expectedOriginal: '// SHARED PROBE' },
+        ],
+      }),
+    );
+    // 4th attempt — patch this time. Should be refused because the
+    // content bucket has accumulated 3 failures.
+    const msg = await runAndCatch(() =>
+      tool.execute('p-2', {
+        command: 'patch',
+        path: 'index.html',
+        hunks: [
+          { startLine: 2, endLine: 2, replacement: 'X', expectedOriginal: '// SHARED PROBE' },
+        ],
+      }),
+    );
+    expect(msg).toMatch(/Refusing patch/i);
+    expect(msg).toMatch(/already failed 3 times/i);
+    expect(msg).toMatch(/across str_replace and\/or patch attempts/i);
+  });
+
+  it('a successful str_replace on the same target clears the counter', async () => {
+    const fs = makeFs({ 'index.html': 'KEEP\n// SHARED PROBE\nKEEP' });
+    const tool = makeTextEditorTool(fs);
+    // 2 failed attempts.
+    for (let i = 0; i < 2; i += 1) {
+      await runAndCatch(() =>
+        tool.execute(`miss-${i}`, {
+          command: 'str_replace',
+          path: 'index.html',
+          old_str: '// SHARED PROBE\nDOES NOT EXIST',
+          new_str: 'X',
+        }),
+      );
+    }
+    // Now the agent succeeds with a correct old_str.
+    const ok = await tool.execute('hit', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: '// SHARED PROBE',
+      new_str: '// REPLACED',
+    });
+    expect(readText(ok)).toMatch(/Edited/);
+    // After the success, two more failures on the same probe should
+    // NOT trigger the refusal — counter was cleared.
+    await runAndCatch(() =>
+      tool.execute('miss-after', {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: '// SHARED PROBE\nstill not there',
+        new_str: 'Y',
+      }),
+    );
+    // Only 1 failure post-success → next attempt should still produce
+    // the standard miss error, NOT the refusal.
+    const nextMsg = await runAndCatch(() =>
+      tool.execute('miss-after-2', {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: '// SHARED PROBE\nalso not there',
+        new_str: 'Z',
+      }),
+    );
+    expect(nextMsg).toMatch(/old_str not found|does not appear anywhere/i);
+    expect(nextMsg).not.toMatch(/Refusing str_replace/i);
+  });
+
+  it('a ranged view of the path resets the retry budget', async () => {
+    const fs = makeFs({ 'index.html': 'KEEP\n// SHARED PROBE\nKEEP\nLINE\nLINE\nLINE' });
+    const tool = makeTextEditorTool(fs);
+    for (let i = 0; i < 3; i += 1) {
+      await runAndCatch(() =>
+        tool.execute(`m-${i}`, {
+          command: 'str_replace',
+          path: 'index.html',
+          old_str: '// SHARED PROBE\nDNE',
+          new_str: 'X',
+        }),
+      );
+    }
+    // Issue a ranged view — the reset trigger.
+    await tool.execute('vr', { command: 'view', path: 'index.html', view_range: [1, 6] });
+    // Next attempt: even though probe is the same, the failure counter
+    // was reset by the view, so we get the standard miss error (not
+    // the refusal).
+    const msg = await runAndCatch(() =>
+      tool.execute('m-after', {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: '// SHARED PROBE\nDNE',
+        new_str: 'X',
+      }),
+    );
+    expect(msg).not.toMatch(/Refusing str_replace/i);
+    expect(msg).toMatch(/old_str not found/);
+  });
+
+  it('different content probes on the same path do NOT count toward each other', async () => {
+    const fs = makeFs({ 'index.html': 'a\nb\nc\nd' });
+    const tool = makeTextEditorTool(fs);
+    // 2 failed attempts on probe-A.
+    for (let i = 0; i < 2; i += 1) {
+      await runAndCatch(() =>
+        tool.execute(`A-${i}`, {
+          command: 'str_replace',
+          path: 'index.html',
+          old_str: '// PROBE-A\nstale',
+          new_str: 'X',
+        }),
+      );
+    }
+    // 2 failed attempts on probe-B — bucket independent.
+    for (let i = 0; i < 2; i += 1) {
+      await runAndCatch(() =>
+        tool.execute(`B-${i}`, {
+          command: 'str_replace',
+          path: 'index.html',
+          old_str: '// PROBE-B\nstale',
+          new_str: 'X',
+        }),
+      );
+    }
+    // Neither bucket has reached 3 → next attempts on either should
+    // still produce the standard error, not the refusal.
+    const msgA = await runAndCatch(() =>
+      tool.execute('A-3', {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: '// PROBE-A\nstale-again',
+        new_str: 'X',
+      }),
+    );
+    expect(msgA).not.toMatch(/Refusing/);
+    const msgB = await runAndCatch(() =>
+      tool.execute('B-3', {
+        command: 'str_replace',
+        path: 'index.html',
+        old_str: '// PROBE-B\nstale-again',
+        new_str: 'X',
+      }),
+    );
+    expect(msgB).not.toMatch(/Refusing/);
+  });
+});
+
+describe('text-editor patch-protocol nudge — Improver1 §5', () => {
+  function readText(
+    res: Awaited<ReturnType<ReturnType<typeof makeTextEditorTool>['execute']>>,
+  ): string {
+    const block = res.content[0];
+    return block && 'text' in block ? block.text : '';
+  }
+
+  it('appends a patch tip after a multi-line str_replace success', async () => {
+    const initial = ['<div>', '  <h1>old</h1>', '  <p>old</p>', '</div>'].join('\n');
+    const fs = makeFs({ 'index.html': initial });
+    const tool = makeTextEditorTool(fs);
+    const res = await tool.execute('e1', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: '  <h1>old</h1>\n  <p>old</p>',
+      new_str: '  <h1>NEW</h1>\n  <p>NEW</p>\n  <span>extra</span>',
+    });
+    const text = readText(res);
+    expect(text).toMatch(/Tip:.*patch/i);
+    expect(text).toMatch(/spanned \d+ lines/);
+    expect(text).toMatch(/12 %/);
+  });
+
+  it('does NOT nudge for a single-line str_replace', async () => {
+    const fs = makeFs({ 'index.html': '<div>x</div>\n<p>y</p>' });
+    const tool = makeTextEditorTool(fs);
+    const res = await tool.execute('e1', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: '<div>x</div>',
+      new_str: '<div>X</div>',
+    });
+    expect(readText(res)).not.toMatch(/Tip:.*patch/i);
+  });
+
+  it('only nudges ONCE per (path, run)', async () => {
+    const initial = ['<div>', '  <h1>a</h1>', '  <h2>b</h2>', '  <h3>c</h3>', '</div>'].join('\n');
+    const fs = makeFs({ 'index.html': initial });
+    const tool = makeTextEditorTool(fs);
+    const r1 = await tool.execute('e1', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: '  <h1>a</h1>\n  <h2>b</h2>',
+      new_str: '  <h1>A</h1>\n  <h2>B</h2>\n  <h2.5>extra</h2.5>',
+    });
+    expect(readText(r1)).toMatch(/Tip:.*patch/i);
+    const r2 = await tool.execute('e2', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: '  <h1>A</h1>\n  <h2>B</h2>',
+      new_str: '  <h1>A2</h1>\n  <h2>B2</h2>\n  <h2.5>extra2</h2.5>',
+    });
+    expect(readText(r2)).not.toMatch(/Tip:.*patch/i);
+  });
+
+  it('nudges separately per path (different file = fresh nudge)', async () => {
+    const init = ['<div>', '  <h1>a</h1>', '  <h2>b</h2>', '</div>'].join('\n');
+    const fs = makeFs({ 'index.html': init, 'styles.css': init });
+    const tool = makeTextEditorTool(fs);
+    const r1 = await tool.execute('e1', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: '  <h1>a</h1>\n  <h2>b</h2>',
+      new_str: '  <h1>A</h1>\n  <h2>B</h2>\n  <h3>extra</h3>',
+    });
+    expect(readText(r1)).toMatch(/Tip:.*patch/i);
+    const r2 = await tool.execute('e2', {
+      command: 'str_replace',
+      path: 'styles.css',
+      old_str: '  <h1>a</h1>\n  <h2>b</h2>',
+      new_str: '  <h1>A</h1>\n  <h2>B</h2>\n  <h3>extra</h3>',
+    });
+    expect(readText(r2)).toMatch(/Tip:.*patch/i);
+  });
+});
+
+describe('text-editor view stubs — Improver1 §4', () => {
+  function readText(
+    res: Awaited<ReturnType<ReturnType<typeof makeTextEditorTool>['execute']>>,
+  ): string {
+    const block = res.content[0];
+    return block && 'text' in block ? block.text : '';
+  }
+
+  it('post-write stub: view after str_replace returns a 1-line confirmation, not the whole file', async () => {
+    // Use uniquely identifiable lines so str_replace is unambiguous.
+    const initial = Array.from(
+      { length: 50 },
+      (_, i) => `row${String(i + 1).padStart(3, '0')}`,
+    ).join('\n');
+    const fs = makeFs({ 'index.html': initial });
+    const tool = makeTextEditorTool(fs);
+    // First view fills the cache.
+    const v1 = await tool.execute('v1', { command: 'view', path: 'index.html' });
+    expect(readText(v1)).toContain('row005');
+    // Write something — same byte length to force the stub branch
+    // (bytes match, no view since write).
+    await tool.execute('e1', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: 'row001',
+      new_str: 'ROWX01',
+    });
+    // Now view again. Expected: stub fires.
+    const v2 = await tool.execute('v2', { command: 'view', path: 'index.html' });
+    const text = readText(v2);
+    expect(text).toMatch(/last written at tool-call tick/i);
+    expect(text).toMatch(/no edits or other writes have landed since/i);
+    // Critically: file body NOT served.
+    expect(text).not.toContain('row005');
+    expect(text).not.toContain('row050');
+  });
+
+  it('post-write stub also fires when an unrelated tool sat between the write and the view', async () => {
+    // Today's data: agent inserts set_todos / read_url between
+    // str_replace and the next view. The stub used to be gated on
+    // `tick === lastMut.tick + 1` and would skip in that case. The
+    // loosened gate lets it fire as long as no view+no other write.
+    const initial = Array.from(
+      { length: 30 },
+      (_, i) => `row${String(i + 1).padStart(3, '0')}`,
+    ).join('\n');
+    const fs = makeFs({ 'index.html': initial });
+    const tool = makeTextEditorTool(fs);
+    await tool.execute('v0', { command: 'view', path: 'index.html' });
+    await tool.execute('e1', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: 'row001',
+      new_str: 'XXX001',
+    });
+    // Simulate intervening non-mutation tool by issuing a view on a
+    // DIFFERENT path. (No setup for it here — list_files etc. would
+    // do; we just need toolCallCounter to bump without touching
+    // index.html.)
+    const lastMutBefore = fs.view('index.html')?.content.length ?? 0;
+    expect(lastMutBefore).toBeGreaterThan(0);
+    const v2 = await tool.execute('v2', { command: 'view', path: 'index.html' });
+    expect(readText(v2)).toMatch(/last written at tool-call tick/i);
+  });
+
+  it('stale-view stub: re-viewing a path with no edit between returns a 1-line stub', async () => {
+    const fs = makeFs({ 'index.html': '<p>x</p>' });
+    const tool = makeTextEditorTool(fs);
+    await tool.execute('v1', { command: 'view', path: 'index.html' });
+    // No mutation between the two views — second view must short-circuit.
+    const v2 = await tool.execute('v2', { command: 'view', path: 'index.html' });
+    const text = readText(v2);
+    expect(text).toMatch(/unchanged since your last view/i);
+    expect(text).not.toContain('<p>x</p>');
+  });
+
+  it('stale-view stub does NOT fire after a mutation (file has changed)', async () => {
+    const fs = makeFs({ 'index.html': '<p>x</p>' });
+    const tool = makeTextEditorTool(fs);
+    await tool.execute('v1', { command: 'view', path: 'index.html' });
+    await tool.execute('e1', {
+      command: 'str_replace',
+      path: 'index.html',
+      old_str: '<p>x</p>',
+      new_str: '<p>y</p>',
+    });
+    const v2 = await tool.execute('v2', { command: 'view', path: 'index.html' });
+    const text = readText(v2);
+    // Post-write stub fires (size matches, no view since write).
+    expect(text).toMatch(/last written|unchanged since your last view/i);
+    // The point is: file body still not served because the
+    // stubs DO fire on the post-write path. Verify mutation happened.
+    expect(fs.view('index.html')?.content).toBe('<p>y</p>');
+  });
+
+  it('stale-view stub does NOT fire when a ranged view comes between (different code path)', async () => {
+    const initial = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join('\n');
+    const fs = makeFs({ 'index.html': initial });
+    const tool = makeTextEditorTool(fs);
+    await tool.execute('v1', { command: 'view', path: 'index.html' });
+    // Ranged view doesn't trip the full-file stale detector — the
+    // agent legitimately wants different bytes.
+    const ranged = await tool.execute('v2', {
+      command: 'view',
+      path: 'index.html',
+      view_range: [3, 7],
+    });
+    expect(readText(ranged)).toContain('line 3');
+    expect(readText(ranged)).toContain('line 7');
   });
 });

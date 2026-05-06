@@ -11,6 +11,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { formatUsd, projectCostUsd, resolvePricing } from '../../lib/model-pricing';
 import { useCodesignStore } from '../../store';
 
 const MAX_TEXTAREA_ROWS = 6;
@@ -37,7 +38,10 @@ export interface PromptInputProps {
   prompt: string;
   setPrompt: (value: string) => void;
   onSubmit: () => void;
-  onCancel: () => void;
+  /** Cancel handler. `asCheckpoint=true` (Backlog-3 §5) writes a
+   *  checkpoint chat row before tearing down the run so the user can
+   *  resume from the same point. Triggered via shift-click on Stop. */
+  onCancel: (asCheckpoint?: boolean) => void;
   /** Optional "Wrap up now" handler — when provided AND isGenerating,
    *  renders a flag-style button next to the Stop button that pushes a
    *  user-override steering message into the agent's queue, asking it
@@ -142,6 +146,23 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
   const sendDisabledReason = isGenerating
     ? t('disabledReason.generatingInProgress')
     : t('disabledReason.typePromptToSend');
+  // Backlog-3 §10 — pre-flight cost projection. Computed only when
+  // composing (not while generating) and only when the prompt has
+  // weight; updates as the user types.
+  const cfg = useCodesignStore((s) => s.config);
+  const sendTooltipText = (() => {
+    if (!canSend) return sendDisabledReason;
+    if (prompt.trim().length < 20) return undefined;
+    const pricing = resolvePricing(cfg?.provider ?? null, cfg?.modelPrimary ?? null);
+    const projection = projectCostUsd({
+      promptLen: prompt.length,
+      historyMessages: 0,
+      attachmentBytes: 0,
+      pricing,
+    });
+    if (projection.high < 0.0001) return undefined;
+    return `Send · estimated cost ${formatUsd(projection.low)}–${formatUsd(projection.high)}`;
+  })();
 
   return (
     <form onSubmit={handleSubmit}>
@@ -187,20 +208,29 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
             </Tooltip>
           ) : null}
           {isGenerating ? (
-            <button
-              type="button"
-              onClick={onCancel}
-              aria-label={t('chat.stop')}
-              className="relative inline-flex items-center justify-center w-[32px] h-[32px] rounded-full bg-[var(--color-accent)] text-white shadow-[0_2px_6px_color-mix(in_srgb,var(--color-accent)_35%,transparent)] hover:bg-[var(--color-accent-hover)] active:scale-[0.92] transition-all duration-150"
+            <Tooltip
+              label="Stop. Shift-click to save a checkpoint so you can resume from this point later."
+              side="top"
             >
-              <span
-                aria-hidden
-                className="absolute inset-0 rounded-full bg-[var(--color-accent)] opacity-40 animate-ping"
-              />
-              <Square className="relative w-[10px] h-[10px]" strokeWidth={0} fill="currentColor" />
-            </button>
+              <button
+                type="button"
+                onClick={(e) => onCancel(e.shiftKey === true)}
+                aria-label={t('chat.stop')}
+                className="relative inline-flex items-center justify-center w-[32px] h-[32px] rounded-full bg-[var(--color-accent)] text-white shadow-[0_2px_6px_color-mix(in_srgb,var(--color-accent)_35%,transparent)] hover:bg-[var(--color-accent-hover)] active:scale-[0.92] transition-all duration-150"
+              >
+                <span
+                  aria-hidden
+                  className="absolute inset-0 rounded-full bg-[var(--color-accent)] opacity-40 animate-ping"
+                />
+                <Square
+                  className="relative w-[10px] h-[10px]"
+                  strokeWidth={0}
+                  fill="currentColor"
+                />
+              </button>
+            </Tooltip>
           ) : (
-            <Tooltip label={!canSend ? sendDisabledReason : undefined} side="top">
+            <Tooltip label={sendTooltipText} side="top">
               <button
                 type="submit"
                 disabled={!canSend}

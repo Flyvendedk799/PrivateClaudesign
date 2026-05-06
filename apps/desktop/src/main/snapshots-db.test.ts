@@ -14,16 +14,20 @@ import {
   deleteSnapshot,
   duplicateDesign,
   getDesign,
+  getDesignCurrentSession,
   getDesignUsageTotals,
   getSnapshot,
   getSnapshotFiles,
   initInMemoryDb,
   listChatMessages,
+  listDesignFiles,
   listDesigns,
   listSnapshots,
+  newChatSession,
   recordRunUsage,
   renameDesign,
   restoreSnapshotFiles,
+  seedDesignFilesFromLatestSnapshot,
   setDesignPromptAssistMetadata,
   setDesignThumbnail,
   snapshotDesignFiles,
@@ -892,6 +896,68 @@ describe('chat_messages schema_version validation', () => {
   });
 });
 
+describe('chat session partitioning (in-design new conversation)', () => {
+  it('new designs default to current_session_id=0', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    expect(d.currentSessionId).toBe(0);
+    expect(getDesignCurrentSession(db, d.id)).toBe(0);
+  });
+
+  it('appended rows inherit the design current_session_id', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'first' } });
+    const before = listChatMessages(db, d.id);
+    expect(before[0]?.sessionId).toBe(0);
+
+    const next = newChatSession(db, d.id);
+    expect(next).toBe(1);
+    expect(getDesignCurrentSession(db, d.id)).toBe(1);
+
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 'second' } });
+    const all = listChatMessages(db, d.id);
+    expect(all).toHaveLength(2);
+    expect(all[0]?.sessionId).toBe(0);
+    expect(all[1]?.sessionId).toBe(1);
+  });
+
+  it('newChatSession is monotonically increasing per design', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    expect(newChatSession(db, d.id)).toBe(1);
+    expect(newChatSession(db, d.id)).toBe(2);
+    expect(newChatSession(db, d.id)).toBe(3);
+  });
+
+  it('newChatSession scopes per-design (independent counters)', () => {
+    const db = makeDb();
+    const a = createDesign(db, 'A');
+    const b = createDesign(db, 'B');
+    expect(newChatSession(db, a.id)).toBe(1);
+    expect(newChatSession(db, a.id)).toBe(2);
+    expect(newChatSession(db, b.id)).toBe(1);
+    expect(getDesignCurrentSession(db, a.id)).toBe(2);
+    expect(getDesignCurrentSession(db, b.id)).toBe(1);
+  });
+
+  it('throws when newChatSession runs against a missing design', () => {
+    const db = makeDb();
+    expect(() => newChatSession(db, 'no-such-design')).toThrow();
+  });
+
+  it('listChatMessages returns rows from all sessions (renderer filters per session)', () => {
+    const db = makeDb();
+    const d = createDesign(db);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 's0-a' } });
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 's0-b' } });
+    newChatSession(db, d.id);
+    appendChatMessage(db, { designId: d.id, kind: 'user', payload: { text: 's1-a' } });
+    const all = listChatMessages(db, d.id);
+    expect(all.map((r) => r.sessionId)).toEqual([0, 0, 1]);
+  });
+});
+
 describe('run_usage telemetry (plan0305 P3.2)', () => {
   it('returns zeroed totals for a design with no runs recorded', () => {
     const db = makeDb();
@@ -1207,5 +1273,79 @@ describe('contentTypeFromPath (gameplan §7.2)', () => {
   it('falls back to application/octet-stream for unknown extensions', () => {
     expect(contentTypeFromPath('mystery.bin')).toBe('application/octet-stream');
     expect(contentTypeFromPath('no-extension')).toBe('application/octet-stream');
+  });
+});
+
+describe('multi-file snapshot round-trip', () => {
+  it('snapshotDesignFiles + restoreSnapshotFiles preserves the tree', () => {
+    const db = makeDb();
+    const d = createDesign(db, 'multi');
+    upsertDesignFile(db, d.id, 'index.html', '<!doctype html><body>x</body>');
+    upsertDesignFile(db, d.id, 'styles.css', 'body{color:red}');
+    upsertDesignFile(db, d.id, 'app.js', 'console.log(1)');
+    const snap = createSnapshot(db, {
+      designId: d.id,
+      type: 'edit',
+      artifactType: 'html',
+      artifactSource: '<html></html>',
+      parentId: null,
+      prompt: null,
+    });
+    const captured = snapshotDesignFiles(db, snap.id, d.id);
+    expect(captured).toBe(3);
+
+    // Wipe live design_files; restore from the snapshot tree.
+    db.prepare('DELETE FROM design_files WHERE design_id = ?').run(d.id);
+    expect(listDesignFiles(db, d.id)).toEqual([]);
+    const restored = restoreSnapshotFiles(db, d.id, snap.id);
+    expect(restored).toBe(3);
+    const live = listDesignFiles(db, d.id);
+    expect(live.map((f) => f.path).sort()).toEqual(['app.js', 'index.html', 'styles.css']);
+    expect(live.find((f) => f.path === 'styles.css')?.content).toBe('body{color:red}');
+  });
+
+  it('seedDesignFilesFromLatestSnapshot is idempotent and only fires when design_files is empty', () => {
+    const db = makeDb();
+    const d = createDesign(db, 'seed');
+    upsertDesignFile(db, d.id, 'index.html', 'before');
+    const snap = createSnapshot(db, {
+      designId: d.id,
+      type: 'edit',
+      artifactType: 'html',
+      artifactSource: '<html></html>',
+      parentId: null,
+      prompt: null,
+    });
+    snapshotDesignFiles(db, snap.id, d.id);
+
+    // First call with files already present — no-op.
+    expect(seedDesignFilesFromLatestSnapshot(db, d.id)).toBe(0);
+
+    // Wipe live tree, then seed should restore.
+    db.prepare('DELETE FROM design_files WHERE design_id = ?').run(d.id);
+    expect(seedDesignFilesFromLatestSnapshot(db, d.id)).toBe(1);
+
+    // Second call (now populated) — no-op again.
+    expect(seedDesignFilesFromLatestSnapshot(db, d.id)).toBe(0);
+  });
+
+  it('seedDesignFilesFromLatestSnapshot is a no-op when the design has no snapshots', () => {
+    const db = makeDb();
+    const d = createDesign(db, 'no-snaps');
+    expect(seedDesignFilesFromLatestSnapshot(db, d.id)).toBe(0);
+  });
+
+  it('seedDesignFilesFromLatestSnapshot is a no-op when latest snapshot has no captured files', () => {
+    const db = makeDb();
+    const d = createDesign(db, 'snap-without-files');
+    createSnapshot(db, {
+      designId: d.id,
+      type: 'edit',
+      artifactType: 'html',
+      artifactSource: '<html></html>',
+      parentId: null,
+      prompt: null,
+    });
+    expect(seedDesignFilesFromLatestSnapshot(db, d.id)).toBe(0);
   });
 });

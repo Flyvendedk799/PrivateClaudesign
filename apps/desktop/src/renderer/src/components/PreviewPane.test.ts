@@ -57,11 +57,30 @@ function App(){ return <div />; }`;
     expect(key).not.toContain('{"accent":"#000"}');
   });
 
-  it('keeps full HTML documents unstable so token changes force a reload', () => {
-    const source =
-      '<!doctype html><html><body><script>const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{"accent":"#000"}/*EDITMODE-END*/;</script></body></html>';
+  it('Backlog-3 §1 — full HTML documents collapse <style> + <script> bodies so HMR-eligible diffs share a stable key', () => {
+    const a =
+      '<!doctype html><html><head><style>.a{color:red}</style></head><body><script>const X = 1;</script></body></html>';
+    const b =
+      '<!doctype html><html><head><style>.a{color:blue}</style></head><body><script>const X = 2;</script></body></html>';
+    // Different block contents but identical structure → same stable key.
+    // The HMR effect in PreviewSlot patches the in-iframe content via
+    // postMessage; the React iframe element does not remount.
+    expect(stablePreviewSourceKey(a)).toBe(stablePreviewSourceKey(b));
+    expect(stablePreviewSourceKey(a)).toContain('__HMR_CSS__');
+    expect(stablePreviewSourceKey(a)).toContain('__HMR_JS__');
+  });
 
-    expect(stablePreviewSourceKey(source)).toBe(source);
+  it('Backlog-3 §1 — structural differences (changed body markup) DO change the key', () => {
+    const a = '<!doctype html><html><body><h1>old</h1></body></html>';
+    const b = '<!doctype html><html><body><h1>new</h1></body></html>';
+    expect(stablePreviewSourceKey(a)).not.toBe(stablePreviewSourceKey(b));
+  });
+
+  it('Backlog-3 §1 — adding a new <style> block (count change) is structural', () => {
+    const a = '<!doctype html><html><head><style>.a{}</style></head><body>x</body></html>';
+    const b =
+      '<!doctype html><html><head><style>.a{}</style><style>.b{}</style></head><body>x</body></html>';
+    expect(stablePreviewSourceKey(a)).not.toBe(stablePreviewSourceKey(b));
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parsePromptCommand } from './prompt-commands';
+import { detectGameModeFromPrompt, parsePromptCommand } from './prompt-commands';
 
 describe('parsePromptCommand', () => {
   it('passes a plain prompt through untouched', () => {
@@ -109,5 +109,116 @@ describe('parsePromptCommand', () => {
       expect(r.pattern).toBe('vanilla');
       expect(r.patternSource).toBe('manual');
     });
+  });
+
+  describe('expanded multi-file heuristic — Phase 2.1', () => {
+    it.each([
+      'admin panel for a logistics company',
+      'admin dashboard with users, products, and orders',
+      'kanban board like Trello',
+      'Trello-like project management tool',
+      'analytics dashboard with three charts',
+      'observability platform for our microservices',
+      'multi-step onboarding wizard with 4 screens',
+      'signup flow with email verification',
+      'chat app like Slack',
+      'whiteboard tool with sticky notes',
+      'drawing tool with brush + eraser',
+      'code editor playground for JavaScript',
+      'markdown editor with live preview',
+      'WYSIWYG editor with image upload',
+      'quiz app with 10 questions',
+      'survey builder for product feedback',
+      'analytics dashboard using d3',
+      'design tool with tldraw',
+      'spreadsheet using prosemirror',
+      'IDE-like playground with monaco editor',
+      'documentation site for our API',
+      'docs site with sidebar nav',
+      'multi-page site for a SaaS launch',
+      'landing page with a blog and case studies',
+    ])('auto-flips to vanilla for: %s', (input) => {
+      const r = parsePromptCommand(input);
+      expect(r.pattern).toBe('vanilla');
+      expect(r.patternSource).toBe('auto');
+    });
+
+    it.each([
+      'a clean SaaS pricing page with three tiers',
+      'simple landing page for a coffee shop',
+      'portfolio for a photographer with 5 sections',
+      'iPhone mock of a notes app',
+      'pricing comparison table for two tiers',
+      'iPad lock-screen with weather widget',
+    ])('does NOT auto-flip ordinary single-page prompts: %s', (input) => {
+      const r = parsePromptCommand(input);
+      expect(r.pattern).toBeUndefined();
+      expect(r.patternSource).toBeUndefined();
+    });
+
+    it('does not flip on a casual mention of "data table" inside a landing page', () => {
+      const r = parsePromptCommand(
+        'landing page for a CRM that mentions a data table feature in the hero',
+      );
+      // "data table" alone is not a strong enough signal — only kanban /
+      // admin panel / multi-step flow / external lib / multi-page hits.
+      expect(r.pattern).toBeUndefined();
+    });
+  });
+});
+
+describe('detectGameModeFromPrompt — auto-route game-genre prompts to game-mode', () => {
+  it.each([
+    'create a first-person shooter wave defense',
+    'first person shooter with 3 weapons',
+    'FPS prototype with simple AI',
+    'twin-stick shooter set in space',
+    'tower defense with 5 enemy types',
+    'wave defense game with upgrades',
+    'wave survival on a desert map',
+    '2D platformer like Celeste',
+    'metroidvania with a grappling hook',
+    'endless runner where the player avoids cars',
+    'roguelike with permadeath',
+    'rogue-lite with meta progression',
+    'battle royale prototype on a small island',
+    'shoot em up with bullet hell waves',
+    'shmup with pickups',
+    'tactical RPG with grid-based combat',
+    'turn-based combat prototype',
+    'dungeon crawler with procedural rooms',
+    'racing game with 3 tracks',
+    'fighting game with 4 characters',
+    'rhythm game synced to a 120 BPM track',
+    'puzzle game with sokoban-style levels',
+    'arcade game with high-score table',
+    'retro game in the style of Galaga',
+    'idle game where you tap to mine ore',
+    'open-world game with a small village',
+    'simple 2d game with a player + enemies',
+    'build me a 3d game with a starter ship',
+    'small game where you collect coins',
+    'phaser game with 3 scenes',
+    'three.js scene with gameplay',
+    'godot project for a metroidvania',
+    'pygame project with arcade physics',
+    'MOBA prototype with two heroes',
+    'JRPG with a small overworld',
+  ])('flips to game-mode for: %s', (input) => {
+    expect(detectGameModeFromPrompt(input)).toBe(true);
+  });
+
+  it.each([
+    'landing page for a video game studio',
+    'pricing page for a game-development SaaS',
+    'documentation site for a game engine library',
+    'simple SaaS landing page',
+    'iPhone mock of a notes app',
+    'three.js scene of a brain',
+    'admin dashboard with users and orders',
+    'multi-step onboarding wizard',
+    'portfolio for a game artist',
+  ])('does NOT flip on: %s', (input) => {
+    expect(detectGameModeFromPrompt(input)).toBe(false);
   });
 });

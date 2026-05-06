@@ -17,6 +17,7 @@ import {
   CheckCircle,
   ChevronDown,
   Cpu,
+  DollarSign,
   FolderOpen,
   Globe,
   Image as ImageIcon,
@@ -45,13 +46,14 @@ import { AddCustomProviderModal } from './AddCustomProviderModal';
 import { ChatgptLoginCard } from './ChatgptLoginCard';
 import { DiagnosticsPanel } from './settings/DiagnosticsPanel';
 
-type Tab = 'models' | 'images' | 'appearance' | 'storage' | 'diagnostics' | 'advanced';
+type Tab = 'models' | 'images' | 'appearance' | 'storage' | 'diagnostics' | 'advanced' | 'budgets';
 
 const TABS: ReadonlyArray<{ id: Tab; icon: typeof Cpu }> = [
   { id: 'models', icon: Cpu },
   { id: 'images', icon: ImageIcon },
   { id: 'appearance', icon: Palette },
   { id: 'storage', icon: FolderOpen },
+  { id: 'budgets', icon: DollarSign },
   { id: 'diagnostics', icon: AlertCircle },
   { id: 'advanced', icon: Sliders },
 ];
@@ -2606,6 +2608,212 @@ function StorageTab() {
   );
 }
 
+// ─── Budgets tab — Backlog-3 §10 ──────────────────────────────────────────────
+
+function BudgetsTab() {
+  const pushToast = useCodesignStore((s) => s.pushToast);
+  const [dailyLimit, setDailyLimit] = useState<string>('');
+  const [perDesignLimit, setPerDesignLimit] = useState<string>('');
+  const [alertAtPct, setAlertAtPct] = useState<number>(80);
+  const [daily, setDaily] = useState<
+    Array<{
+      date: string;
+      costUsd: number;
+      inputTokens: number;
+      outputTokens: number;
+      cachedInputTokens: number;
+      runCount: number;
+    }>
+  >([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!window.codesign) return;
+    let cancelled = false;
+    void Promise.all([
+      window.codesign.getBudget?.('global'),
+      window.codesign.getDailyUsage?.(7),
+    ]).then(([budget, days]) => {
+      if (cancelled) return;
+      if (budget) {
+        if (budget.dailyLimitUsd !== null) setDailyLimit(String(budget.dailyLimitUsd));
+        if (budget.perDesignLimitUsd !== null) setPerDesignLimit(String(budget.perDesignLimitUsd));
+        setAlertAtPct(budget.alertAtPct);
+      }
+      setDaily(days ?? []);
+      setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const save = async (): Promise<void> => {
+    if (!window.codesign?.setBudget) return;
+    const parseNum = (s: string): number | null => {
+      const v = Number(s.trim());
+      return s.trim().length === 0 || !Number.isFinite(v) ? null : v;
+    };
+    await window.codesign.setBudget({
+      id: 'global',
+      dailyLimitUsd: parseNum(dailyLimit),
+      perDesignLimitUsd: parseNum(perDesignLimit),
+      alertAtPct,
+    });
+    pushToast({
+      variant: 'success',
+      title: 'Budget saved',
+      description: 'Limits applied. Cost dashboard updated.',
+    });
+  };
+
+  const totalCostThisWeek = daily.reduce((sum, d) => sum + d.costUsd, 0);
+  const totalRunsThisWeek = daily.reduce((sum, d) => sum + d.runCount, 0);
+
+  return (
+    <div className="max-w-[640px] space-y-[var(--space-6)]">
+      <header>
+        <h2 className="text-[var(--text-lg)] font-medium text-[var(--color-text-primary)]">
+          Budgets &amp; cost dashboard
+        </h2>
+        <p className="mt-[var(--space-1)] text-[var(--color-text-muted)] text-[13px]">
+          All cost data stays local. We never send usage anywhere — limits exist to alert you, not
+          to gate runs.
+        </p>
+      </header>
+
+      {loading ? (
+        <div className="text-[var(--color-text-muted)]">Loading…</div>
+      ) : (
+        <>
+          <section className="space-y-[var(--space-3)]">
+            <Label>Daily spend limit (USD)</Label>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              value={dailyLimit}
+              onChange={(e) => setDailyLimit(e.target.value)}
+              placeholder="e.g. 5.00 (leave blank for no cap)"
+              className="w-full rounded-[var(--radius-md)] border border-[var(--color-border-muted)] bg-[var(--color-surface)] px-[var(--space-3)] py-[var(--space-2)] text-[13px]"
+            />
+            <p className="text-[12px] text-[var(--color-text-muted)]">
+              When today's spend approaches this limit a toast warns; runs continue.
+            </p>
+
+            <Label>Per-design default limit (USD)</Label>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              value={perDesignLimit}
+              onChange={(e) => setPerDesignLimit(e.target.value)}
+              placeholder="e.g. 1.00 (leave blank for no cap)"
+              className="w-full rounded-[var(--radius-md)] border border-[var(--color-border-muted)] bg-[var(--color-surface)] px-[var(--space-3)] py-[var(--space-2)] text-[13px]"
+            />
+
+            <Label>Alert threshold (% of limit)</Label>
+            <input
+              type="range"
+              min="50"
+              max="100"
+              step="5"
+              value={alertAtPct}
+              onChange={(e) => setAlertAtPct(Number(e.target.value))}
+              className="w-full"
+            />
+            <div className="text-[12px] text-[var(--color-text-muted)] tabular-nums">
+              {alertAtPct}% of the daily limit triggers the warning toast.
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void save()}
+              className="rounded-[var(--radius-md)] bg-[var(--color-accent)] text-[var(--color-on-accent,white)] px-[var(--space-4)] py-[var(--space-2)] text-[13px] font-medium hover:opacity-90"
+            >
+              Save limits
+            </button>
+          </section>
+
+          <section className="space-y-[var(--space-3)]">
+            <header>
+              <h3 className="text-[var(--text-md)] font-medium text-[var(--color-text-primary)]">
+                Last 7 days
+              </h3>
+              <p className="text-[12px] text-[var(--color-text-muted)]">
+                ${totalCostThisWeek.toFixed(2)} across {totalRunsThisWeek}{' '}
+                {totalRunsThisWeek === 1 ? 'run' : 'runs'}
+              </p>
+            </header>
+            {daily.length === 0 ? (
+              <div className="text-[var(--color-text-muted)] text-[13px]">
+                No runs recorded yet.
+              </div>
+            ) : (
+              <BudgetSparkline daily={daily} />
+            )}
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
+
+function BudgetSparkline({
+  daily,
+}: {
+  daily: Array<{ date: string; costUsd: number; runCount: number }>;
+}) {
+  const W = 480;
+  const H = 80;
+  const pad = 6;
+  const max = Math.max(0.01, ...daily.map((d) => d.costUsd));
+  // Right-align: pad the points to occupy the full width regardless of
+  // count (1 row → centered dot).
+  const stride = daily.length > 1 ? (W - 2 * pad) / (daily.length - 1) : 0;
+  const points = daily.map((d, i) => {
+    const x = pad + i * stride;
+    const y = H - pad - (d.costUsd / max) * (H - 2 * pad);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const polyline = points.join(' ');
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--color-border-subtle)] p-[var(--space-3)] bg-[var(--color-background)]">
+      <svg
+        width={W}
+        height={H}
+        viewBox={`0 0 ${W} ${H}`}
+        role="img"
+        aria-label="Daily spend over the last 7 days"
+        className="block w-full h-auto"
+      >
+        <polyline
+          points={polyline}
+          fill="none"
+          stroke="var(--color-accent)"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        {daily.map((d, i) => {
+          const x = pad + i * stride;
+          const y = H - pad - (d.costUsd / max) * (H - 2 * pad);
+          return (
+            <circle key={d.date} cx={x} cy={y} r={3} fill="var(--color-accent)">
+              <title>{`${d.date}: $${d.costUsd.toFixed(4)} · ${d.runCount} run(s)`}</title>
+            </circle>
+          );
+        })}
+      </svg>
+      <div className="mt-[var(--space-2)] flex items-center justify-between text-[11px] text-[var(--color-text-muted)] tabular-nums">
+        <span>{daily[0]?.date ?? ''}</span>
+        <span>peak ${max.toFixed(2)}</span>
+        <span>{daily[daily.length - 1]?.date ?? ''}</span>
+      </div>
+    </div>
+  );
+}
+
 // ─── Advanced tab ─────────────────────────────────────────────────────────────
 
 function AdvancedTab() {
@@ -2618,6 +2826,7 @@ function AdvancedTab() {
     dismissedUpdateVersion: '',
     diagnosticsLastReadTs: 0,
     lastPickedMode: 'design',
+    incrementalVerifyDisabled: false,
   });
 
   useEffect(() => {
@@ -2708,6 +2917,18 @@ function AdvancedTab() {
         >
           {t('settings.advanced.toggleDevtools')}
         </button>
+      </Row>
+
+      <Row
+        label="Incremental verify_artifact"
+        hint="When ON (default), the agent runs verify_artifact every 4 edits past turn 8 and surfaces any DOM/lint errors mid-run so it can fix them earlier. Disable only for debugging — short runs already silently no-op."
+      >
+        <input
+          type="checkbox"
+          checked={prefs.incrementalVerifyDisabled !== true}
+          onChange={(e) => void updatePref({ incrementalVerifyDisabled: !e.target.checked })}
+          className="h-4 w-4 accent-[var(--color-accent)]"
+        />
       </Row>
 
       <GodotCliRow />
@@ -2834,6 +3055,7 @@ export function Settings() {
           {tab === 'images' ? <ImageGenerationTab /> : null}
           {tab === 'appearance' ? <AppearanceTab /> : null}
           {tab === 'storage' ? <StorageTab /> : null}
+          {tab === 'budgets' ? <BudgetsTab /> : null}
           {tab === 'diagnostics' ? <DiagnosticsPanel /> : null}
           {tab === 'advanced' ? <AdvancedTab /> : null}
         </section>

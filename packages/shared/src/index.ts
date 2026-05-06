@@ -221,6 +221,11 @@ export type ApplyCommentPayload = z.infer<typeof ApplyCommentPayload>;
 export const CancelGenerationPayloadV1 = z.object({
   schemaVersion: z.literal(1),
   generationId: GenerationId,
+  /** Backlog-3 §5 — when true, defer cancellation to the next safe
+   *  boundary (turn_end) so the in-flight assistant message + tool
+   *  results commit to chat_messages. Resume from chat_messages then
+   *  sees a complete transcript with no half-written turns. */
+  asCheckpoint: z.boolean().optional(),
 });
 export type CancelGenerationPayloadV1 = z.infer<typeof CancelGenerationPayloadV1>;
 

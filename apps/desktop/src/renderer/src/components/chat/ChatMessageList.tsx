@@ -1,10 +1,72 @@
 import { useT } from '@open-codesign/i18n';
 import type { ChatMessageRow, ChatToolCallPayload } from '@open-codesign/shared';
-import { FileText } from 'lucide-react';
+import { FileText, Pause } from 'lucide-react';
 import { useEffect, useRef } from 'react';
+import { useCodesignStore } from '../../store';
 import { AssistantText } from './AssistantText';
 import { UserMessage } from './UserMessage';
 import { InlineTodoList, WorkingCard } from './WorkingCard';
+
+/** Visual marker between messages from different in-design sessions
+ *  (Improver1 follow-up — "new conversation" feature). Older rows
+ *  still scroll above the line; rows below the divider belong to the
+ *  current session and are the only ones the LLM sees on the next
+ *  turn. Decorative — no interaction. */
+function SessionDivider() {
+  const t = useT();
+  return (
+    <div
+      className="my-[var(--space-2)] flex items-center gap-[var(--space-2)] text-[var(--text-xs)] text-[var(--color-text-muted)]"
+      aria-label={t('chat.newSession.previousSessionDivider')}
+    >
+      <span className="flex-1 h-px bg-[var(--color-border-subtle)]" />
+      <span className="uppercase tracking-wide font-medium">
+        {t('chat.newSession.previousSessionDivider')}
+      </span>
+      <span className="flex-1 h-px bg-[var(--color-border-subtle)]" />
+    </div>
+  );
+}
+
+/** Backlog-3 §5 — checkpoint row + Resume CTA. */
+function CheckpointRow({
+  turnCount,
+  elapsedSec,
+  preview,
+}: {
+  turnCount: number;
+  elapsedSec: number;
+  preview: string;
+}) {
+  const resume = useCodesignStore((s) => s.resumeFromCheckpoint);
+  const isGenerating = useCodesignStore((s) => s.isGenerating);
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--color-border-subtle)] bg-[var(--color-background-secondary)] px-[var(--space-3)] py-[var(--space-2)] text-[12.5px]">
+      <div className="flex items-center gap-[6px] text-[var(--color-text-muted)]">
+        <Pause className="w-[14px] h-[14px]" aria-hidden />
+        <span className="font-medium text-[var(--color-text-primary)]">Stopped — checkpoint</span>
+        <span className="ml-auto tabular-nums">
+          {turnCount} {turnCount === 1 ? 'turn' : 'turns'} · {elapsedSec}s
+        </span>
+      </div>
+      {preview.length > 0 ? (
+        <div className="mt-[var(--space-1)] text-[var(--color-text-secondary)] line-clamp-2">
+          {preview}
+        </div>
+      ) : null}
+      <div className="mt-[var(--space-2)]">
+        <button
+          type="button"
+          onClick={() => void resume()}
+          disabled={isGenerating}
+          className="rounded-[var(--radius-sm)] bg-[var(--color-accent)] text-[var(--color-on-accent,white)] px-[var(--space-3)] py-[3px] text-[11.5px] font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Resume from checkpoint
+        </button>
+      </div>
+    </div>
+  );
+}
 
 interface ChatMessageListProps {
   messages: ChatMessageRow[];
@@ -168,9 +230,26 @@ export function ChatMessageList({
     }
   }
 
+  // Track session_id transitions so we can inject a "Previous conversation"
+  // divider above each new session. Rows older than the in-design new-session
+  // feature read back as sessionId=0; first divider only appears when the
+  // user has actually clicked New Conversation at least once on this design.
+  let prevSessionId: number | null = null;
+
   for (let mi = 0; mi < messages.length; mi += 1) {
     const msg = messages[mi];
     if (!msg) continue;
+    const msgSession = msg.sessionId ?? 0;
+    if (prevSessionId !== null && msgSession !== prevSessionId) {
+      // Flush pending tool-call bucket BEFORE the divider so the cluster
+      // stays inside the previous session visually.
+      flush();
+      items.push({
+        key: `session-divider-${msg.seq}`,
+        node: <SessionDivider />,
+      });
+    }
+    prevSessionId = msgSession;
     if (msg.kind === 'tool_call') {
       const call = (msg.payload as ChatToolCallPayload) ?? null;
       if (!call) continue;
@@ -258,14 +337,87 @@ export function ChatMessageList({
         ),
       });
     } else if (msg.kind === 'error') {
-      const p = msg.payload as { message?: string };
+      const p = msg.payload as {
+        message?: string;
+        code?: string;
+        runId?: string;
+        requestId?: string;
+        upstream_status?: number;
+        upstream_request_id?: string;
+        upstream_provider?: string;
+      };
+      const requestId = p?.requestId ?? p?.upstream_request_id;
+      const status = p?.upstream_status;
+      const provider = p?.upstream_provider;
+      const code = p?.code;
+      const runId = p?.runId;
+      const message = p?.message ?? t('errors.unknown');
+      const copyDiagnostic = (): void => {
+        const blob = JSON.stringify(
+          {
+            schemaVersion: 1,
+            message,
+            ...(code !== undefined ? { code } : {}),
+            ...(runId !== undefined ? { runId } : {}),
+            ...(status !== undefined ? { httpStatus: status } : {}),
+            ...(provider !== undefined ? { provider } : {}),
+            ...(requestId !== undefined ? { requestId } : {}),
+            capturedAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        );
+        try {
+          void navigator.clipboard.writeText(blob);
+        } catch {
+          // Clipboard unavailable in some sandboxed contexts — silently
+          // ignore; users can still read the visible error.
+        }
+      };
       items.push({
         key: `err-${msg.seq}`,
         node: (
-          <div className="rounded-[var(--radius-md)] border border-[var(--color-error)] bg-[var(--color-surface)] px-[var(--space-3)] py-[var(--space-2)] text-[12.5px] font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-primary)] break-all whitespace-pre-wrap">
-            {p?.message ?? t('errors.unknown')}
+          <div className="rounded-[var(--radius-md)] border border-[var(--color-error)] bg-[var(--color-surface)] px-[var(--space-3)] py-[var(--space-2)] text-[12.5px] font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-primary)]">
+            <div className="break-all whitespace-pre-wrap">{message}</div>
+            {(code !== undefined ||
+              runId !== undefined ||
+              status !== undefined ||
+              requestId !== undefined ||
+              provider !== undefined) && (
+              <div className="mt-[var(--space-1)] flex flex-wrap items-center gap-[var(--space-2)] text-[11.5px] text-[var(--color-text-muted)]">
+                {code !== undefined ? <span>code {code}</span> : null}
+                {runId !== undefined ? <span>run {runId}</span> : null}
+                {status !== undefined ? <span>HTTP {status}</span> : null}
+                {provider !== undefined ? <span>{provider}</span> : null}
+                {requestId !== undefined ? <span>req {requestId}</span> : null}
+                <button
+                  type="button"
+                  onClick={copyDiagnostic}
+                  className="ml-auto rounded-[var(--radius-sm)] border border-[var(--color-border-subtle)] bg-[var(--color-background-secondary)] px-[var(--space-2)] py-[1px] hover:bg-[var(--color-background-tertiary)]"
+                  title="Copy a JSON diagnostic blob (no telemetry; clipboard only)"
+                >
+                  Copy diagnostic
+                </button>
+              </div>
+            )}
           </div>
         ),
+      });
+    } else if (msg.kind === 'checkpoint') {
+      // Backlog-3 §5 — checkpoint row with Resume CTA. Payload carries
+      // turn count + elapsed + last assistant text preview.
+      const p = msg.payload as {
+        turnCount?: number;
+        elapsedMs?: number;
+        lastAssistantText?: string;
+        createdAt?: number;
+      } | null;
+      const turnCount = p?.turnCount ?? 0;
+      const elapsedSec = Math.round((p?.elapsedMs ?? 0) / 1000);
+      const preview = p?.lastAssistantText ?? '';
+      items.push({
+        key: `chk-${msg.seq}`,
+        node: <CheckpointRow turnCount={turnCount} elapsedSec={elapsedSec} preview={preview} />,
       });
     }
   }

@@ -55,6 +55,7 @@ describe('readPersisted()', () => {
       dismissedUpdateVersion: '',
       diagnosticsLastReadTs: 0,
       lastPickedMode: 'design',
+      incrementalVerifyDisabled: false,
     });
   });
 

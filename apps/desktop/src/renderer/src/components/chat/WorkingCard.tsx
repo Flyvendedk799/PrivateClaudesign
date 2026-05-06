@@ -13,8 +13,10 @@ import {
   Sparkles,
   Wrench,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { lineDiff } from '../../lib/preview-diff';
 import { summarizeToolCall } from '../../lib/tool-narrative';
+import { useCodesignStore } from '../../store';
 
 export interface WorkingCardProps {
   calls: ChatToolCallPayload[];
@@ -85,6 +87,16 @@ interface ToolRow {
    *  shows this instead of the raw `label`; `label` is kept as the title
    *  attribute for hover-to-see-the-tool-name behaviour. */
   narrative?: string;
+  /** Phase 5 — original call payload for edit rows; powers the "see diff"
+   *  toggle. Only populated when the agent supplied old_str + new_str
+   *  (str_replace) or content (create/insert). undefined for everything
+   *  else so the toggle silently doesn't render. */
+  diffPayload?: { kind: 'str_replace' | 'insert' | 'create'; oldText: string; newText: string };
+  /** Backlog-3 §4 — toolCallId so the row can subscribe to the
+   *  per-toolCallId streaming partial-result entry. Only set on rows
+   *  that originated from a real `pending` tool call (i.e. live
+   *  during a run). */
+  toolCallId?: string;
 }
 
 function extractTodos(call: ChatToolCallPayload): TodoItem[] {
@@ -128,6 +140,31 @@ function isTextEditorTool(call: ChatToolCallPayload): boolean {
 function pathOf(call: ChatToolCallPayload): string | null {
   const p = call.args?.['path'];
   return typeof p === 'string' ? p : null;
+}
+
+/** Phase 5 — extract old/new pair from a text-editor call so the row can
+ *  render an inline diff. Only populates for shapes where both sides are
+ *  available; agents sometimes call str_replace with empty old_str etc. */
+function extractDiffPayload(call: ChatToolCallPayload): ToolRow['diffPayload'] {
+  if (!isTextEditorTool(call)) return undefined;
+  const args = (call.args ?? {}) as Record<string, unknown>;
+  if (call.command === 'str_replace') {
+    const oldText = args['old_str'];
+    const newText = args['new_str'];
+    if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined;
+    return { kind: 'str_replace', oldText, newText };
+  }
+  if (call.command === 'insert') {
+    const newText = args['insert_str'] ?? args['new_str'];
+    if (typeof newText !== 'string') return undefined;
+    return { kind: 'insert', oldText: '', newText };
+  }
+  if (call.command === 'create') {
+    const newText = args['file_text'] ?? args['contents'];
+    if (typeof newText !== 'string') return undefined;
+    return { kind: 'create', oldText: '', newText };
+  }
+  return undefined;
 }
 
 function iconAndLabel(call: ChatToolCallPayload): { Icon: LucideIcon; label: string } {
@@ -206,10 +243,13 @@ export function buildRows(calls: ChatToolCallPayload[]): ToolRow[] {
         if (call.status === 'running') last.status = 'running';
         else if (call.status === 'error') last.status = 'error';
         else if (last.status !== 'running' && last.status !== 'error') last.status = 'done';
+        const dp = extractDiffPayload(call);
+        if (dp) last.diffPayload = dp;
         continue;
       }
     }
 
+    const diffPayload = extractDiffPayload(call);
     rows.push({
       key: `c-${i}`,
       Icon,
@@ -217,6 +257,8 @@ export function buildRows(calls: ChatToolCallPayload[]): ToolRow[] {
       detail,
       status: call.status,
       narrative: summarizeToolCall(call),
+      ...(diffPayload ? { diffPayload } : {}),
+      ...(call.toolCallId !== undefined ? { toolCallId: call.toolCallId } : {}),
     });
     if (isFileEdit) lastEditIdx = rows.length - 1;
   }
@@ -336,6 +378,15 @@ function TodoListView({
 
 function ToolRowView({ row }: { row: ToolRow }) {
   const { Icon } = row;
+  // Backlog-3 §4 — partial-result preview while the row is running.
+  // Subscribes only to its own toolCallId entry so unrelated tool
+  // updates don't re-render. `?? null` so the stable selector returns
+  // a stable reference for shallow-equality bailout.
+  const partial = useCodesignStore((s) =>
+    row.toolCallId !== undefined && row.status === 'running'
+      ? (s.streamingToolResults[row.toolCallId] ?? null)
+      : null,
+  );
   // Story-mode label when the narrative helper produced one; otherwise fall
   // back to the raw tool name. The detail (file path, etc.) appends only
   // when the narrative didn't already incorporate it.
@@ -351,28 +402,110 @@ function ToolRowView({ row }: { row: ToolRow }) {
   // see what's actually happening. Format: "raw_tool_name · /path".
   const tooltip = [row.label, row.detail].filter(Boolean).join(' · ');
   const primary = row.narrative ?? row.label;
+  const [diffOpen, setDiffOpen] = useState(false);
+  const hasDiff = row.diffPayload !== undefined;
 
   return (
-    <div
-      className="flex items-center gap-[6px] text-[12.5px] py-[1px]"
-      title={tooltip || row.label}
-    >
-      {row.status === 'running' ? (
-        <span className="relative inline-flex w-[14px] h-[14px] items-center justify-center shrink-0">
-          <span className="absolute inline-block w-[7px] h-[7px] rounded-full bg-[var(--color-accent)] animate-pulse" />
-          <span className="absolute inline-block w-[12px] h-[12px] rounded-full border border-[var(--color-accent)]/30 animate-ping" />
-        </span>
-      ) : row.status === 'error' ? (
-        <Icon className="w-[14px] h-[14px] shrink-0 text-[var(--color-error)]" aria-hidden />
-      ) : (
-        <Icon className="w-[14px] h-[14px] shrink-0 text-[var(--color-text-muted)]" aria-hidden />
-      )}
-      <span className="text-[var(--color-text-primary)]">{primary}</span>
-      {detailText ? (
-        <span className="font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-muted)] truncate">
-          {detailText}
-        </span>
+    <div className="text-[12.5px] py-[1px]">
+      <div className="flex items-center gap-[6px]" title={tooltip || row.label}>
+        {row.status === 'running' ? (
+          <span className="relative inline-flex w-[14px] h-[14px] items-center justify-center shrink-0">
+            <span className="absolute inline-block w-[7px] h-[7px] rounded-full bg-[var(--color-accent)] animate-pulse" />
+            <span className="absolute inline-block w-[12px] h-[12px] rounded-full border border-[var(--color-accent)]/30 animate-ping" />
+          </span>
+        ) : row.status === 'error' ? (
+          <Icon className="w-[14px] h-[14px] shrink-0 text-[var(--color-error)]" aria-hidden />
+        ) : (
+          <Icon className="w-[14px] h-[14px] shrink-0 text-[var(--color-text-muted)]" aria-hidden />
+        )}
+        <span className="text-[var(--color-text-primary)]">{primary}</span>
+        {detailText ? (
+          <span className="font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-muted)] truncate">
+            {detailText}
+          </span>
+        ) : null}
+        {hasDiff ? (
+          <button
+            type="button"
+            onClick={() => setDiffOpen((v) => !v)}
+            className="ml-auto rounded-[var(--radius-sm)] border border-[var(--color-border-subtle)] bg-[var(--color-background-secondary)] px-[6px] py-[1px] text-[11px] text-[var(--color-text-muted)] hover:bg-[var(--color-background-tertiary)]"
+            aria-expanded={diffOpen}
+            title="Show / hide diff"
+          >
+            {diffOpen ? 'Hide diff' : 'Diff'}
+          </button>
+        ) : null}
+      </div>
+      {hasDiff && diffOpen && row.diffPayload ? <DiffBlock payload={row.diffPayload} /> : null}
+      {partial !== null ? <ToolProgressStrip partial={partial} /> : null}
+    </div>
+  );
+}
+
+/** Backlog-3 §4 — compact strip below a running tool row. Shows
+ *  `progressPct` as a thin bar when set; otherwise falls back to a
+ *  byte-count line. The preview text (when non-empty) anchors the
+ *  user to "what is the tool actually doing right now". */
+function ToolProgressStrip({
+  partial,
+}: {
+  partial: { byteCount?: number; preview?: string; progressPct?: number };
+}) {
+  const pct =
+    typeof partial.progressPct === 'number'
+      ? Math.max(0, Math.min(100, partial.progressPct))
+      : null;
+  const hasPreview = typeof partial.preview === 'string' && partial.preview.length > 0;
+  const hasBytes = typeof partial.byteCount === 'number' && partial.byteCount > 0;
+  if (pct === null && !hasPreview && !hasBytes) return null;
+  return (
+    <div className="mt-[var(--space-1)] ml-[20px] text-[11px] text-[var(--color-text-muted)]">
+      {pct !== null ? (
+        <div
+          className="relative h-[3px] w-[140px] overflow-hidden rounded-full bg-[var(--color-border-subtle)]"
+          aria-label={`progress ${pct}%`}
+        >
+          <div
+            className="absolute inset-y-0 left-0 bg-[var(--color-accent)] transition-[width] duration-200"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
       ) : null}
+      {hasPreview ? (
+        <div className="mt-[2px] truncate font-[var(--font-mono),ui-monospace,Menlo,monospace]">
+          {partial.preview}
+        </div>
+      ) : null}
+      {pct === null && hasBytes ? (
+        <div className="tabular-nums">
+          {((partial.byteCount ?? 0) / 1024).toFixed(1)} KB streamed
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function DiffBlock({ payload }: { payload: NonNullable<ToolRow['diffPayload']> }) {
+  const lines = useMemo(
+    () => lineDiff(payload.oldText, payload.newText, { context: 2, maxLines: 80 }),
+    [payload.oldText, payload.newText],
+  );
+  return (
+    <div className="mt-[var(--space-1)] ml-[20px] rounded-[var(--radius-sm)] border border-[var(--color-border-subtle)] bg-[var(--color-background)] font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[11px] leading-[1.4]">
+      {lines.map((l, i) => {
+        const cls =
+          l.kind === 'add'
+            ? 'bg-[var(--color-success,#16a34a)]/10 text-[var(--color-success,#166534)]'
+            : l.kind === 'remove'
+              ? 'bg-[var(--color-danger,#dc2626)]/10 text-[var(--color-danger,#991b1b)]'
+              : 'text-[var(--color-text-muted)]';
+        const prefix = l.kind === 'add' ? '+' : l.kind === 'remove' ? '-' : ' ';
+        return (
+          <div key={i} className={`px-[var(--space-2)] whitespace-pre-wrap break-all ${cls}`}>
+            {prefix} {l.text}
+          </div>
+        );
+      })}
     </div>
   );
 }

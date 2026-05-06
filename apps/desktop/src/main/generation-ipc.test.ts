@@ -4,6 +4,7 @@ import {
   armGenerationTimeout,
   cancelGenerationRequest,
   extractGenerationTimeoutError,
+  requestCheckpointAbort,
 } from './generation-ipc';
 
 function makeController() {
@@ -224,5 +225,90 @@ describe('extractGenerationTimeoutError', () => {
     const controller = new AbortController();
     controller.abort(new CodesignError('something else', 'PROVIDER_ABORTED'));
     expect(extractGenerationTimeoutError(controller.signal)).toBeNull();
+  });
+});
+
+describe('requestCheckpointAbort — Backlog-3 §5', () => {
+  it('sets the per-id hint without aborting in-flight requests', () => {
+    const controller = makeController();
+    const inFlight = new Map([['gen-1', controller]]);
+    const hints = new Map<string, boolean>();
+    const logIpc = { info: vi.fn() };
+
+    requestCheckpointAbort('gen-1', hints, logIpc);
+
+    // Hint set; controller untouched (the agent's turn_end subscriber
+    // is responsible for the eventual clean abort).
+    expect(hints.get('gen-1')).toBe(true);
+    expect(controller.abort).not.toHaveBeenCalled();
+    expect(inFlight.has('gen-1')).toBe(true);
+    expect(logIpc.info).toHaveBeenCalledWith('generate.cancel.checkpoint_requested', {
+      id: 'gen-1',
+    });
+  });
+
+  it('throws on non-string generationId without mutating the hint Map', () => {
+    const hints = new Map<string, boolean>();
+    const logIpc = { info: vi.fn() };
+
+    expect(() => requestCheckpointAbort(undefined, hints, logIpc)).toThrow(CodesignError);
+    expect(() => requestCheckpointAbort(42, hints, logIpc)).toThrow(CodesignError);
+    expect(() => requestCheckpointAbort(null, hints, logIpc)).toThrow(CodesignError);
+
+    expect(hints.size).toBe(0);
+    expect(logIpc.info).not.toHaveBeenCalled();
+  });
+
+  it('overwrites a prior hint for the same generationId (idempotent)', () => {
+    const hints = new Map<string, boolean>();
+    const logIpc = { info: vi.fn() };
+
+    requestCheckpointAbort('gen-1', hints, logIpc);
+    requestCheckpointAbort('gen-1', hints, logIpc);
+
+    expect(hints.get('gen-1')).toBe(true);
+    expect(hints.size).toBe(1);
+    expect(logIpc.info).toHaveBeenCalledTimes(2);
+  });
+
+  it('hints for different generations stay isolated', () => {
+    const hints = new Map<string, boolean>();
+    const logIpc = { info: vi.fn() };
+
+    requestCheckpointAbort('gen-1', hints, logIpc);
+    requestCheckpointAbort('gen-2', hints, logIpc);
+
+    expect(hints.get('gen-1')).toBe(true);
+    expect(hints.get('gen-2')).toBe(true);
+    expect(hints.has('gen-3')).toBe(false);
+  });
+});
+
+describe('CancelGenerationPayloadV1 — Backlog-3 §5 asCheckpoint', () => {
+  it('parses the optional asCheckpoint flag', () => {
+    const payload = CancelGenerationPayloadV1.parse({
+      schemaVersion: 1,
+      generationId: 'gen-1',
+      asCheckpoint: true,
+    });
+    expect(payload.asCheckpoint).toBe(true);
+  });
+
+  it('asCheckpoint is optional — omitting it parses cleanly', () => {
+    const payload = CancelGenerationPayloadV1.parse({
+      schemaVersion: 1,
+      generationId: 'gen-1',
+    });
+    expect(payload.asCheckpoint).toBeUndefined();
+  });
+
+  it('rejects non-boolean asCheckpoint', () => {
+    expect(() =>
+      CancelGenerationPayloadV1.parse({
+        schemaVersion: 1,
+        generationId: 'gen-1',
+        asCheckpoint: 'yes',
+      }),
+    ).toThrow();
   });
 });

@@ -13,8 +13,11 @@ import { ipcMain } from './electron-runtime';
 import { getLogger } from './logger';
 import {
   appendChatMessage,
+  getDesignCurrentSession,
   listChatMessages,
+  newChatSession,
   seedChatFromSnapshots,
+  seedDesignFilesFromLatestSnapshot,
   updateChatToolCallStatus,
 } from './snapshots-db';
 
@@ -28,6 +31,8 @@ const VALID_KINDS: ChatMessageKind[] = [
   'tool_call',
   'artifact_delivered',
   'error',
+  // Backlog-3 §5 — checkpoint rows persist mid-run state for resume.
+  'checkpoint',
 ];
 
 function requireSchemaV1(r: Record<string, unknown>, channel: string): void {
@@ -126,6 +131,8 @@ export const CHAT_MESSAGES_CHANNELS_V1 = [
   'chat:v1:append',
   'chat:v1:seed-from-snapshots',
   'chat:update-tool-status:v1',
+  'chat:v1:new-session',
+  'chat:v1:current-session',
 ] as const;
 
 export function registerChatMessagesIpc(db: Database): void {
@@ -158,9 +165,47 @@ export function registerChatMessagesIpc(db: Database): void {
       const designId = parseDesignId(raw, 'chat:v1:seed-from-snapshots');
       const inserted = seedChatFromSnapshots(db, designId);
       if (inserted > 0) logger.info('chat.seeded', { designId, inserted });
+      // Multi-file artifacts — when reopening a design that hasn't
+      // been touched this session, restore the file tree from the
+      // most recent snapshot so the iframe + Files panel see every
+      // sidecar, not just the inlined index.html the legacy
+      // single-blob path persisted. Idempotent: skips when
+      // design_files is already populated.
+      try {
+        const restored = seedDesignFilesFromLatestSnapshot(db, designId);
+        if (restored > 0) logger.info('design_files.seeded', { designId, restored });
+      } catch (err) {
+        logger.error('design_files.seed.fail', {
+          designId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        // Non-fatal — chat still seeded, the iframe falls back to srcdoc.
+      }
       return { inserted };
     },
   );
+
+  ipcMain.handle('chat:v1:new-session', (_e: unknown, raw: unknown): { sessionId: number } => {
+    const designId = parseDesignId(raw, 'chat:v1:new-session');
+    try {
+      const sessionId = newChatSession(db, designId);
+      logger.info('chat.new_session', { designId, sessionId });
+      return { sessionId };
+    } catch (err) {
+      logger.error('chat.new_session.fail', {
+        designId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      throw new CodesignError('Failed to start a new chat session', ERROR_CODES.IPC_DB_ERROR, {
+        cause: err,
+      });
+    }
+  });
+
+  ipcMain.handle('chat:v1:current-session', (_e: unknown, raw: unknown): { sessionId: number } => {
+    const designId = parseDesignId(raw, 'chat:v1:current-session');
+    return { sessionId: getDesignCurrentSession(db, designId) };
+  });
 
   ipcMain.handle('chat:update-tool-status:v1', (_e: unknown, raw: unknown): { ok: true } => {
     const input = parseUpdateToolStatus(raw);

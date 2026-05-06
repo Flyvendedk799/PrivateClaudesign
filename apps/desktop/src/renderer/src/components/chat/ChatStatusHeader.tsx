@@ -12,8 +12,16 @@
  */
 
 import { useT } from '@open-codesign/i18n';
-import { Check, Circle, Sparkles } from 'lucide-react';
+import { Check, Circle, Flag, Sparkles } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import {
+  cacheHitRatio,
+  estimateCostUsd,
+  formatTokens,
+  formatUsd,
+  resolvePricing,
+} from '../../lib/model-pricing';
+import { computeRunHealth } from '../../lib/run-health';
 import { useCodesignStore } from '../../store';
 
 interface TodoItem {
@@ -103,6 +111,14 @@ export function ChatStatusHeader() {
   const pendingToolCalls = useCodesignStore((s) => s.pendingToolCalls);
   const agentLiveness = useCodesignStore((s) => s.agentLiveness);
   const isRefinement = useCodesignStore((s) => s.currentRunIsRefinement);
+  const lastUsage = useCodesignStore((s) => s.lastUsage);
+  const cfg = useCodesignStore((s) => s.config);
+  // Always-called selector — `requestWrapUp` is referenced inside the
+  // run-health pill below, but the pill renders after the
+  // `if (!isGenerating) return null` early-return. Subscribing here
+  // (above the return) keeps the hook-call order stable across renders
+  // when the run flips from generating → idle.
+  const requestWrapUp = useCodesignStore((s) => s.requestWrapUp);
 
   // 1Hz tick so the "Quiet for Ns…" / "Waiting for first token Ns" labels
   // re-render every second. Cheap; React batches the re-renders.
@@ -190,6 +206,55 @@ export function ChatStatusHeader() {
   const runFailureCount = agentLiveness?.runFailureCount ?? 0;
   const showRunFailures = runFailureCount >= RUN_FAILURE_THRESHOLD;
 
+  // Improver1 §10 — run-health pill. Pulls per-turn rolling metrics
+  // out of agentLiveness and computes neutral / warn / alert. Only
+  // shows the pill when level !== 'neutral' so healthy runs stay
+  // quiet. On 'alert' we surface a clickable "Wrap up?" suggestion
+  // that fires the existing requestWrapUp store action.
+  const runHealth = computeRunHealth({
+    turnCount,
+    runToolCount: agentLiveness?.runToolCount ?? 0,
+    runFailureCount,
+    recentTurns: agentLiveness?.recentTurns ?? [],
+  });
+  const showHealth = runHealth.level !== 'neutral';
+
+  // Phase 4 — live cost / token / cache panel. Renders the most recent
+  // `lastUsage` (updated at every IPC settlement; mid-run we surface the
+  // last completed chunk's totals — Phase 1's cache breakpoints make
+  // these meaningful even on the first turn). Computed renderer-side so
+  // unknown models still show *something* via the Sonnet fallback.
+  const pricing = resolvePricing(cfg?.provider ?? null, cfg?.modelPrimary ?? null);
+  const costFromUsage = lastUsage
+    ? estimateCostUsd(
+        {
+          inputTokens: lastUsage.inputTokens,
+          outputTokens: lastUsage.outputTokens,
+          cachedInputTokens: lastUsage.cachedInputTokens,
+          cacheCreationInputTokens: lastUsage.cacheCreationInputTokens,
+        },
+        pricing,
+      )
+    : 0;
+  const liveCost = lastUsage && lastUsage.costUsd > 0 ? lastUsage.costUsd : costFromUsage;
+  const hitRatio = lastUsage
+    ? cacheHitRatio({
+        inputTokens: lastUsage.inputTokens,
+        outputTokens: lastUsage.outputTokens,
+        cachedInputTokens: lastUsage.cachedInputTokens,
+        cacheCreationInputTokens: lastUsage.cacheCreationInputTokens,
+      })
+    : null;
+  const ratioColor =
+    hitRatio === null
+      ? 'text-[var(--color-text-muted)]'
+      : hitRatio >= 0.7
+        ? 'text-[var(--color-success,#16a34a)]'
+        : hitRatio >= 0.3
+          ? 'text-[var(--color-warning,#ca8a04)]'
+          : 'text-[var(--color-danger,#dc2626)]';
+  const showUsageLine = lastUsage !== null && lastUsage.inputTokens > 0;
+
   return (
     <div
       className="sticky top-0 z-10 -mx-[var(--space-4)] -mt-[var(--space-4)] mb-[var(--space-3)] bg-[var(--color-background-secondary)]/95 backdrop-blur border-b border-[var(--color-border-subtle)] px-[var(--space-4)] py-[var(--space-2)] text-[var(--text-xs)]"
@@ -231,6 +296,27 @@ export function ChatStatusHeader() {
               {runFailureCount} {runFailureCount === 1 ? 'retry' : 'retries'}
             </span>
           ) : null}
+          {showHealth
+            ? (() => {
+                const isAlert = runHealth.level === 'alert';
+                const baseClass = isAlert
+                  ? 'bg-[var(--color-error,#dc2626)]/15 text-[var(--color-error,#dc2626)] hover:bg-[var(--color-error,#dc2626)]/25'
+                  : 'bg-[var(--color-warning,#ca8a04)]/15 text-[var(--color-warning,#ca8a04)] hover:bg-[var(--color-warning,#ca8a04)]/25';
+                const tooltip = `Run health · ${runHealth.level}\n${runHealth.reasons.join('\n')}\n\nClick to wrap up — the agent will converge to \`done\` at the next safe boundary.`;
+                return (
+                  <button
+                    type="button"
+                    onClick={() => void requestWrapUp()}
+                    aria-label={`Run health: ${runHealth.level}. Click to wrap up.`}
+                    title={tooltip}
+                    className={`ml-[var(--space-2)] inline-flex items-center gap-[3px] rounded-full px-[var(--space-2)] font-medium transition-colors ${baseClass}`}
+                  >
+                    <Flag className="w-[10px] h-[10px]" strokeWidth={2.5} aria-hidden />
+                    <span>{isAlert ? 'Looks stuck — wrap up?' : 'Run drifting'}</span>
+                  </button>
+                );
+              })()
+            : null}
         </span>
         {showSpinner ? (
           <span className="flex items-center gap-[3px] shrink-0" aria-label="Agent is working">
@@ -240,6 +326,23 @@ export function ChatStatusHeader() {
           </span>
         ) : null}
       </div>
+      {showUsageLine && lastUsage ? (
+        <div
+          className="mt-[var(--space-1)] flex items-center gap-[var(--space-3)] text-[var(--color-text-muted)] tabular-nums"
+          aria-label="Run usage"
+          title="Live token usage and estimated cost. Cache-hit ratio is the share of input tokens served from the prompt cache (higher is cheaper)."
+        >
+          <span>
+            in {formatTokens(lastUsage.inputTokens)} · out {formatTokens(lastUsage.outputTokens)}
+          </span>
+          {hitRatio !== null ? (
+            <span className={ratioColor}>cache {Math.round(hitRatio * 100)}%</span>
+          ) : null}
+          <span className="ml-auto font-medium text-[var(--color-text-primary)]">
+            {formatUsd(liveCost)}
+          </span>
+        </div>
+      ) : null}
       {todos.length > 0
         ? (() => {
             // First unchecked item = active. -1 if everything is done.

@@ -23,6 +23,7 @@ import IOS_FRAME_JSX from '../vendor/ios-frame.jsx?raw';
 import REACT_DOM_UMD from '../vendor/react-dom.umd.js?raw';
 import REACT_UMD from '../vendor/react.umd.js?raw';
 
+import { HMR_PATCHER_MARKER, hmrPatcherScriptTag } from './hmr-patcher';
 import { OVERLAY_SCRIPT } from './overlay';
 import { TWEAKS_BRIDGE_LISTENER, TWEAKS_BRIDGE_SETUP } from './tweaks-bridge';
 
@@ -32,6 +33,18 @@ export {
   isOverlayMessage,
   OVERLAY_SCRIPT,
 } from './overlay';
+export {
+  HMR_PATCHER_MARKER,
+  HMR_PROTOCOL_VERSION,
+  hmrPatcherScript,
+  hmrPatcherScriptTag,
+} from './hmr-patcher';
+export type {
+  HmrAckEnvelope,
+  HmrCssPatchEnvelope,
+  HmrJsPatchEnvelope,
+  HmrPatchEnvelope,
+} from './hmr-patcher';
 export type { ElementRectsMessage, OverlayMessage } from './overlay';
 export { isIframeErrorMessage } from './iframe-errors';
 export type { IframeErrorMessage } from './iframe-errors';
@@ -131,6 +144,7 @@ ${JSX_TEMPLATE_END}
 <script>if(window.__codesign_tweaks__){window.__codesign_tweaks__.originalScript=${agentScriptLiteral};}</script>
 <script>${TWEAKS_BRIDGE_LISTENER}</script>
 <script>${OVERLAY_SCRIPT}</script>
+${hmrPatcherScriptTag()}
 </body>
 </html>`;
 }
@@ -178,16 +192,33 @@ function injectOverlayIntoHtmlDocument(html: string): string {
     }
   }
   if (upgraded.includes(OVERLAY_MARKER) || upgraded.includes("type: 'ELEMENT_SELECTED'")) {
+    // Backlog-3 §1 — overlay already injected. Add the HMR patcher
+    // alongside it if not yet present.
+    if (!upgraded.includes(HMR_PATCHER_MARKER)) {
+      const hmrTag = hmrPatcherScriptTag();
+      if (/<\/body\s*>/i.test(upgraded)) {
+        return upgraded.replace(/<\/body\s*>/i, `${hmrTag}</body>`);
+      }
+      if (/<\/html\s*>/i.test(upgraded)) {
+        return upgraded.replace(/<\/html\s*>/i, `${hmrTag}</html>`);
+      }
+      return `${upgraded}${hmrTag}`;
+    }
     return upgraded;
   }
+  // Inject overlay + HMR patcher together. Order: overlay first
+  // (existing behaviour), HMR patcher second so the overlay's element
+  // selection is established before HMR can fire any patches.
   const script = overlayScriptTag();
+  const hmrTag = hmrPatcherScriptTag();
+  const combined = `${script}${hmrTag}`;
   if (/<\/body\s*>/i.test(upgraded)) {
-    return upgraded.replace(/<\/body\s*>/i, `${script}</body>`);
+    return upgraded.replace(/<\/body\s*>/i, `${combined}</body>`);
   }
   if (/<\/html\s*>/i.test(upgraded)) {
-    return upgraded.replace(/<\/html\s*>/i, `${script}</html>`);
+    return upgraded.replace(/<\/html\s*>/i, `${combined}</html>`);
   }
-  return `${upgraded}${script}`;
+  return `${upgraded}${combined}`;
 }
 
 /**
@@ -199,6 +230,77 @@ export function extractAndUpgradeArtifact(source: string): string {
   return wrapJsxAsSrcdoc(source);
 }
 
+const ABSOLUTE_OR_DATA_URL = /^(?:[a-z]+:|\/\/|#|data:|blob:|game-files:|design-files:)/i;
+
+function isLocalHref(value: string): boolean {
+  if (value.length === 0) return false;
+  if (ABSOLUTE_OR_DATA_URL.test(value)) return false;
+  return true;
+}
+
+/** Strip the wrapping quotes from a captured attribute value. */
+function unquote(s: string): string {
+  if (s.length >= 2 && (s[0] === '"' || s[0] === "'") && s[s.length - 1] === s[0]) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+
+/**
+ * Inline relative `<link href="local.css">` / `<script src="local.js">`
+ * references against an in-memory sidecar map. Used by the `srcdoc`
+ * fallback path when multi-file designs render outside the
+ * `design-files://` protocol (e.g. Hub thumbnails, background preview
+ * pool slots, exporters). Pure — `sidecars` keys are POSIX-relative
+ * paths; values are the file contents.
+ *
+ * - Absolute URLs (https://, data:, blob:, etc.) and the multi-file
+ *   protocols (game-files:, design-files:) are left alone.
+ * - Missing sidecars are left as-is so the iframe's existing 404 path
+ *   surfaces a clear error instead of silently swallowing the ref.
+ * - `<script type="module" src="...">` becomes an inlined classic
+ *   script (modules without a URL can't import other modules anyway).
+ */
+export function inlineLocalRefs(html: string, sidecars: Record<string, string>): string {
+  if (Object.keys(sidecars).length === 0) return html;
+
+  // <link rel="stylesheet" href="X">  →  <style>{contents}</style>
+  // Match either ordering of rel/href and either quote style. Self-
+  // closing or open form. Conservative — only inline when the rel is
+  // explicitly `stylesheet` (preserves `<link rel="preconnect">` etc.).
+  const linkRe = /<link\b([^>]*)\/?>/gi;
+  let out = html.replace(linkRe, (full, attrs: string) => {
+    const hrefMatch = /\bhref\s*=\s*("[^"]*"|'[^']*')/i.exec(attrs);
+    if (hrefMatch === null) return full;
+    const relMatch = /\brel\s*=\s*("[^"]*"|'[^']*')/i.exec(attrs);
+    if (relMatch === null) return full;
+    const rel = unquote(relMatch[1] ?? '').toLowerCase();
+    if (rel !== 'stylesheet') return full;
+    const href = unquote(hrefMatch[1] ?? '');
+    if (!isLocalHref(href)) return full;
+    const body = sidecars[href];
+    if (body === undefined) return full;
+    return `<style data-codesign-inlined-from="${href}">${body}</style>`;
+  });
+
+  // <script src="X" ...></script>  →  <script>{contents}</script>
+  // Drop `type="module"` since modules without a base URL can't
+  // import siblings. `defer` / `async` are fine to drop too — once
+  // inlined the script runs in document-order anyway.
+  const scriptRe = /<script\b([^>]*)>\s*<\/script>/gi;
+  out = out.replace(scriptRe, (full, attrs: string) => {
+    const srcMatch = /\bsrc\s*=\s*("[^"]*"|'[^']*')/i.exec(attrs);
+    if (srcMatch === null) return full;
+    const src = unquote(srcMatch[1] ?? '');
+    if (!isLocalHref(src)) return full;
+    const body = sidecars[src];
+    if (body === undefined) return full;
+    return `<script data-codesign-inlined-from="${src}">${body}</script>`;
+  });
+
+  return out;
+}
+
 /**
  * Build a complete srcdoc HTML string for the preview iframe. Strips any
  * stray CSP meta tags from the agent payload, then wraps it as JSX.
@@ -207,8 +309,23 @@ export function extractAndUpgradeArtifact(source: string): string {
  * stored raw HTML documents (starting with `<!doctype` or `<html>`). Feeding
  * these through `wrapJsxAsSrcdoc` produces "Unexpected token" errors because
  * Babel tries to parse the HTML as JSX. Detect and pass them through verbatim.
+ *
+ * Multi-file artifacts: when `opts.sidecars` is supplied, relative
+ * `<link>`/`<script src>` references are inlined first via
+ * `inlineLocalRefs`. Used by callers that can't reach the
+ * `design-files://` protocol (Hub thumbnails, background preview pool,
+ * exporters). The protocol path is preferred for the live active slot
+ * — it gives full FS semantics — so callers that have access to a
+ * design id should prefer that route and use sidecars only as a
+ * fallback.
  */
-export function buildSrcdoc(userSource: string): string {
+export interface BuildSrcdocOptions {
+  /** POSIX-relative path → file contents map. Empty/omitted = no
+   *  inlining, original `srcdoc` flow. */
+  sidecars?: Record<string, string>;
+}
+
+export function buildSrcdoc(userSource: string, opts: BuildSrcdocOptions = {}): string {
   const stripped = userSource.replace(
     /<meta[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/gi,
     '',
@@ -218,7 +335,9 @@ export function buildSrcdoc(userSource: string): string {
   // Legacy HTML document (pre-JSX-only-switchover snapshots) — render as-is.
   const head = stripped.trimStart().slice(0, 2048).toLowerCase();
   if (head.startsWith('<!doctype') || head.startsWith('<html')) {
-    return injectOverlayIntoHtmlDocument(stripped);
+    const inlined =
+      opts.sidecars !== undefined ? inlineLocalRefs(stripped, opts.sidecars) : stripped;
+    return injectOverlayIntoHtmlDocument(inlined);
   }
   return wrapJsxAsSrcdoc(stripped);
 }

@@ -56,6 +56,13 @@ export interface Preferences {
   /** gameplan §A6 / Q2 — the last mode picked in the New-design dialog.
    *  The dialog opens to this tab on next launch. Defaults to 'design'. */
   lastPickedMode: 'design' | 'game';
+  /** Improver1 §6 — opt-out of mid-run auto-verify_artifact. Default
+   *  false (auto-verify ON). Set to true to suppress the synthetic
+   *  verify steers on long runs (8+ turns) — primarily a debugging
+   *  aid for users tuning the verify thresholds. The Backlog-3 §7
+   *  internal logic still runs but the IPC handler stops passing
+   *  `incrementalVerify: true`. */
+  incrementalVerifyDisabled: boolean;
 }
 
 interface PreferencesFile extends Preferences {
@@ -74,6 +81,7 @@ const DEFAULTS: Preferences = {
   dismissedUpdateVersion: '',
   diagnosticsLastReadTs: 0,
   lastPickedMode: 'design',
+  incrementalVerifyDisabled: false,
 };
 
 /** Deterministic parse of the on-disk preferences file. No clock reads: the
@@ -115,6 +123,10 @@ function parsePersistedFile(parsed: Partial<PreferencesFile>): Preferences {
       parsed.lastPickedMode === 'design' || parsed.lastPickedMode === 'game'
         ? parsed.lastPickedMode
         : DEFAULTS.lastPickedMode,
+    incrementalVerifyDisabled:
+      typeof parsed.incrementalVerifyDisabled === 'boolean'
+        ? parsed.incrementalVerifyDisabled
+        : DEFAULTS.incrementalVerifyDisabled,
   };
 }
 

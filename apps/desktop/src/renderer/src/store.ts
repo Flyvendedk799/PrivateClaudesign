@@ -29,6 +29,7 @@ import { recordAction, snapshotTimeline } from './lib/action-timeline';
 import {
   type ArtifactPattern,
   PROMPT_COMMAND_HELP,
+  detectGameModeFromPrompt,
   parsePromptCommand,
 } from './lib/prompt-commands';
 import { rendererLogger } from './lib/renderer-logger';
@@ -119,7 +120,14 @@ export interface ReportableErrorToastSpec {
 
 export type Theme = 'light' | 'dark';
 export type AppView = 'hub' | 'workspace' | 'settings';
-export type SettingsTab = 'models' | 'appearance' | 'storage' | 'diagnostics' | 'advanced';
+export type SettingsTab =
+  | 'models'
+  | 'appearance'
+  | 'storage'
+  | 'diagnostics'
+  | 'advanced'
+  // Backlog-3 §10 — budget & cost dashboard tab.
+  | 'budgets';
 export type HubTab = 'recent' | 'your' | 'examples' | 'designSystems' | 'skills';
 export type InteractionMode = 'default' | 'comment' | 'skill-extract';
 
@@ -182,6 +190,13 @@ export interface UsageSnapshot {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
+  /** Phase 1 — input tokens served from the prompt cache (cache_read).
+   *  inputTokens already includes these; this field surfaces the breakdown
+   *  so the UI can show a hit ratio. */
+  cachedInputTokens: number;
+  /** Phase 1 — input tokens written to the prompt cache (cache_creation).
+   *  Charged at 1.25× normal input on Anthropic; included in inputTokens. */
+  cacheCreationInputTokens: number;
 }
 
 interface PromptRequest {
@@ -238,6 +253,15 @@ interface CodesignState {
     toolCallId: string;
     bytes: number;
   } | null;
+  /** Backlog-3 §4 — partial tool results streamed via `tool_result_delta`.
+   *  Keyed by toolCallId; each entry carries cumulative bytes, an
+   *  optional preview head, and an optional progress % (synthetic for
+   *  tools that don't ship bytes incrementally — e.g. image gen).
+   *  Cleared per-toolCallId on the closing `tool_call_result`. */
+  streamingToolResults: Record<
+    string,
+    { byteCount?: number; preview?: string; progressPct?: number }
+  >;
   /** Wall-clock ms when the preview iframe content most recently changed
    *  via an agent run (set on agent_end if the file delta was non-zero).
    *  Drives the "Preview updated · 12 s ago" pill in PreviewPane and a
@@ -305,6 +329,25 @@ interface CodesignState {
     /** generationId tied to the runFailureCount — same reset pattern as
      *  turnCountGenerationId. */
     runFailureGenerationId: string | null;
+    /** Improver1 §10 — total tool_call_start events in the current run.
+     *  Drives the "tools-per-turn" health metric. Resets per-run via
+     *  the same generationId guard. */
+    runToolCount: number;
+    /** Improver1 §10 — rolling buffer of per-turn metrics (last
+     *  HEALTH_LOOKBACK = 10 turns). Each entry summarises a single
+     *  agent turn so the header can compute edits-per-turn and
+     *  failure-rate over the trailing window without re-walking the
+     *  full chat_messages list. */
+    recentTurns: Array<{
+      tools: number;
+      edits: number;
+      failures: number;
+    }>;
+    /** In-progress accumulators for the CURRENT (still-running) turn.
+     *  Folded into recentTurns + reset on each turn_start. */
+    currentTurnTools: number;
+    currentTurnEdits: number;
+    currentTurnFailures: number;
   } | null;
   lastUsage: UsageSnapshot | null;
   errorMessage: string | null;
@@ -518,12 +561,28 @@ interface CodesignState {
    *  if the condition is met (first round succeeded, no prior polish). Call
    *  from useAgentStream's agent_end handler. */
   tryAutoPolish: (designId: string, locale: string) => void;
-  cancelGeneration: () => void;
+  cancelGeneration: (asCheckpoint?: boolean) => void;
+  /** Backlog-3 §5 — resume from a previously-saved checkpoint. Builds
+   *  a synthetic continue prompt and calls sendPrompt. The agent's
+   *  history is naturally preserved in chat_messages, so resume = a
+   *  fresh continue against the existing transcript. */
+  resumeFromCheckpoint: () => Promise<void>;
   /** Push a "wrap up now" steer into the agent's pending queue. The
    *  agent picks it up at the next turn_end and converges to `done`
    *  immediately. UI surface: the "Wrap up" button next to the Stop
    *  button in the prompt input. No-op if nothing's generating. */
   requestWrapUp: () => Promise<void>;
+  /**
+   * Start a fresh conversation in the active design. Bumps the
+   * design's session_id pointer so subsequent prompts ship an empty
+   * history to the LLM (saves tokens, frees up context, fresh cache),
+   * while leaving the design itself, preview, snapshots, files, and
+   * past chat rows intact. Past sessions remain visible in the chat
+   * list rendered with a divider. No-op if a generation is in flight.
+   *
+   * Returns the new sessionId; toasts on success/failure.
+   */
+  requestNewSession: () => Promise<number | null>;
   retryLastPrompt: () => Promise<void>;
   applyInlineComment: (comment: string) => Promise<void>;
   clearError: () => void;
@@ -623,6 +682,11 @@ interface CodesignState {
   setStreamingThinking: (value: { designId: string; text: string } | null) => void;
   setStreamingToolDraft: (
     value: { designId: string; toolName: string; toolCallId: string; bytes: number } | null,
+  ) => void;
+  /** Backlog-3 §4 — accumulate or close a streaming tool result entry. */
+  patchStreamingToolResult: (
+    toolCallId: string,
+    patch: { byteCount?: number; preview?: string; progressPct?: number } | null,
   ) => void;
   setPreviewUpdatedAt: (value: { designId: string; ts: number; bytesDelta: number } | null) => void;
   bumpPreviewReload: () => void;
@@ -751,6 +815,8 @@ export function coerceUsageSnapshot(result: {
   inputTokens?: unknown;
   outputTokens?: unknown;
   costUsd?: unknown;
+  cachedInputTokens?: unknown;
+  cacheCreationInputTokens?: unknown;
 }): { usage: UsageSnapshot; rejected: string[] } {
   const rejected: string[] = [];
   const pick = (label: string, v: unknown): number => {
@@ -764,6 +830,8 @@ export function coerceUsageSnapshot(result: {
       inputTokens: pick('inputTokens', result.inputTokens),
       outputTokens: pick('outputTokens', result.outputTokens),
       costUsd: pick('costUsd', result.costUsd),
+      cachedInputTokens: pick('cachedInputTokens', result.cachedInputTokens),
+      cacheCreationInputTokens: pick('cacheCreationInputTokens', result.cacheCreationInputTokens),
     },
     rejected,
   };
@@ -1033,10 +1101,26 @@ function summariseToolBatch(payloads: ToolCallPayload[]): string {
  *  returns them) and produces the ChatMessage[] history payload the
  *  agent sees on the next turn. Exposed separately from
  *  buildHistoryFromChat (which does the IPC fetch + seeding) so tests
- *  can pass a fixture without mocking window.codesign. */
+ *  can pass a fixture without mocking window.codesign.
+ *
+ *  `opts.sessionId` filters rows to a single session so previous
+ *  conversations (from before the user clicked New Session) don't leak
+ *  into the LLM history payload. Rows without a sessionId field — or
+ *  with sessionId === undefined — are treated as session 0 to match
+ *  the DB default. Omitting the filter returns rows from all sessions
+ *  (used by the chat-list UI). */
 export function buildHistoryFromChatRows(
-  rows: ReadonlyArray<{ kind: string; payload?: unknown }>,
+  inputRows: ReadonlyArray<{ kind: string; payload?: unknown; sessionId?: number | undefined }>,
+  opts: { sessionId?: number } = {},
 ): ChatMessage[] {
+  const rows: ReadonlyArray<{
+    kind: string;
+    payload?: unknown;
+    sessionId?: number | undefined;
+  }> =
+    opts.sessionId === undefined
+      ? inputRows
+      : inputRows.filter((r) => (r.sessionId ?? 0) === opts.sessionId);
   // First pass — split rows into per-user-prompt turns. A "turn" starts
   // at each `kind=user` row and ends at the next user row (or end of
   // history). This gives us the bracket inside which a single agent
@@ -1147,12 +1231,38 @@ export function buildHistoryFromChatRows(
   return out;
 }
 
+/** Cap history to the most recent `cap` messages, but never start the
+ *  result mid-pair. A raw slice(-cap) can land between an
+ *  assistant-with-toolCalls and its paired tool result, leaving the
+ *  array starting with a `tool` row — Anthropic rejects that with
+ *  "tool_result without preceding tool_use". We slice, then drop
+ *  leading non-`user` rows so the array always begins on a turn
+ *  boundary. */
+export function capHistoryToTurnBoundary(
+  history: ReadonlyArray<ChatMessage>,
+  cap: number,
+): ChatMessage[] {
+  const sliced = history.length > cap ? history.slice(-cap) : history.slice();
+  let firstUser = 0;
+  while (firstUser < sliced.length && sliced[firstUser]?.role !== 'user') firstUser += 1;
+  return firstUser === 0 ? sliced : sliced.slice(firstUser);
+}
+
 async function buildHistoryFromChat(designId: string | null): Promise<ChatMessage[]> {
   if (!designId || !window.codesign) return [];
   try {
     await window.codesign.chat.seedFromSnapshots(designId);
-    const rows = await window.codesign.chat.list(designId);
-    return buildHistoryFromChatRows(rows);
+    const [rows, current] = await Promise.all([
+      window.codesign.chat.list(designId),
+      // Fetch the design's active session pointer so the agent only sees
+      // rows from the current conversation. Older sessions remain in the
+      // chat list (rendered with a divider) but pay zero token cost.
+      // Falls back to 0 if the IPC isn't available (legacy preload).
+      typeof window.codesign.chat.currentSession === 'function'
+        ? window.codesign.chat.currentSession(designId).catch(() => ({ sessionId: 0 }))
+        : Promise.resolve({ sessionId: 0 }),
+    ]);
+    return buildHistoryFromChatRows(rows, { sessionId: current.sessionId });
   } catch {
     return [];
   }
@@ -1277,6 +1387,8 @@ function applyGenerateSuccess(
     inputTokens?: number;
     outputTokens?: number;
     costUsd?: number;
+    cachedInputTokens?: number;
+    cacheCreationInputTokens?: number;
   },
   designIdAtStart: string | null,
 ): void {
@@ -1457,6 +1569,7 @@ function applyGenerateError(
     designId: designIdAtStart,
     message: msg,
   });
+  const code = extractCodesignErrorCode(err) ?? 'GENERATION_FAILED';
 
   finishIfCurrent(set, generationId, () => ({
     isGenerating: false,
@@ -1466,6 +1579,7 @@ function applyGenerateError(
     streamingAssistantText: null,
     streamingThinking: null,
     streamingToolDraft: null,
+    streamingToolResults: {},
     previewUpdatedAt: null,
     previewReloadTick: 0,
     errorMessage: msg,
@@ -1477,10 +1591,9 @@ function applyGenerateError(
     void get().appendChatMessage({
       designId,
       kind: 'error',
-      payload: { message: msg },
+      payload: { code, message: msg, runId: generationId },
     });
   }
-  const code = extractCodesignErrorCode(err) ?? 'GENERATION_FAILED';
   const upstream = extractUpstreamContext(err);
 
   // Bridge the failure into the connection-test diagnostics system so the
@@ -1698,6 +1811,8 @@ async function runGenerate(
       inputTokens?: number;
       outputTokens?: number;
       costUsd?: number;
+      cachedInputTokens?: number;
+      cacheCreationInputTokens?: number;
     },
     designIdAtStart,
   );
@@ -1787,6 +1902,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   streamingAssistantText: null,
   streamingThinking: null,
   streamingToolDraft: null,
+  streamingToolResults: {},
   previewUpdatedAt: null,
   previewReloadTick: 0,
   chunkProgress: null,
@@ -2190,6 +2306,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       streamingAssistantText: null,
       streamingThinking: null,
       streamingToolDraft: null,
+      streamingToolResults: {},
       previewUpdatedAt: null,
       previewReloadTick: 0,
       errorMessage: null,
@@ -2206,8 +2323,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     // the race where a broken session + "继续" made the agent see a stale or
     // empty history from a legacy mirror and drift off-task.
     const fullHistory = await buildHistoryFromChat(designIdAtStart);
-    const history =
-      fullHistory.length > HISTORY_CAP ? fullHistory.slice(-HISTORY_CAP) : fullHistory;
+    const history = capHistoryToTurnBoundary(fullHistory, HISTORY_CAP);
     const isFirstPrompt = fullHistory.length === 0;
     // Iteration cue — only set when there's already prior history AND the
     // user typed a real prompt (skip silent auto-polish refinements).
@@ -2241,9 +2357,32 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       // gameplan §A6 — pull and clear the pending mode/engine the dialog
       // staged. They route into the IPC payload so the main process
       // composes the game-mode prompt + wires deps.gameMode.
-      const pendingMode = get().pendingArtifactMode;
+      let pendingMode = get().pendingArtifactMode;
       const pendingEngine = get().pendingGameEngine;
       get().clearPendingGameSelection();
+      // Auto-route game-genre prompts (FPS / wave defense / platformer /
+      // etc.) into game-mode when the user didn't explicitly pick a
+      // mode via NewDesignDialog. Without this, prompts like "create a
+      // first-person shooter wave defense" land in design-mode JSX with
+      // no engine guidance — the model burns its output budget reasoning
+      // about which engine + scene structure and frequently never emits
+      // a tool call (2026-05-06 FPS run hit max_tokens with 0 tools).
+      // Manual NewDesignDialog selection still wins because we only
+      // promote when `pendingMode` is null. The chosen engine is
+      // undefined here — the agent's `choose_engine` tool resolves it
+      // on the first turn.
+      if (
+        pendingMode === null &&
+        pendingEngine === null &&
+        get().currentDesignEngine === null &&
+        detectGameModeFromPrompt(parsedCmd.prompt)
+      ) {
+        pendingMode = 'game';
+        rendererLogger.info('store', 'auto-routed prompt to game-mode', {
+          generationId,
+          prompt: parsedCmd.prompt.slice(0, 80),
+        });
+      }
       // A6.x — surface the engine on the active design immediately so
       // PreviewPane can switch to game-files:// resolution + the toolbar
       // can render engine-specific chrome (Godot build button, future
@@ -2363,10 +2502,36 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     }
   },
 
-  cancelGeneration() {
+  cancelGeneration(asCheckpoint = false) {
     recordAction({ type: 'prompt.cancel' });
     const id = get().activeGenerationId;
     if (!id) return;
+    // Backlog-3 §5 — when the user opts to cancel-with-checkpoint,
+    // append a chat_messages row marking the cancel point with enough
+    // context for a Resume CTA. The row carries turn count, elapsed
+    // ms, last assistant text preview, and the designId so the
+    // checkpoint survives across app restarts.
+    if (asCheckpoint) {
+      const designId = get().generatingDesignId;
+      const turnCount = get().agentLiveness?.turnCount ?? 0;
+      const lastAssistantText = (get().streamingAssistantText?.text ?? '').slice(0, 200);
+      const startedAt = get().agentLiveness?.lastTurnStartAt ?? Date.now();
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      if (designId !== null) {
+        void get().appendChatMessage({
+          designId,
+          kind: 'checkpoint',
+          payload: {
+            schemaVersion: 1,
+            generationId: id,
+            turnCount,
+            elapsedMs,
+            lastAssistantText,
+            createdAt: Date.now(),
+          },
+        });
+      }
+    }
     if (!window.codesign) {
       const msg = tr('errors.rendererDisconnected');
       set({ errorMessage: msg, lastError: msg });
@@ -2385,7 +2550,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     }
 
     void window.codesign
-      .cancelGeneration(id)
+      .cancelGeneration(id, asCheckpoint ? { asCheckpoint: true } : undefined)
       .then(() => {
         finishIfCurrent(set, id, () => ({
           isGenerating: false,
@@ -2395,6 +2560,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           streamingAssistantText: null,
           streamingThinking: null,
           streamingToolDraft: null,
+          streamingToolResults: {},
           previewUpdatedAt: null,
           previewReloadTick: 0,
           generationStage: 'idle' as GenerationStage,
@@ -2416,6 +2582,20 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           }),
         });
       });
+  },
+
+  async resumeFromCheckpoint() {
+    // Backlog-3 §5 — fire a "continue" prompt with the existing
+    // history. The agent picks up where it left off because the chat
+    // transcript already contains every prior tool call + assistant
+    // text. We tag the prompt so logs can correlate resume runs.
+    if (get().isGenerating) return;
+    const designId = get().currentDesignId;
+    if (designId === null) return;
+    await get().sendPrompt({
+      prompt:
+        '[resume] Continue from the last checkpoint. Pick up where you left off — review the prior tool transcript, identify any unfinished items, and proceed.',
+    });
   },
 
   async requestWrapUp() {
@@ -2445,6 +2625,63 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         title: 'Wrap-up failed',
         description: msg,
       });
+    }
+  },
+
+  async requestNewSession(): Promise<number | null> {
+    const state = get();
+    const designId = state.currentDesignId;
+    if (designId === null) return null;
+    if (state.isGenerating) {
+      get().pushToast({
+        variant: 'info',
+        title: tr('chat.newSession.blocked.title'),
+        description: tr('chat.newSession.blocked.description'),
+      });
+      return null;
+    }
+    const api = window.codesign;
+    const newSessionFn = api?.chat?.newSession;
+    if (typeof newSessionFn !== 'function') {
+      get().pushToast({
+        variant: 'error',
+        title: tr('chat.newSession.failed.title'),
+        description: 'IPC bridge unavailable',
+      });
+      return null;
+    }
+    try {
+      const result = await newSessionFn(designId);
+      // Reset per-run liveness/usage so the chat status header (which
+      // renders run-health, token cost, and turn count) starts at zero
+      // for the fresh conversation. Chat rows themselves stay in
+      // memory — the UI shows past sessions above a divider — but new
+      // generations no longer pay token cost for them because the
+      // history-builder filters by sessionId.
+      set({
+        agentLiveness: null,
+        lastUsage: null,
+        pendingToolCalls: [],
+        streamingAssistantText: null,
+        streamingThinking: null,
+        streamingToolDraft: null,
+        streamingToolResults: {},
+        errorMessage: null,
+      });
+      get().pushToast({
+        variant: 'info',
+        title: tr('chat.newSession.success.title'),
+        description: tr('chat.newSession.success.description'),
+      });
+      return result.sessionId;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : tr('errors.unknown');
+      get().pushToast({
+        variant: 'error',
+        title: tr('chat.newSession.failed.title'),
+        description: msg,
+      });
+      return null;
     }
   },
 
@@ -3360,6 +3597,29 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
 
   setStreamingToolDraft(value) {
     set({ streamingToolDraft: value });
+  },
+
+  patchStreamingToolResult(toolCallId, patch) {
+    if (toolCallId.length === 0) return;
+    set((s) => {
+      // null patch = drain (close + remove the entry).
+      if (patch === null) {
+        if (!Object.hasOwn(s.streamingToolResults, toolCallId)) return {};
+        const next = { ...s.streamingToolResults };
+        delete next[toolCallId];
+        return { streamingToolResults: next };
+      }
+      const prev = s.streamingToolResults[toolCallId] ?? {};
+      return {
+        streamingToolResults: {
+          ...s.streamingToolResults,
+          [toolCallId]: {
+            ...prev,
+            ...patch,
+          },
+        },
+      };
+    });
   },
 
   setPreviewUpdatedAt(value) {

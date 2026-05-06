@@ -113,6 +113,14 @@ export function useAgentStream(): void {
         turnCountGenerationId: string | null;
         runFailureCount: number;
         runFailureGenerationId: string | null;
+        // Improver1 §10 — health metric fields. Patches override; the
+        // reducer falls back to the prior value otherwise so the
+        // common case (just bumping lastEventAt) doesn't reset state.
+        runToolCount: number;
+        recentTurns: Array<{ tools: number; edits: number; failures: number }>;
+        currentTurnTools: number;
+        currentTurnEdits: number;
+        currentTurnFailures: number;
       }> = {},
     ) => {
       const now = Date.now();
@@ -133,6 +141,11 @@ export function useAgentStream(): void {
             patch.runFailureGenerationId !== undefined
               ? patch.runFailureGenerationId
               : (cur?.runFailureGenerationId ?? null),
+          runToolCount: patch.runToolCount ?? cur?.runToolCount ?? 0,
+          recentTurns: patch.recentTurns ?? cur?.recentTurns ?? [],
+          currentTurnTools: patch.currentTurnTools ?? cur?.currentTurnTools ?? 0,
+          currentTurnEdits: patch.currentTurnEdits ?? cur?.currentTurnEdits ?? 0,
+          currentTurnFailures: patch.currentTurnFailures ?? cur?.currentTurnFailures ?? 0,
         },
       });
     };
@@ -215,11 +228,28 @@ export function useAgentStream(): void {
       const prevLiveness = useCodesignStore.getState().agentLiveness;
       const sameGen = prevLiveness?.turnCountGenerationId === event.generationId;
       const nextTurnCount = sameGen ? (prevLiveness?.turnCount ?? 0) + 1 : 1;
+      // Improver1 §10 — health metrics. On a fresh run reset rolling
+      // buffers + counters; on same-run starts the per-turn
+      // accumulators are zeroed (they fold into recentTurns at the
+      // turn_end of the PRIOR turn, see handleTurnEnd below).
       tickLiveness({
         lastTurnStartAt: Date.now(),
         chunkTransitioning: false,
         turnCount: nextTurnCount,
         turnCountGenerationId: event.generationId,
+        ...(sameGen
+          ? {
+              currentTurnTools: 0,
+              currentTurnEdits: 0,
+              currentTurnFailures: 0,
+            }
+          : {
+              runToolCount: 0,
+              recentTurns: [],
+              currentTurnTools: 0,
+              currentTurnEdits: 0,
+              currentTurnFailures: 0,
+            }),
       });
     };
 
@@ -353,6 +383,27 @@ export function useAgentStream(): void {
       if (current) drainPendingTools(current, 'done');
       setStreamingAssistantText(null);
       if (current) current.textBuffer = '';
+      // Improver1 §10 — fold the just-completed turn's per-turn
+      // accumulators into the rolling buffer. The buffer holds the
+      // last HEALTH_LOOKBACK turns so the header can compute
+      // edits-per-turn / failure-rate without scanning chat_messages.
+      const HEALTH_LOOKBACK = 10;
+      const prev = useCodesignStore.getState().agentLiveness;
+      if (prev) {
+        const completed = {
+          tools: prev.currentTurnTools,
+          edits: prev.currentTurnEdits,
+          failures: prev.currentTurnFailures,
+        };
+        const nextBuffer = [...prev.recentTurns, completed];
+        while (nextBuffer.length > HEALTH_LOOKBACK) nextBuffer.shift();
+        tickLiveness({
+          recentTurns: nextBuffer,
+          // Don't reset current* here — handleTurnStart resets on the
+          // next turn so events between turns (heartbeat, fs_updated)
+          // don't double-count.
+        });
+      }
     };
 
     const handleToolCallStart = (event: AgentStreamEvent) => {
@@ -370,6 +421,23 @@ export function useAgentStream(): void {
         setStreamingThinking(null);
       }
       setStreamingToolDraft(null);
+      // Improver1 §10 — health metrics. Bump per-turn tool count + run
+      // tool count. Distinguish edit-class tools (str_replace / patch /
+      // insert / create) from inspection tools so the edits-per-turn
+      // signal differentiates "agent is making progress" vs "agent is
+      // re-reading endlessly".
+      const prevHealth = useCodesignStore.getState().agentLiveness;
+      const isEditTool =
+        toolName === 'str_replace_based_edit_tool' &&
+        (event.command === 'str_replace' ||
+          event.command === 'patch' ||
+          event.command === 'insert' ||
+          event.command === 'create');
+      tickLiveness({
+        runToolCount: (prevHealth?.runToolCount ?? 0) + 1,
+        currentTurnTools: (prevHealth?.currentTurnTools ?? 0) + 1,
+        ...(isEditTool ? { currentTurnEdits: (prevHealth?.currentTurnEdits ?? 0) + 1 } : {}),
+      });
       // TODO: replace with rendererLogger once renderer-logger lands
       console.debug('[agent] tool_call_start', {
         generationId: event.generationId,
@@ -407,6 +475,13 @@ export function useAgentStream(): void {
     const handleToolCallResult = (event: AgentStreamEvent) => {
       const current = inFlight.current;
       const designId = event.designId;
+      // Backlog-3 §4 — drain the streaming entry for this toolCallId
+      // (whether or not we find a matching pending tool below). This
+      // is the closing edge for any tool_result_delta sequence and
+      // cleans up state on both success and failure.
+      if (event.toolCallId !== undefined) {
+        useCodesignStore.getState().patchStreamingToolResult(event.toolCallId, null);
+      }
       if (!current) return;
       const idx = current.pendingTools.findIndex(
         (p) =>
@@ -441,6 +516,8 @@ export function useAgentStream(): void {
       // Per-run failure counter — reset on generationId change, increment
       // on each isFailure=true result. Status header reads this to surface
       // "N retries this run" once the count crosses the threshold.
+      // Improver1 §10 — also bump per-turn failure count for the
+      // health-pill computation.
       if (event.isFailure === true) {
         const cur = useCodesignStore.getState().agentLiveness;
         const sameGen = cur?.runFailureGenerationId === event.generationId;
@@ -448,6 +525,7 @@ export function useAgentStream(): void {
         tickLiveness({
           runFailureCount: nextCount,
           runFailureGenerationId: event.generationId,
+          currentTurnFailures: (cur?.currentTurnFailures ?? 0) + 1,
         });
       } else {
         tickLiveness();
@@ -554,16 +632,19 @@ export function useAgentStream(): void {
         ...(finalText ? { finalText } : {}),
       });
       inFlight.current = null;
-      // Defensive: clear generation flags. The sendPrompt Promise resolution
-      // would normally clear them shortly after, but if the main-process IPC
-      // hangs for any reason the UI would be stuck in "running" forever.
-      // Mirror the happy-path terminal state here as a belt-and-suspenders.
+      // Defensive: clear in-flight flags so the spinner stops. We do NOT
+      // touch `generationStage` here — that's driven by the sendPrompt
+      // Promise's resolve/reject so a no-output run (e.g. extended-thinking
+      // burned the whole output budget → IPC rejects with
+      // MODEL_RETURNED_ONLY_THINKING) lands as 'error', not a misleading
+      // 'done' that races with the upcoming reject. Belt-and-suspenders
+      // applies to isGenerating only — generation stage is settled by the
+      // IPC layer.
       const s = useCodesignStore.getState();
       if (s.generatingDesignId === event.designId) {
         useCodesignStore.setState({
           isGenerating: false,
           generatingDesignId: null,
-          generationStage: 'done',
           streamingAssistantText: null,
           streamingThinking: null,
           streamingToolDraft: null,
@@ -588,6 +669,30 @@ export function useAgentStream(): void {
         }
         useCodesignStore.getState().tryAutoPolish(designId, locale);
       }, 1200);
+      // Backlog-3 §10 — budget threshold check. Fire-and-forget; the
+      // toast is informational. We compare today's daily_usage total
+      // against the user's saved daily limit and toast at the
+      // configured percentage.
+      void (async () => {
+        const api = window.codesign;
+        if (!api?.getBudget || !api.getDailyUsage) return;
+        try {
+          const [budget, days] = await Promise.all([api.getBudget('global'), api.getDailyUsage(1)]);
+          if (!budget || budget.dailyLimitUsd === null || budget.dailyLimitUsd <= 0) return;
+          const today = days[0];
+          if (!today) return;
+          const pct = (today.costUsd / budget.dailyLimitUsd) * 100;
+          if (pct >= budget.alertAtPct) {
+            useCodesignStore.getState().pushToast({
+              variant: pct >= 100 ? 'error' : 'info',
+              title: pct >= 100 ? 'Daily budget exceeded' : 'Daily budget threshold',
+              description: `Today: $${today.costUsd.toFixed(2)} of $${budget.dailyLimitUsd.toFixed(2)} (${Math.round(pct)}%)`,
+            });
+          }
+        } catch {
+          /* non-fatal — budget surfacing must not break agent_end */
+        }
+      })();
     };
 
     const off = window.codesign.chat.onAgentEvent((event: AgentStreamEvent) => {
@@ -624,6 +729,19 @@ export function useAgentStream(): void {
           return;
         case 'tool_call_result':
           handleToolCallResult(event);
+          return;
+        case 'tool_result_delta':
+          // Backlog-3 §4 — partial result delta. Accumulate into the
+          // streamingToolResults Zustand slice, keyed by toolCallId.
+          // The closing `tool_call_result` event drains the entry (see
+          // handleToolCallResult below for the drain hook).
+          if (event.toolCallId !== undefined) {
+            const patch: { byteCount?: number; preview?: string; progressPct?: number } = {};
+            if (event.byteCount !== undefined) patch.byteCount = event.byteCount;
+            if (event.resultPreview !== undefined) patch.preview = event.resultPreview;
+            if (event.progressPct !== undefined) patch.progressPct = event.progressPct;
+            useCodesignStore.getState().patchStreamingToolResult(event.toolCallId, patch);
+          }
           return;
         case 'fs_updated':
           handleFsUpdated(event);

@@ -12,6 +12,7 @@
 
 import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
 import { Type } from '@sinclair/typebox';
+import { REDACTED_PATH_SENTINEL, REDACTION_POISON_KEY } from '../context-prune.js';
 import type { CameraGuard } from './camera-pin.js';
 import type { EditBudget } from './edit-budget.js';
 import { extractJsxSymbol, offsetsToLines, rangeToLineSpan } from './symbol-extractor.js';
@@ -40,6 +41,22 @@ export interface TextEditorFsCallbacks {
   create(path: string, content: string): Promise<{ path: string }> | { path: string };
   strReplace(path: string, oldStr: string, newStr: string): Promise<EditResult> | EditResult;
   insert(path: string, line: number, text: string): Promise<EditResult> | EditResult;
+  /** Backlog-3 §2 — apply a list of line-bounded hunks to a file in one
+   *  call. Hunks are 1-indexed; `endLine` is inclusive. Implementations
+   *  MUST apply hunks in descending startLine order so earlier hunks
+   *  don't invalidate later ones' line numbers. Out-of-range lines or
+   *  overlapping hunks throw. Optional `expectedOriginal` per hunk lets
+   *  the model pass back the exact lines it expects to replace; when
+   *  set, mismatch must throw rather than silently clobber. */
+  patch?(
+    path: string,
+    hunks: Array<{
+      startLine: number;
+      endLine: number;
+      replacement: string;
+      expectedOriginal?: string | undefined;
+    }>,
+  ): Promise<EditResult> | EditResult;
   /** Optional: list files for `view` on a directory. Returns sorted paths. */
   listDir(dir: string): string[];
 }
@@ -50,12 +67,32 @@ const TextEditorParams = Type.Object({
     Type.Literal('create'),
     Type.Literal('str_replace'),
     Type.Literal('insert'),
+    // Backlog-3 §2 — patch protocol: multiple line-bounded hunks in one
+    // call. Cuts surrounding-context output tokens for iteration runs.
+    Type.Literal('patch'),
   ]),
   path: Type.String(),
   file_text: Type.Optional(Type.String()),
   old_str: Type.Optional(Type.String()),
   new_str: Type.Optional(Type.String()),
   insert_line: Type.Optional(Type.Number()),
+  /** Backlog-3 §2 — hunks for `command: 'patch'`. Each hunk targets a
+   *  contiguous line range; hunks must NOT overlap. expectedOriginal
+   *  (optional) is the exact text of the lines the model thinks it's
+   *  replacing — when set, a mismatch fails the whole patch loud
+   *  rather than clobbering blind. Hunks apply in descending startLine
+   *  order. Lines are 1-indexed; endLine is inclusive. */
+  hunks: Type.Optional(
+    Type.Array(
+      Type.Object({
+        startLine: Type.Number(),
+        endLine: Type.Number(),
+        replacement: Type.String(),
+        expectedOriginal: Type.Optional(Type.String()),
+      }),
+      { minItems: 1, maxItems: 32 },
+    ),
+  ),
   /** Optional `[startLine, endLine]` (1-indexed, inclusive) to narrow a view
    *  to a specific range instead of dumping the whole file. Either bound may
    *  be -1 to mean "end of file". Only valid with `command: 'view'`. Declared
@@ -71,7 +108,7 @@ const TextEditorParams = Type.Object({
 });
 
 export interface TextEditorDetails {
-  command: 'view' | 'create' | 'str_replace' | 'insert';
+  command: 'view' | 'create' | 'str_replace' | 'insert' | 'patch';
   path: string;
   result?: unknown;
 }
@@ -323,6 +360,22 @@ function describeFirstDiff(expected: string, actual: string): string {
   return 'no character difference (this should not happen)';
 }
 
+/** Improver1 §2 — render a windowed snippet of the file around a 1-indexed
+ *  line number, line-prefixed for clarity. Mirrors the `view` tool's
+ *  output format so the agent can copy-paste lines directly into a
+ *  new old_str without re-issuing a `view`. */
+function renderWindowSnippet(fileContent: string, line: number, before = 5, after = 25): string {
+  const lines = fileContent.split('\n');
+  const start = Math.max(1, line - before);
+  const end = Math.min(lines.length, line + after);
+  const out: string[] = [];
+  for (let i = start; i <= end; i += 1) {
+    const text = lines[i - 1] ?? '';
+    out.push(`${String(i).padStart(4, ' ')}  ${text}`);
+  }
+  return out.join('\n');
+}
+
 function throwStrReplaceMiss(path: string, oldStr: string, fileContent: string): never {
   const firstLine = (oldStr.split('\n').find((ln) => ln.trim().length > 0) ?? '').trim();
   const lines = fileContent.split('\n');
@@ -346,8 +399,14 @@ function throwStrReplaceMiss(path: string, oldStr: string, fileContent: string):
       fuzzyMatch.literal.length > 200
         ? `${fuzzyMatch.literal.slice(0, 200)}…(${fuzzyMatch.literal.length} chars)`
         : fuzzyMatch.literal;
+    // Improver1 §2 — also embed a windowed view around the near-match.
+    // Today's run-1 had 4 whitespace-drift misses where the agent kept
+    // re-attempting with slightly different old_str variants instead
+    // of using the literal bytes. Putting the lines inline forces the
+    // model to see them on this very turn.
+    const window = renderWindowSnippet(fileContent, lineNumber);
     throw new Error(
-      `old_str not found in ${path}, but a near-match exists at line ${lineNumber} that differs only in whitespace.\n\nDiff: ${diffHint}\n\nThe literal bytes the file has at that position:\n${JSON.stringify(literalSnippet)}\n\nUse those exact bytes as old_str and retry. Do NOT guess at another approximation — the difference is whitespace and your previous old_str will fail the same way.`,
+      `old_str not found in ${path}, but a near-match exists at line ${lineNumber} that differs only in whitespace.\n\nDiff: ${diffHint}\n\nThe literal bytes the file has at that position:\n${JSON.stringify(literalSnippet)}\n\nCURRENT CONTENT (lines ${Math.max(1, lineNumber - 5)}–${Math.min(lines.length, lineNumber + 25)} of ${path}):\n${window}\n\nUse those exact bytes as old_str and retry. Do NOT guess at another approximation — the difference is whitespace and your previous old_str will fail the same way.`,
     );
   }
 
@@ -355,9 +414,20 @@ function throwStrReplaceMiss(path: string, oldStr: string, fileContent: string):
     candidateLines.length > 0
       ? `old_str not found in ${path}. The first non-empty line of your old_str ("${firstLineSnippet}") appears at line(s): ${candidateLines.join(', ')}.`
       : `old_str not found in ${path}. The first non-empty line of your old_str ("${firstLineSnippet}") does not appear anywhere in the current file.`;
+  // Improver1 §2 — auto-attach the current content around the FIRST
+  // candidate line so the agent can build a fresh old_str on the next
+  // turn without an extra `view` round-trip. Today's run-1 thrash on
+  // `// ── Body bob + head ──` (lines 1346-1392) shows the agent
+  // would benefit from this content inline. No window when there are
+  // no candidate lines (the file genuinely doesn't contain the
+  // first-line anchor).
+  const window =
+    candidateLines.length > 0
+      ? `\n\nCURRENT CONTENT (lines ${Math.max(1, (candidateLines[0] ?? 1) - 5)}–${Math.min(lines.length, (candidateLines[0] ?? 1) + 25)} of ${path}):\n${renderWindowSnippet(fileContent, candidateLines[0] ?? 1)}\n`
+      : '';
   const guidance =
     candidateLines.length > 0
-      ? `Next step: re-issue \`view\` with \`view_range: [${Math.max(1, (candidateLines[0] ?? 1) - 3)}, ${Math.min(lines.length, (candidateLines[0] ?? 1) + 20)}]\` to see the actual current text, then retry str_replace with the exact snippet you read back. Do NOT blindly retry with another guessed old_str — the file content has drifted from your memory and another guess will fail the same way.`
+      ? `${window}\nNext step: build a fresh old_str directly from the bytes shown above, then retry str_replace. Do NOT blindly retry with another guessed old_str — the file has drifted from your memory and another guess will fail the same way.`
       : 'Next step: re-issue `view` with a small `view_range` covering the section you wanted to edit, then retry str_replace with the exact snippet you read back. Do NOT guess at another old_str — the file content has drifted from your memory.';
   throw new Error(`${head}\n\n${guidance}`);
 }
@@ -400,6 +470,54 @@ export function makeTextEditorTool(
   // counter so we can recognize "the very next thing after a write".
   let toolCallCounter = 0;
   const lastMutationByPath = new Map<string, { tick: number; size: number }>();
+  // Improver1 §4 — stale-view detector. Track the last full-file view
+  // per path (its tick + content length). On a subsequent full-file
+  // view, if the file size matches AND no mutation has landed since
+  // that prior view, the content has not changed — return a 1-line
+  // stub instead of re-emitting the file body. Today's
+  // c44763af-21e9-4fb5-9c39-cc2865a37c30 runs had 111 view calls vs
+  // 91 mutations; a meaningful fraction were "I just looked at this
+  // 2 turns ago and nothing changed".
+  const lastViewByPath = new Map<string, { tick: number; size: number }>();
+  // Improver1 §5 — per-(path,run) nudge tracker for multi-line
+  // str_replace successes. We append a hint suggesting `command: "patch"`
+  // on the FIRST multi-line str_replace per path; we don't keep
+  // nagging. The model picks up the suggestion and starts using
+  // patch from the second multi-line edit on. Cap at one nudge per
+  // path per run so the tool stream isn't spammed.
+  const patchNudgedPaths = new Set<string>();
+  const STR_REPLACE_PATCH_NUDGE_LINES = 3;
+  // Improver1 §8 — per-target retry budget. Track consecutive
+  // failures per (path, content-bucket). After PER_TARGET_RETRY_LIMIT
+  // failures the next str_replace/patch on the same target is
+  // hard-rejected with a "view first" error. Counter resets when a
+  // view of an overlapping range lands. Today's run-1 thrash on
+  // `// ── Body bob + head ──` was 4 consecutive failures across
+  // str_replace + patch — exactly this pattern.
+  const PER_TARGET_RETRY_LIMIT = 3;
+  const targetFailures = new Map<
+    string,
+    { count: number; firstFailAt: number; lastFailAt: number; samplePath: string }
+  >();
+  const targetBucketKey = (path: string, probe: string): string => {
+    let h = 0;
+    for (let i = 0; i < probe.length && i < 256; i += 1) h = (h * 31 + probe.charCodeAt(i)) | 0;
+    return `${path}::${Math.abs(h).toString(36)}`;
+  };
+  const firstNonEmptyLine = (s: string): string => {
+    const ln = s.split('\n').find((l) => l.trim().length > 0);
+    return ln !== undefined ? ln.trim() : '';
+  };
+  /** Improver1 §8 — clear all retry-budget rows for `path` whenever a
+   *  view delivers REAL bytes (ranged, symbol, or first full-file).
+   *  Stub-only views do NOT trigger the reset because the agent did
+   *  not actually see the current content. */
+  const resetTargetFailuresForPath = (path: string): void => {
+    const prefix = `${path}::`;
+    for (const k of Array.from(targetFailures.keys())) {
+      if (k.startsWith(prefix)) targetFailures.delete(k);
+    }
+  };
 
   return {
     name: 'str_replace_based_edit_tool',
@@ -420,6 +538,25 @@ export function makeTextEditorTool(
       '"old_str not found" errors — the file on disk has no line numbers, only the view tool adds them.',
     parameters: TextEditorParams,
     async execute(_toolCallId, params): Promise<AgentToolResult<TextEditorDetails>> {
+      // Improver1 §1 — echo-proof intercept. When the model has
+      // pasted the redaction placeholder back as args (the
+      // 2026-04-29 / 2026-05-05 regression mode), short-circuit
+      // with a tailored error that the agent can act on. Detect
+      // either via the poison marker key OR via the sentinel path
+      // (belt + braces; the marker is the primary signal).
+      const rawParams = params as Record<string, unknown>;
+      if (
+        rawParams[REDACTION_POISON_KEY] === true ||
+        rawParams['path'] === REDACTED_PATH_SENTINEL
+      ) {
+        throw new Error(
+          'You echoed a redaction placeholder back as tool args. The PRIOR tool input was stripped from your context (it was too large for the rolling window). Its arguments are GONE. ' +
+            'Compose FRESH args from scratch: ' +
+            '(a) call `view` with a `view_range` to see the current file content, then ' +
+            '(b) write the next edit using ONLY the bytes you just observed. ' +
+            'Do NOT paste the placeholder object — it carries no real data.',
+        );
+      }
       toolCallCounter += 1;
       const tick = toolCallCounter;
       const path = params.path;
@@ -459,6 +596,8 @@ export function makeTextEditorTool(
                 .map((ln, idx) => `${String(span.startLine + idx).padStart(4, ' ')}  ${ln}`)
                 .join('\n');
               const header = `${path} · symbol ${symbol} · lines ${span.startLine}-${span.endLine} of ${file.numLines}\n`;
+              // Improver1 §8 — symbol view delivers fresh bytes.
+              resetTargetFailuresForPath(path);
               return ok(header + slice, {
                 command: 'view',
                 path,
@@ -498,6 +637,10 @@ export function makeTextEditorTool(
                 ? `\n\n… range was capped at ${VIEW_RANGE_SOFT_CAP} lines (${requestedSpan} requested). To continue, issue another view with \`view_range: [${effectiveEnd + 1}, ${Math.min(effectiveEnd + VIEW_RANGE_SOFT_CAP, lines.length)}]\`. Or use \`symbol: "<JsxName>"\` to read a specific component without paging.`
                 : '';
               const header = `${path} · lines ${start}-${effectiveEnd} of ${lines.length}${capped ? ' (capped)' : ''}\n`;
+              // Improver1 §8 — ranged view delivers fresh bytes; clear
+              // the per-target retry budget for this path so the agent
+              // can retry without hitting the refusal.
+              resetTargetFailuresForPath(path);
               return ok(header + slice + truncationHint, {
                 command: 'view',
                 path,
@@ -508,31 +651,54 @@ export function makeTextEditorTool(
                 },
               });
             }
-            // E3 — post-write view stub. If the agent's IMMEDIATELY PREVIOUS
-            // tool call was a successful write to this path AND the file
-            // size hasn't changed since (i.e. nothing else has touched it),
-            // serving the full content again is wasted tokens — the agent
-            // already knows what it just wrote. Return a confirm-only stub
-            // pointing the agent at view_range / symbol if they need to
-            // re-orient. Only fires on the immediately following tool call
-            // (tick === lastTick + 1) so an intentional view-after-other-
-            // operations still works as expected.
+            // Improver1 §4 + E3 — post-write stub. Loosened: fires
+            // whenever the file's size matches what the agent last
+            // wrote AND no view of this path has happened since that
+            // write. The original strict `tick === lastMut.tick + 1`
+            // gate let the stub be skipped if the agent inserted any
+            // intervening non-mutation tool call (set_todos,
+            // read_url, etc.). Today's data shows that pattern.
             const lastMut = lastMutationByPath.get(path);
-            if (
-              lastMut !== undefined &&
-              tick === lastMut.tick + 1 &&
-              file.content.length === lastMut.size
-            ) {
-              const stub = `${path} was written in the previous tool call (${lastMut.size} bytes, ${file.numLines} lines). The full content the runtime saw is the same content you wrote. Re-issue \`view\` with \`view_range\` or \`symbol\` only if you need to inspect a SPECIFIC region — re-fetching the entire file you just wrote burns ~${Math.ceil(file.content.length / 4)} tokens of cache write for no new information. If you don't need a specific region, just continue with your next edit.`;
+            const lastView = lastViewByPath.get(path);
+            const noViewSinceWrite =
+              lastMut !== undefined && (lastView === undefined || lastView.tick < lastMut.tick);
+            if (lastMut !== undefined && file.content.length === lastMut.size && noViewSinceWrite) {
+              const stub = `${path} was last written at tool-call tick ${lastMut.tick} (${lastMut.size} bytes, ${file.numLines} lines). No edits or other writes have landed since. Re-issue \`view\` with \`view_range\` or \`symbol\` only if you need a SPECIFIC region — re-fetching the entire file burns ~${Math.ceil(file.content.length / 4)} tokens for no new information. Otherwise continue with your next edit using the bytes you wrote.`;
+              lastViewByPath.set(path, { tick, size: file.content.length });
               return ok(stub, {
                 command: 'view',
                 path,
                 result: { numLines: file.numLines, postWriteStub: true },
               });
             }
+            // Improver1 §4 — stale-view detector. If a full-file view
+            // arrived earlier in this run AND the file size hasn't
+            // changed since (no mutation between then and now), return
+            // a 1-line stub: the bytes the agent has in its context
+            // ARE the current bytes. Distinct from the post-write
+            // stub above because there may have been NO write — just
+            // the agent re-checking out of caution.
+            const lastMutTick = lastMut?.tick ?? -1;
+            const noMutationSinceView =
+              lastView !== undefined &&
+              lastView.size === file.content.length &&
+              lastMutTick <= lastView.tick;
+            if (noMutationSinceView && lastView !== undefined) {
+              const stub = `${path} unchanged since your last view at tick ${lastView.tick} (${file.numLines} lines, ${file.content.length} bytes). The bytes already in your context for this path are still current — no need to re-emit them. To inspect a specific region, pass \`view_range: [start, end]\` (1-indexed); otherwise continue.`;
+              lastViewByPath.set(path, { tick, size: file.content.length });
+              return ok(stub, {
+                command: 'view',
+                path,
+                result: { numLines: file.numLines, staleViewStub: true },
+              });
+            }
             const count = (viewCountByPath.get(path) ?? 0) + 1;
             viewCountByPath.set(path, count);
+            lastViewByPath.set(path, { tick, size: file.content.length });
             if (count === 1) {
+              // Improver1 §8 — first full-file view delivers fresh
+              // bytes; clear retry-budget for this path.
+              resetTargetFailuresForPath(path);
               return ok(file.content, {
                 command: 'view',
                 path,
@@ -581,18 +747,66 @@ export function makeTextEditorTool(
           if (cameraRefusal !== null) {
             throw new Error(cameraRefusal);
           }
+          // Improver1 §8 — per-target retry budget. Refuse the 4th
+          // attempt on the same content target after 3 prior failures
+          // unless a `view` covering that content has landed since.
+          const probe = firstNonEmptyLine(oldStr);
+          const bucketKey = probe.length > 0 ? targetBucketKey(path, probe) : null;
+          if (bucketKey !== null) {
+            const prior = targetFailures.get(bucketKey);
+            if (prior !== undefined && prior.count >= PER_TARGET_RETRY_LIMIT) {
+              throw new Error(
+                `Refusing str_replace on \`${path}\` — target content (anchor: "${probe.slice(0, 60)}…") has already failed ${prior.count} times in this run. The file has shifted out from under you. Run \`view\` with \`view_range\` covering this region first, then retry with the exact bytes you read back. The retry budget resets after a successful \`view\` of an overlapping range.`,
+              );
+            }
+          }
           try {
             const result = await fs.strReplace(path, oldStr, newStr);
             const sizeAfter = fs.view(path)?.content.length ?? 0;
             lastMutationByPath.set(path, { tick, size: sizeAfter });
+            // Successful edit clears the per-target failure counter for
+            // this bucket — agent demonstrated it found the right bytes.
+            if (bucketKey !== null) targetFailures.delete(bucketKey);
             const budgetWarning = editBudget?.recordEdit(path) ?? null;
             const message = formatEditOk('Edited', result, newStr.length === 0);
-            return ok(budgetWarning !== null ? `${message}${budgetWarning}` : message, {
+            // Improver1 §5 — nudge towards `patch` after a successful
+            // multi-line REPLACE (not pure deletions). One-shot per
+            // (path, run) so the tool stream isn't spammed. Production
+            // miss rate: 32 % for str_replace vs 12 % for patch.
+            const isDeletion = newStr.length === 0;
+            const newLineCount = (newStr.match(/\n/g) ?? []).length + (newStr.length > 0 ? 1 : 0);
+            const oldLineCount = (oldStr.match(/\n/g) ?? []).length + 1;
+            const isMultiLine =
+              Math.max(newLineCount, oldLineCount) >= STR_REPLACE_PATCH_NUDGE_LINES;
+            const patchNudge =
+              !isDeletion && isMultiLine && !patchNudgedPaths.has(path)
+                ? `\n\nTip: this edit spanned ${Math.max(newLineCount, oldLineCount)} lines. For multi-line edits, prefer \`command: "patch"\` with a \`hunks\` array — set \`expectedOriginal\` to catch line-shift errors automatically (production miss rate: ~12 % for patch vs ~32 % for str_replace).`
+                : '';
+            if (patchNudge.length > 0) patchNudgedPaths.add(path);
+            const fullMessage = `${message}${budgetWarning ?? ''}${patchNudge}`;
+            return ok(fullMessage, {
               command: 'str_replace',
               path,
               result,
             });
           } catch (err) {
+            // Improver1 §8 — record the failure under the same bucket
+            // so the next call on this target counts toward the retry
+            // budget. Then re-throw the existing detailed error.
+            if (bucketKey !== null) {
+              const prior = targetFailures.get(bucketKey);
+              if (prior === undefined) {
+                targetFailures.set(bucketKey, {
+                  count: 1,
+                  firstFailAt: tick,
+                  lastFailAt: tick,
+                  samplePath: path,
+                });
+              } else {
+                prior.count += 1;
+                prior.lastFailAt = tick;
+              }
+            }
             const msg = err instanceof Error ? err.message : String(err);
             const file = fs.view(path);
             if (file !== null && /old_str not found/i.test(msg)) {
@@ -619,6 +833,122 @@ export function makeTextEditorTool(
           // content actually lives.
           return ok(formatEditOk(`Inserted at ${result.path}:${line}.`, result, false), {
             command: 'insert',
+            path,
+            result,
+          });
+        }
+        case 'patch': {
+          // Backlog-3 §2 — multi-hunk patch. Apply hunks in descending
+          // startLine order so earlier hunks don't invalidate later
+          // ones' line numbers. Optional expectedOriginal is the
+          // load-bearing safety: when set, mismatch fails the patch
+          // loud rather than clobbering blind.
+          if (fs.patch === undefined) {
+            throw new Error(
+              'text_editor.patch is not available on this fs adapter. Use str_replace instead.',
+            );
+          }
+          const hunks = params.hunks;
+          if (hunks === undefined || hunks.length === 0) {
+            throw new Error('patch requires a non-empty `hunks` array');
+          }
+          let totalReplacementBytes = 0;
+          for (const h of hunks) totalReplacementBytes += Buffer.byteLength(h.replacement, 'utf8');
+          const patchCap = maxStrReplaceBytesFor(path);
+          if (totalReplacementBytes > patchCap) {
+            throw new Error(
+              `text_editor.patch("${path}", ...) replacement total ${totalReplacementBytes} bytes exceeds ${patchCap}-byte cap. Split into multiple patch calls.`,
+            );
+          }
+          // Reject overlapping hunks before reaching the fs callback —
+          // cleaner error message than whatever the fs surfaces.
+          const sorted = [...hunks].sort((a, b) => a.startLine - b.startLine);
+          for (let i = 1; i < sorted.length; i += 1) {
+            const prev = sorted[i - 1];
+            const cur = sorted[i];
+            if (prev === undefined || cur === undefined) continue;
+            if (cur.startLine <= prev.endLine) {
+              throw new Error(
+                `patch hunks overlap: hunk ending at line ${prev.endLine} conflicts with hunk starting at line ${cur.startLine}. Hunks must not overlap.`,
+              );
+            }
+          }
+          // Bounds validation lives in the tool so it's enforced
+          // regardless of whether the fs adapter validates. Use a
+          // ranged view to know the file's current line count.
+          const fileForBounds = fs.view(path);
+          if (fileForBounds === null) throw new Error(`File not found: ${path}`);
+          const totalLinesBefore = fileForBounds.numLines;
+          for (const h of hunks) {
+            if (
+              !Number.isInteger(h.startLine) ||
+              !Number.isInteger(h.endLine) ||
+              h.startLine < 1 ||
+              h.endLine < h.startLine - 1 ||
+              h.endLine > totalLinesBefore
+            ) {
+              throw new Error(
+                `patch hunk has invalid line range [${h.startLine}, ${h.endLine}] (file has ${totalLinesBefore} lines, 1-indexed inclusive endLine).`,
+              );
+            }
+          }
+          // Improver1 §8 — per-target retry budget on patch. Use the
+          // first hunk's expectedOriginal (if set) or replacement as
+          // the bucket probe — same hash function as str_replace, so
+          // a thrash that flipped from str_replace → patch still
+          // hashes to the same bucket and contributes to the count.
+          const firstHunk = hunks[0];
+          const patchProbeRaw =
+            typeof firstHunk?.expectedOriginal === 'string'
+              ? firstHunk.expectedOriginal
+              : typeof firstHunk?.replacement === 'string'
+                ? firstHunk.replacement
+                : '';
+          const patchProbe = firstNonEmptyLine(patchProbeRaw);
+          const patchBucketKey = patchProbe.length > 0 ? targetBucketKey(path, patchProbe) : null;
+          if (patchBucketKey !== null) {
+            const prior = targetFailures.get(patchBucketKey);
+            if (prior !== undefined && prior.count >= PER_TARGET_RETRY_LIMIT) {
+              throw new Error(
+                `Refusing patch on \`${path}\` — target content (anchor: "${patchProbe.slice(0, 60)}…") has already failed ${prior.count} times in this run, across str_replace and/or patch attempts. The file has shifted out from under you. Run \`view\` with \`view_range\` covering this region first, then retry. The retry budget resets after a successful \`view\` of an overlapping range.`,
+              );
+            }
+          }
+          let result: EditResult;
+          try {
+            result = await fs.patch(path, hunks);
+          } catch (err) {
+            // Improver1 §8 — record patch failure under the same
+            // bucket so subsequent str_replace OR patch on the same
+            // content gets refused after the threshold.
+            if (patchBucketKey !== null) {
+              const prior = targetFailures.get(patchBucketKey);
+              if (prior === undefined) {
+                targetFailures.set(patchBucketKey, {
+                  count: 1,
+                  firstFailAt: tick,
+                  lastFailAt: tick,
+                  samplePath: path,
+                });
+              } else {
+                prior.count += 1;
+                prior.lastFailAt = tick;
+              }
+            }
+            throw err;
+          }
+          // Successful patch clears the per-target counter.
+          if (patchBucketKey !== null) targetFailures.delete(patchBucketKey);
+          const sizeAfter = fs.view(path)?.content.length ?? 0;
+          lastMutationByPath.set(path, { tick, size: sizeAfter });
+          const budgetWarning = editBudget?.recordEdit(path) ?? null;
+          const message = formatEditOk(
+            `Patched ${path} (${hunks.length} hunk${hunks.length === 1 ? '' : 's'}).`,
+            result,
+            false,
+          );
+          return ok(budgetWarning !== null ? `${message}${budgetWarning}` : message, {
+            command: 'patch',
             path,
             result,
           });

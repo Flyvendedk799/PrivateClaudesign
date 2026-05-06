@@ -58,6 +58,7 @@ import {
   canonicalBaseUrl,
 } from '@open-codesign/shared';
 import type { TSchema } from '@sinclair/typebox';
+import { resolveCachePolicy } from './cache-policy.js';
 import { buildTransformContext } from './context-prune.js';
 import { remapProviderError } from './errors.js';
 import type {
@@ -80,7 +81,12 @@ import {
   makeViewDesignSkillTool,
   makeViewFrameTool,
 } from './tools/design-library.js';
-import { type DoneRuntimeVerifier, makeDoneTool, makeVerifyArtifactTool } from './tools/done.js';
+import {
+  type DoneRuntimeVerifier,
+  makeDoneTool,
+  makeVerifyArtifactTool,
+  runArtifactChecks,
+} from './tools/done.js';
 import { createEditBudget } from './tools/edit-budget.js';
 import { makeGenerateAudioAssetTool } from './tools/generate-audio-asset.js';
 import {
@@ -442,10 +448,31 @@ const AGENTIC_TOOL_GUIDANCE = [
   '### Tool-use rules that prevent real bugs',
   '- Use `str_replace_based_edit_tool` for ALL file content. NEVER inline source in prose — the host extracts it from the virtual fs.',
   '- Per-call size caps (enforced by the tool): `index.html` create ≤ 8 KB / str_replace ≤ 12 KB. Sidecar files (.css / .js, vanilla pattern only) get 64 KB / 32 KB.',
-  '- Follow-up turns when `index.html` already exists: use `str_replace`, NEVER `create`. `create` overwrites and destroys prior work. Only re-`create` when the user explicitly asks to start over.',
-  '- **Trust your context — DO NOT `view` to verify a write.** After a successful `create` or `str_replace`, you already know the post-state. The tool errors loudly when an edit fails (`old_str not found` / `ambiguous`); silence means it landed exactly as you wrote it. Re-viewing "just to be safe" burned 48 of 76 tool calls in a recent production trace and added ~6 minutes of latency. Only `view` when (a) `str_replace` returned an error and you need its candidate line numbers, or (b) you genuinely need to re-read a section heavily edited by *prior* turns.',
+  '- Follow-up turns when `index.html` already exists: use `str_replace` or `patch`, NEVER `create`. `create` overwrites and destroys prior work. Only re-`create` when the user explicitly asks to start over.',
+  '',
+  '#### `patch` is the DEFAULT for multi-line edits',
+  '',
+  'For ANY edit ≥ 3 lines, prefer `command: "patch"` over `str_replace`. Production data: patch fails ~12 % vs str_replace at ~32 % miss rate, and saves a substantial chunk of output tokens by avoiding the surrounding-context boilerplate that str_replace requires.',
+  '',
+  'Patch shape:',
+  '```',
+  'text_editor.patch(',
+  '  path: "index.html",',
+  '  hunks: [',
+  '    { startLine: 142, endLine: 148, replacement: "...", expectedOriginal: "<exact bytes of lines 142-148>" }',
+  '  ],',
+  ')',
+  '```',
+  '',
+  '- Multiple hunks per call are fine (max 32). Apply order is enforced by the tool.',
+  "- `expectedOriginal` is the SAFETY NET: when set, the tool refuses if the file's lines have shifted since you last viewed. Use it WHENEVER you have the source bytes — it eliminates the silent-clobber failure mode.",
+  '- Reserve `str_replace` for surgical 1-2 line tweaks where line numbers are awkward.',
+  '- DO NOT mix-and-match. Within one turn, batch your patches together; do not interleave a str_replace + patch + str_replace on overlapping regions.',
+  '',
+  '#### Other rules',
+  '- **Trust your context — DO NOT `view` to verify a write.** After a successful `create`, `str_replace`, or `patch`, you already know the post-state. The tool errors loudly when an edit fails (`old_str not found` / `ambiguous` / `expectedOriginal does not match`); silence means it landed exactly as you wrote it. Re-viewing "just to be safe" burned 48 of 76 tool calls in a recent production trace and added ~6 minutes of latency. Only `view` when (a) the tool returned an error and you need its candidate line numbers, or (b) you genuinely need to re-read a section heavily edited by *prior* turns.',
   "- Use `view_range: [start, end]` (1-indexed, `-1` = EOF) for tight re-inspections. A second full-file view auto-truncates to a 400-char snippet — that's the system telling you the same thing.",
-  "- When `str_replace` says `old_str not found`: the error includes candidate line numbers where the first line of your `old_str` *does* appear. Re-`view` that region, then retry with the exact snippet — don't guess again. When it says `ambiguous` / `matched N times`: extend `old_str` with 1-3 extra lines of context.",
+  "- When `str_replace` says `old_str not found`: the error embeds CURRENT CONTENT (line-numbered) around the candidate region. Use those bytes verbatim for your retry — don't guess again. When it says `ambiguous` / `matched N times`: extend `old_str` with 1-3 extra lines of context. When `patch` says `expectedOriginal does not match`: the error embeds the actual current bytes; rebuild your `expectedOriginal` from them OR drop `expectedOriginal` entirely if you trust the line range.",
   '- **`set_todos` cadence — 3-5 calls per design, max.** Initial plan + 1-3 progress updates as major sections land. Each call sends the FULL list back, so calling it after every single section is wasteful. Batch checkbox toggles when convenient.',
   '- **A11y baseline (FATAL — `done` will reject):** every `<button>` needs visible text or `aria-label`; every `<input>` (text/email/password/etc.) needs a `<label>` or `aria-label`; every `<a href>` needs link text, `aria-label`, or an `<img alt="…">` child. Bake these into your scaffold — fixing post-hoc costs an extra `done` round.',
   '',
@@ -697,8 +724,9 @@ const VANILLA_TOOL_GUIDANCE = [
   '    - `index.html` create ≤ 8 KB (scaffold only)',
   '    - sidecar (`.css` / `.js` / `.json`) create ≤ 64 KB',
   '    - `index.html` str_replace ≤ 12 KB / sidecar str_replace ≤ 32 KB',
+  '- **For multi-line edits (≥ 3 lines), use `command: "patch"` instead of `str_replace`.** Production data: patch fails ~12 % vs str_replace at ~32 % miss rate. Patch shape: `{ command: "patch", path, hunks: [{ startLine, endLine, replacement, expectedOriginal }] }`. Set `expectedOriginal` to the exact bytes you expect — the tool refuses to clobber when the file has shifted, eliminating silent overwrites. `str_replace` stays the right tool for surgical 1-2 line tweaks.',
   '- Prefer small, specific `old_str` values per edit so each is unambiguous.',
-  '- Minimum 8 tool calls per design (scaffold + ≥2 file creates + ≥2 str_replace + set_todos + done); 12-25 is typical.',
+  '- Minimum 8 tool calls per design (scaffold + ≥2 file creates + ≥2 str_replace/patch + set_todos + done); 12-25 is typical.',
   '',
   '### CDN libraries',
   '',
@@ -993,13 +1021,18 @@ export async function generateViaAgent(
       );
     }
     defaultTools.push(
-      makeVerifyArtifactTool(deps.fs, deps.runtimeVerify, editBudget) as unknown as AgentTool<
+      makeVerifyArtifactTool(
+        deps.fs,
+        deps.runtimeVerify,
+        editBudget,
+        input.artifactType,
+      ) as unknown as AgentTool<TSchema, unknown>,
+    );
+    defaultTools.push(
+      makeDoneTool(deps.fs, deps.runtimeVerify, log, input.artifactType) as unknown as AgentTool<
         TSchema,
         unknown
       >,
-    );
-    defaultTools.push(
-      makeDoneTool(deps.fs, deps.runtimeVerify, log) as unknown as AgentTool<TSchema, unknown>,
     );
     // gameplan §A5 — validate_game_scene needs both fs (to read the bundle)
     // and the host's engine-aware validator dispatch. Lazy-loaded
@@ -1162,12 +1195,41 @@ export async function generateViaAgent(
   //
   // We also bump maxTokens above pi-ai's hardcoded 32000 cap so adaptive
   // thinking on later turns doesn't run out of room.
+  // Turn-0 strategy — force a tool call. Sonnet 4.6's adaptive
+  // thinking with `tool_choice='auto'` can spend the entire 65K output
+  // budget on thinking blocks without ever emitting a tool call OR
+  // streamed text — exactly what the 2026-05-06 first-person-shooter
+  // wave-defense run hit (1 turn, 0 tools, 0 deltas, 65,536 output
+  // tokens, 15.3 min wall-clock). Forcing `tool_choice='any'` +
+  // `thinkingEnabled=false` on turn 0 is the working pattern other
+  // agents (Claude Code, Cursor, Antigravity, Lovable) all use:
+  // the model MUST emit a tool call (set_todos / choose_engine /
+  // text_editor) so the loop progresses. Subsequent turns re-enable
+  // adaptive thinking — that's where it actually pays off (reasoning
+  // about tool results), not on the planning turn (where set_todos
+  // IS the plan).
+  //
+  // Backlog-3 §3 originally moved this to detect-then-retry: turn 0
+  // ran auto + thinking, retry only when the assistant emitted text
+  // without tool calls. The retry detector requires `hasText`, so a
+  // run that emits NEITHER text NOR tools (the runaway-thinking
+  // failure mode above) slipped through and the run died silently.
+  // We rolled it back to "force on turn 0 by default" — callers can
+  // still opt out via `input.forceToolsTurn0 = false` if a model
+  // family shows real benefit from auto on turn 0.
   let agentTurnIndex = 0;
+  let retryArmed = false;
+  let turn0EmittedTools = false;
   const forcedToolStreamFn: StreamFn = (model, context, options) => {
     const isAnthropic = model.api === 'anthropic-messages';
     const turn = agentTurnIndex;
     agentTurnIndex += 1;
-    const forceTools = turn === 0;
+    // Force tools when retryArmed (after a no-progress turn) OR by
+    // default on turn 0. Caller opt-out via `forceToolsTurn0: false`
+    // for model families that don't need it.
+    const forceToolsTurn0 = input.forceToolsTurn0 !== false;
+    const forceTools = retryArmed || (turn === 0 && forceToolsTurn0);
+    if (retryArmed) retryArmed = false; // one-shot
     const reasoning = (options as { reasoning?: string } | undefined)?.reasoning;
     // Single per-turn diagnostic line. Includes turn index, reasoning level,
     // and forceTools flag — enough to debug "agent stuck not calling tools"
@@ -1183,7 +1245,13 @@ export async function generateViaAgent(
       apiKey: options?.apiKey,
       signal: options?.signal,
       headers: options?.headers,
-      cacheRetention: options?.cacheRetention,
+      // Phase 1 — cache policy is now explicit per-provider rather than
+      // relying on pi-ai's `'short'` default. See ./cache-policy.ts.
+      cacheRetention: resolveCachePolicy(
+        model.api,
+        (options as { cacheRetention?: 'none' | 'short' | 'long' } | undefined)?.cacheRetention,
+        input.artifactType === undefined ? {} : { artifactType: input.artifactType },
+      ),
       sessionId: options?.sessionId,
       maxRetryDelayMs: options?.maxRetryDelayMs,
       metadata: options?.metadata,
@@ -1194,8 +1262,7 @@ export async function generateViaAgent(
         lowered['toolChoice'] = 'any';
         lowered['thinkingEnabled'] = false;
       } else if (reasoning) {
-        // After the agent is unstuck, re-enable adaptive thinking so the
-        // model can reason about tool results and converge on `done`.
+        // Adaptive thinking — pi-ai translates effort to thinking budget.
         lowered['thinkingEnabled'] = true;
         lowered['effort'] = reasoning;
       } else {
@@ -1372,6 +1439,11 @@ export async function generateViaAgent(
   agent.subscribe((event) => {
     if (event.type === 'tool_execution_start' && budgetReason === null) {
       toolCallCount += 1;
+      // Backlog-3 §3 — track whether turn 0 actually emitted any tool
+      // calls. If it didn't AND the assistant emitted text, we re-issue
+      // with forced tools on turn 1 (one extra round-trip in the bad
+      // case; full thinking quality otherwise).
+      if (agentTurnIndex <= 1) turn0EmittedTools = true;
       if (toolCallCount > maxToolCalls) {
         budgetReason = 'tool_calls';
         log.warn('[generate] step=budget_exceeded', {
@@ -1389,6 +1461,55 @@ export async function generateViaAgent(
         pendingWallClockAbort = false;
         agent.abort();
         return;
+      }
+      // Backlog-3 §5 — checkpoint cancel: when the IPC has set the
+      // per-generationId hint, abort cleanly at this safe boundary so
+      // the just-committed turn lands in chat_messages. Resume picks
+      // up where this turn ended.
+      if (input.getCheckpointHint?.() === true) {
+        log.info('[generate] step=cancel.checkpoint_safe_boundary', { ...ctx });
+        agent.abort();
+        return;
+      }
+      // Backlog-3 §3 — turn-0 detect-then-retry. After the FIRST turn
+      // settles, if no tool calls fired AND the assistant emitted
+      // non-trivial text, set retryArmed so the streamFn forces tools
+      // on the next round-trip. Defer the synthetic prompt to a
+      // microtask so we don't re-enter pi-agent-core's event dispatch.
+      if (agentTurnIndex === 1 && !turn0EmittedTools && !retryArmed) {
+        const lastMsg = agent.state.messages[agent.state.messages.length - 1];
+        if (lastMsg?.role === 'assistant') {
+          const content = (
+            lastMsg as unknown as { content?: Array<{ type?: string; text?: string }> }
+          ).content;
+          if (Array.isArray(content)) {
+            const hasToolCall = content.some((b) => b?.type === 'toolCall');
+            const hasText = content.some(
+              (b) => b?.type === 'text' && typeof b?.text === 'string' && b.text.trim().length > 0,
+            );
+            if (!hasToolCall && hasText && !input.signal?.aborted) {
+              retryArmed = true;
+              log.info('[agent] step=turn0_retry', {
+                ...ctx,
+                reason: 'no_tool_calls_with_text',
+              });
+              // Synthetic user steer at the safe boundary; the next
+              // streamFn call will see retryArmed=true and force tools.
+              Promise.resolve().then(() => {
+                if (!input.signal?.aborted) {
+                  agent.steer({
+                    role: 'user',
+                    content:
+                      '[CODESIGN_AUTO_RETRY] You replied with text but did not call any tools. ' +
+                      'Begin by calling `set_todos` with your plan, then proceed with text_editor edits. ' +
+                      'Every turn must include at least one tool call.',
+                    timestamp: Date.now(),
+                  });
+                }
+              });
+            }
+          }
+        }
       }
       // Drain user-injected steers (Wrap-up button) at the safe boundary.
       if (input.getPendingSteers) {
@@ -1410,6 +1531,436 @@ export async function generateViaAgent(
       }
     }
   });
+
+  // Phase 3 — stuck-detector steer. Original gate: `(toolName,
+  // normalized-args-hash)` repeats >=3 times in a 5-turn window.
+  //
+  // Improver1 §3 — added a SECOND gate: `(path, lineRange ± 20)`
+  // repeats among FAILED tool calls. Today's run-1 thrash on
+  // `// ── Body bob + head ──` (lines 1346-1392) was 4 consecutive
+  // failures across str_replace + patch with subtly different args
+  // — they hashed differently so the original gate didn't fire.
+  // The target-region gate fires regardless of which tool variant
+  // was used as long as the same file region keeps failing.
+  //
+  // Either gate triggering emits the same one-shot steer.
+  const STUCK_REPEAT_THRESHOLD = 3;
+  const STUCK_TURN_WINDOW = 5;
+  const STUCK_REGION_RADIUS = 20;
+  const stuckRecent: Array<{ key: string; turn: number }> = [];
+  // Per-(path, contentBucket) failure tracker. `contentBucket` is a
+  // SHA-style hash of the first non-empty line of the source content
+  // the call is targeting (old_str / expectedOriginal / replacement).
+  // Bucketing by content rather than line number means str_replace
+  // and patch attempts that target the SAME logical block hash to
+  // the same bucket regardless of which tool variant was used —
+  // which is exactly the "same target, different tool" thrash we
+  // saw on lines 1346-1392 today.
+  const stuckFailuresByBucket = new Map<
+    string,
+    Array<{ path: string; bucket: string; turn: number; sampleRange?: [number, number] }>
+  >();
+  // Pending lookups by toolCallId — we know the args at
+  // tool_execution_start but only know whether it failed at
+  // tool_execution_end. Map id → { path, bucket, sampleRange? }.
+  const stuckPendingByCallId = new Map<
+    string,
+    { path: string; bucket: string; sampleRange?: [number, number] }
+  >();
+  let stuckTurnIndex = 0;
+  let stuckSteerEmitted = false;
+  const normalizeStuckKey = (toolName: string, args: unknown): string => {
+    let argsStr = '';
+    try {
+      argsStr = JSON.stringify(args ?? {});
+    } catch {
+      argsStr = '<unserializable>';
+    }
+    return `${toolName}::${argsStr.slice(0, 512)}`;
+  };
+  /** Improver1 §3 — derive the bucket key an str_replace/patch call
+   *  is targeting. The bucket is `(path, hashOfFirstNonEmptyLine)`
+   *  so str_replace + patch + insert calls that target the SAME
+   *  logical block hash to the same bucket regardless of tool
+   *  variant. Returns null when no useful target can be derived. */
+  const hashLine = (s: string): string => {
+    let h = 0;
+    for (let i = 0; i < s.length && i < 256; i += 1) h = (h * 31 + s.charCodeAt(i)) | 0;
+    return Math.abs(h).toString(36);
+  };
+  const firstNonEmptyLine = (s: string | undefined): string | null => {
+    if (typeof s !== 'string') return null;
+    const ln = s.split('\n').find((l) => l.trim().length > 0);
+    return ln !== undefined ? ln.trim() : null;
+  };
+  const deriveTargetBucket = (
+    toolName: string,
+    args: Record<string, unknown> | null,
+  ): { path: string; bucket: string; sampleRange?: [number, number] } | null => {
+    if (toolName !== 'str_replace_based_edit_tool' || args === null) return null;
+    const path = typeof args['path'] === 'string' ? (args['path'] as string) : null;
+    if (path === null || path.length === 0) return null;
+    const cmd = typeof args['command'] === 'string' ? (args['command'] as string) : null;
+    if (cmd === 'patch') {
+      const hunks = args['hunks'];
+      if (!Array.isArray(hunks) || hunks.length === 0) return null;
+      const first = hunks[0] as {
+        startLine?: unknown;
+        endLine?: unknown;
+        expectedOriginal?: unknown;
+        replacement?: unknown;
+      };
+      // Prefer expectedOriginal (the bytes the agent THINKS are at
+      // that line) — same content as str_replace's old_str when the
+      // agent is targeting the same thing.
+      const probe =
+        firstNonEmptyLine(
+          typeof first.expectedOriginal === 'string' ? first.expectedOriginal : undefined,
+        ) ??
+        firstNonEmptyLine(typeof first.replacement === 'string' ? first.replacement : undefined);
+      if (probe === null) return null;
+      const lo = typeof first.startLine === 'number' ? first.startLine : null;
+      const hi = typeof first.endLine === 'number' ? first.endLine : null;
+      const sampleRange: [number, number] | undefined =
+        lo !== null && hi !== null ? [lo, hi] : undefined;
+      const result: { path: string; bucket: string; sampleRange?: [number, number] } = {
+        path,
+        bucket: hashLine(probe),
+      };
+      if (sampleRange !== undefined) result.sampleRange = sampleRange;
+      return result;
+    }
+    if (cmd === 'str_replace' || cmd === 'insert') {
+      const probeRaw =
+        typeof args['old_str'] === 'string'
+          ? (args['old_str'] as string)
+          : typeof args['insert_str'] === 'string'
+            ? (args['insert_str'] as string)
+            : null;
+      const probe = firstNonEmptyLine(probeRaw ?? undefined);
+      if (probe === null) return null;
+      return { path, bucket: hashLine(probe) };
+    }
+    return null;
+  };
+  const fireStuckSteer = (
+    reason: 'args_repeat' | 'region_repeat',
+    meta: Record<string, unknown>,
+  ) => {
+    if (stuckSteerEmitted) return;
+    stuckSteerEmitted = true;
+    log.warn('[generate] step=stuck_detected', { ...ctx, reason, ...meta });
+    let messageBody: string;
+    if (reason === 'region_repeat') {
+      const range =
+        meta['startLine'] !== undefined && meta['endLine'] !== undefined
+          ? ` lines ${meta['startLine']}-${meta['endLine']}`
+          : ' (around the same code block)';
+      messageBody = `[system-reminder] You have failed ${meta['failures']} attempts to edit \`${meta['path']}\`${range} in the last 5 turns, across multiple str_replace/patch variants. Stop guessing. Run \`view\` with \`view_range\` covering that block to see the current bytes, then build ONE fresh edit from what you read. Do not retry without viewing first.`;
+    } else {
+      messageBody =
+        '[system-reminder] You have repeated the same tool call 3 times in the last 5 turns. Stop iterating. Run `verify_artifact` to see what is actually wrong, then either fix the issues it reports OR call `done` to exit the run cleanly. Do not retry the same edit shape again.';
+    }
+    agent.steer({
+      role: 'user',
+      content: messageBody,
+      timestamp: Date.now(),
+    });
+  };
+  agent.subscribe((event) => {
+    if (event.type === 'turn_end') {
+      stuckTurnIndex += 1;
+      while (
+        stuckRecent.length > 0 &&
+        stuckTurnIndex - (stuckRecent[0]?.turn ?? stuckTurnIndex) > STUCK_TURN_WINDOW
+      ) {
+        stuckRecent.shift();
+      }
+      // Drop bucket rows older than the window.
+      for (const [bucket, fails] of stuckFailuresByBucket) {
+        const keep = fails.filter((r) => stuckTurnIndex - r.turn <= STUCK_TURN_WINDOW);
+        if (keep.length === 0) stuckFailuresByBucket.delete(bucket);
+        else stuckFailuresByBucket.set(bucket, keep);
+      }
+      return;
+    }
+    if (stuckSteerEmitted) return;
+    if (event.type === 'tool_execution_start') {
+      // pi-agent-core's tool_execution_start carries `toolName`, `args`,
+      // and `toolCallId` directly on the event — NOT under `toolCall`.
+      // (The Backlog-3 §3 / §7 originals had this wrong; today's
+      // production data confirmed the detector never fired.)
+      const ev = event as unknown as {
+        toolCallId?: unknown;
+        toolName?: unknown;
+        args?: unknown;
+      };
+      const tname = typeof ev.toolName === 'string' ? ev.toolName : '';
+      if (tname.length === 0) return;
+      const args = (ev.args ?? {}) as Record<string, unknown>;
+      // Original gate — args repeat.
+      const key = normalizeStuckKey(tname, args);
+      stuckRecent.push({ key, turn: stuckTurnIndex });
+      while (
+        stuckRecent.length > 0 &&
+        stuckTurnIndex - (stuckRecent[0]?.turn ?? stuckTurnIndex) > STUCK_TURN_WINDOW
+      ) {
+        stuckRecent.shift();
+      }
+      const matches = stuckRecent.filter((e) => e.key === key).length;
+      if (matches >= STUCK_REPEAT_THRESHOLD) {
+        fireStuckSteer('args_repeat', {
+          toolName: tname,
+          repeats: matches,
+          windowTurns: STUCK_TURN_WINDOW,
+        });
+        return;
+      }
+      // Improver1 §3 — stash target bucket so we can record on
+      // tool_execution_end if the call fails.
+      const target = deriveTargetBucket(tname, args);
+      const callId = typeof ev.toolCallId === 'string' ? (ev.toolCallId as string) : '';
+      if (target !== null && callId.length > 0) {
+        stuckPendingByCallId.set(callId, target);
+      }
+      return;
+    }
+    if (event.type === 'tool_execution_end') {
+      const ev = event as unknown as {
+        toolCallId?: unknown;
+        isError?: unknown;
+      };
+      const callId = typeof ev.toolCallId === 'string' ? (ev.toolCallId as string) : '';
+      const isError = ev.isError === true;
+      if (callId.length === 0) return;
+      const pending = stuckPendingByCallId.get(callId);
+      stuckPendingByCallId.delete(callId);
+      if (!pending || !isError) return;
+      // Bucket key combines path + content hash. Same path + same
+      // first-line content (across str_replace, patch, insert) =
+      // same logical target.
+      const key = `${pending.path}::${pending.bucket}`;
+      const list = stuckFailuresByBucket.get(key) ?? [];
+      list.push({
+        path: pending.path,
+        bucket: pending.bucket,
+        turn: stuckTurnIndex,
+        ...(pending.sampleRange !== undefined ? { sampleRange: pending.sampleRange } : {}),
+      });
+      stuckFailuresByBucket.set(key, list);
+      const fresh = list.filter((r) => stuckTurnIndex - r.turn <= STUCK_TURN_WINDOW);
+      if (fresh.length >= STUCK_REPEAT_THRESHOLD) {
+        // Surface the most concrete line range we have (last one with
+        // a sampleRange) so the steer is actionable.
+        const sample = [...fresh].reverse().find((r) => r.sampleRange !== undefined)?.sampleRange;
+        const meta: Record<string, unknown> = {
+          path: pending.path,
+          failures: fresh.length,
+          windowTurns: STUCK_TURN_WINDOW,
+        };
+        if (sample !== undefined) {
+          meta['startLine'] = sample[0];
+          meta['endLine'] = sample[1];
+        }
+        fireStuckSteer('region_repeat', meta);
+      }
+    }
+  });
+
+  // Backlog-3 §7 — incremental verify_artifact mid-run. After every
+  // VERIFY_INTERVAL str_replace edits AND once total turns ≥ 8, run
+  // runArtifactChecks programmatically (no LLM round-trip) and inject
+  // the result as a synthetic user-side steer so the agent can fix
+  // issues 5+ turns earlier than the explicit verify_artifact pattern
+  // catches them. Capped at 3 fires per run; gated by
+  // input.incrementalVerify.
+  const VERIFY_INTERVAL = 4;
+  const VERIFY_MIN_TURN = 8;
+  const VERIFY_MAX_FIRES = 3;
+  let editsSinceVerify = 0;
+  let verifyFires = 0;
+  let verifyTurnIndex = 0;
+  if (input.incrementalVerify === true && deps.fs !== undefined) {
+    const verifyFs = deps.fs;
+    const verifyRuntime = deps.runtimeVerify;
+    agent.subscribe((event) => {
+      if (event.type === 'tool_execution_start') {
+        // Improver1 §3 — same shape fix as the stuck-detector. Events
+        // carry toolName/args/toolCallId at the top level. Backlog-3 §7
+        // originally read ev.toolCall?.name and silently never matched.
+        const ev = event as unknown as { toolName?: unknown; args?: unknown };
+        const tname = typeof ev.toolName === 'string' ? ev.toolName : '';
+        if (tname !== 'str_replace_based_edit_tool') return;
+        const args = (ev.args ?? {}) as Record<string, unknown>;
+        const cmd = args['command'];
+        if (cmd === 'str_replace' || cmd === 'insert' || cmd === 'patch') {
+          editsSinceVerify += 1;
+        }
+        return;
+      }
+      if (event.type === 'turn_end') {
+        verifyTurnIndex += 1;
+        if (verifyFires >= VERIFY_MAX_FIRES) return;
+        if (verifyTurnIndex < VERIFY_MIN_TURN) return;
+        if (editsSinceVerify < VERIFY_INTERVAL) return;
+        if (input.signal?.aborted) return;
+        editsSinceVerify = 0;
+        // Defer to a microtask — agent.steer mid-event-dispatch can
+        // re-enter; a microtask drops us out of the current callback.
+        Promise.resolve()
+          .then(async () => {
+            if (input.signal?.aborted) return;
+            const result = await runArtifactChecks(
+              verifyFs,
+              verifyRuntime,
+              'index.html',
+              input.artifactType,
+            );
+            if (!result.found || result.errors.length === 0) return;
+            verifyFires += 1;
+            log.info('[generate] step=auto_verify_fired', {
+              ...ctx,
+              fires: verifyFires,
+              errorCount: result.errors.length,
+            });
+            const errorList = result.errors
+              .slice(0, 3)
+              .map((e) => `• ${e.message}`)
+              .join('\n');
+            const more =
+              result.errors.length > 3 ? `\n• …and ${result.errors.length - 3} more` : '';
+            const issueWord = result.errors.length === 1 ? 'issue' : 'issues';
+            const steerContent = `[CODESIGN_AUTO_VERIFY] After ${VERIFY_INTERVAL} edits I ran verify_artifact for you. Findings (${result.errors.length} ${issueWord}):\n${errorList}${more}\n\nIf these are real errors, fix them BEFORE the next edit. If they are false positives, call \`verify_artifact\` yourself for the latest read, then proceed. Do not ignore.`;
+            agent.steer({
+              role: 'user',
+              content: steerContent,
+              timestamp: Date.now(),
+            });
+          })
+          .catch((err) => {
+            log.warn('[generate] step=auto_verify_failed', {
+              ...ctx,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
+      }
+    });
+  }
+
+  // Improver1 §7 — diminishing-returns convergence detector. Today's
+  // run-2 (mosw6uuj-2819zn) ran 95 turns on the prompt "Make the
+  // combat + combo system more advanced and good gameplay" — by the
+  // last 30 turns the model was making 1-2-line tweaks to attack
+  // timings on the same file. Wall-clock-only stoppage is too late.
+  //
+  // Heuristic: fire ONE steer per run when ALL of:
+  //   - turn count >= 25
+  //   - last 5 turns each had small assistant output (< 800 chars)
+  //   - all edits in last 5 turns landed on a SINGLE file
+  //   - no verify_artifact has fired in those 5 turns
+  //
+  // The steer nudges the agent toward verify_artifact + done.
+  const CONVERGENCE_TURN_FLOOR = 25;
+  const CONVERGENCE_LOOKBACK = 5;
+  const CONVERGENCE_BYTE_THRESHOLD = 800;
+  interface ConvergenceTurn {
+    outputBytes: number;
+    editedPaths: Set<string>;
+    verifyArtifactCalled: boolean;
+  }
+  const convergenceTurns: ConvergenceTurn[] = [];
+  let convergenceSteerEmitted = false;
+  let currentConvergenceTurn: ConvergenceTurn = {
+    outputBytes: 0,
+    editedPaths: new Set(),
+    verifyArtifactCalled: false,
+  };
+  agent.subscribe((event) => {
+    if (convergenceSteerEmitted) return;
+    if (event.type === 'turn_start') {
+      currentConvergenceTurn = {
+        outputBytes: 0,
+        editedPaths: new Set(),
+        verifyArtifactCalled: false,
+      };
+      return;
+    }
+    if (event.type === 'message_update') {
+      const ame = event.assistantMessageEvent as
+        | { type: 'text_delta'; delta?: string; text?: string }
+        | { type: string };
+      if (ame.type === 'text_delta') {
+        const delta =
+          (ame as { delta?: string; text?: string }).delta ??
+          (ame as { delta?: string; text?: string }).text ??
+          '';
+        currentConvergenceTurn.outputBytes += delta.length;
+      }
+      return;
+    }
+    if (event.type === 'tool_execution_start') {
+      const ev = event as unknown as { toolName?: unknown; args?: unknown };
+      const tname = typeof ev.toolName === 'string' ? ev.toolName : '';
+      const args = (ev.args ?? {}) as Record<string, unknown>;
+      if (tname === 'verify_artifact') {
+        currentConvergenceTurn.verifyArtifactCalled = true;
+      }
+      if (tname === 'str_replace_based_edit_tool') {
+        const cmd = args['command'];
+        const path = args['path'];
+        if (
+          typeof path === 'string' &&
+          path.length > 0 &&
+          (cmd === 'str_replace' || cmd === 'insert' || cmd === 'patch' || cmd === 'create')
+        ) {
+          currentConvergenceTurn.editedPaths.add(path);
+        }
+      }
+      // Tool args also count toward output bytes for the convergence
+      // threshold — a turn that fired one tiny str_replace and emitted
+      // no prose is still "small output".
+      try {
+        currentConvergenceTurn.outputBytes += JSON.stringify(args).length;
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    if (event.type === 'turn_end') {
+      convergenceTurns.push(currentConvergenceTurn);
+      while (convergenceTurns.length > CONVERGENCE_LOOKBACK) convergenceTurns.shift();
+      // Use the agent's loop turn counter (stuckTurnIndex bumps on
+      // every turn_end) as a global turn count proxy.
+      const totalTurns = stuckTurnIndex + 1;
+      if (totalTurns < CONVERGENCE_TURN_FLOOR) return;
+      if (convergenceTurns.length < CONVERGENCE_LOOKBACK) return;
+      const allSmall = convergenceTurns.every((t) => t.outputBytes < CONVERGENCE_BYTE_THRESHOLD);
+      if (!allSmall) return;
+      const allEditedPaths = new Set<string>();
+      for (const t of convergenceTurns) for (const p of t.editedPaths) allEditedPaths.add(p);
+      // Don't fire on turns that didn't edit at all — the model could
+      // be reasoning / catching up, not converging.
+      if (allEditedPaths.size === 0) return;
+      if (allEditedPaths.size > 1) return;
+      const anyVerify = convergenceTurns.some((t) => t.verifyArtifactCalled);
+      if (anyVerify) return;
+      const path = Array.from(allEditedPaths)[0] ?? 'index.html';
+      convergenceSteerEmitted = true;
+      log.warn('[generate] step=convergence_steer', {
+        ...ctx,
+        path,
+        turnCount: totalTurns,
+        lookback: CONVERGENCE_LOOKBACK,
+      });
+      const messageBody = `[system-reminder] You've made ${CONVERGENCE_LOOKBACK} small edits in a row on \`${path}\` (each turn produced under ${CONVERGENCE_BYTE_THRESHOLD} chars of output) with no \`verify_artifact\` call between them. The artifact is likely converged or the requirement is unclear. Run \`verify_artifact\` next; if it passes, call \`done\`. If you genuinely need to keep iterating, call \`set_todos\` first to declare the remaining work — that's the signal to keep going.`;
+      agent.steer({
+        role: 'user',
+        content: messageBody,
+        timestamp: Date.now(),
+      });
+    }
+  });
+
   const budgetTimer = setTimeout(() => {
     if (budgetReason !== null) return;
     budgetReason = 'wall_clock';
@@ -1645,6 +2196,32 @@ export async function generateViaAgent(
     ms: Date.now() - parseStart,
     artifacts: collected.artifacts.length,
   });
+
+  // Zero-output guard. When a turn ends with zero artifacts AND no
+  // assistant text, the model burned its budget elsewhere (extended
+  // thinking is the usual culprit — `outputTokens === 65536` and
+  // `tools: 0` in the turn_end event). Without this guard the IPC
+  // hands back `{ artifacts: [], message: "" }` and the renderer
+  // happily renders "Done" with an empty iframe — which is what the
+  // 2026-05-06 first-person-shooter wave-defense run hit (15.3 min,
+  // 1 turn, 0 deltas, 0 tools, max-output cap reached). Wall-clock
+  // checkpoints are EXEMPT because they always append the "paused —
+  // type continue" suffix to `message` and surface a partial state.
+  const messageHasContent = stripEmptyFences(collected.text).trim().length > 0;
+  if (!isWallClockCheckpoint && collected.artifacts.length === 0 && !messageHasContent) {
+    log.error('[generate] step=parse_response.no_output', {
+      ...ctx,
+      finalStopReason: finalAssistant.stopReason,
+      reason: 'no_artifacts_no_text',
+    });
+    throw new CodesignError(
+      // The provider-layer error string at packages/providers/src/index.ts
+      // talks about reasoning level — match that wording so the renderer's
+      // existing i18n + diagnostic-toast surface stays consistent.
+      'Model returned no text content (likely consumed its budget on reasoning). Use a more directive prompt or lower the reasoning level.',
+      ERROR_CODES.MODEL_RETURNED_ONLY_THINKING,
+    );
+  }
 
   // Aggregate usage across every assistant message this run added — pi-ai
   // emits one assistant message per LLM turn, each with its own usage. Using

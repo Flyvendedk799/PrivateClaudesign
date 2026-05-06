@@ -135,3 +135,58 @@ describe('chat:update-tool-status:v1', () => {
     ).not.toThrow();
   });
 });
+
+describe('chat:v1:new-session + chat:v1:current-session', () => {
+  it('returns 0 from current-session for a fresh design', () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'T');
+    registerChatMessagesIpc(db);
+    const result = invoke('chat:v1:current-session', {
+      schemaVersion: 1,
+      designId: design.id,
+    });
+    expect(result).toEqual({ sessionId: 0 });
+  });
+
+  it('bumps the session id and stamps it onto subsequent appends', () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'T');
+    registerChatMessagesIpc(db);
+
+    appendChatMessage(db, { designId: design.id, kind: 'user', payload: { text: 'before' } });
+
+    const created = invoke('chat:v1:new-session', {
+      schemaVersion: 1,
+      designId: design.id,
+    });
+    expect(created).toEqual({ sessionId: 1 });
+
+    appendChatMessage(db, { designId: design.id, kind: 'user', payload: { text: 'after' } });
+
+    const list = listChatMessages(db, design.id);
+    expect(list[0]?.sessionId).toBe(0);
+    expect(list[1]?.sessionId).toBe(1);
+
+    const cur = invoke('chat:v1:current-session', {
+      schemaVersion: 1,
+      designId: design.id,
+    });
+    expect(cur).toEqual({ sessionId: 1 });
+  });
+
+  it('rejects non-string designId on new-session', () => {
+    const db = initInMemoryDb();
+    registerChatMessagesIpc(db);
+    expect(() => invoke('chat:v1:new-session', { schemaVersion: 1, designId: 123 })).toThrow(
+      CodesignError,
+    );
+  });
+
+  it('throws when the design does not exist', () => {
+    const db = initInMemoryDb();
+    registerChatMessagesIpc(db);
+    expect(() =>
+      invoke('chat:v1:new-session', { schemaVersion: 1, designId: 'no-such-id' }),
+    ).toThrow(/Failed to start a new chat session/);
+  });
+});

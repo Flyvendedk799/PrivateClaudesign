@@ -8,10 +8,14 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  DESIGN_FILES_PRIVILEGED_SCHEME,
+  DESIGN_FILES_SCHEME,
   GAME_FILES_PRIVILEGED_SCHEME,
   GAME_FILES_SCHEME,
   gameFilesResponseHeaders,
+  parseDesignFilesUrl,
   parseGameFilesUrl,
+  resolveDesignFilesRequest,
   resolveGameFilesBuildRequest,
   resolveGameFilesRequest,
 } from './game-files-protocol';
@@ -306,5 +310,113 @@ describe('GAME_FILES_PRIVILEGED_SCHEME', () => {
         standard: true,
       },
     });
+  });
+});
+
+describe('parseDesignFilesUrl', () => {
+  it('parses the canonical shape', () => {
+    expect(parseDesignFilesUrl('design-files://designs/abc-123/index.html')).toEqual({
+      designId: 'abc-123',
+      path: 'index.html',
+      isBuild: false,
+    });
+  });
+
+  it('parses nested sidecar paths', () => {
+    expect(parseDesignFilesUrl('design-files://designs/abc-123/assets/styles.css')).toEqual({
+      designId: 'abc-123',
+      path: 'assets/styles.css',
+      isBuild: false,
+    });
+  });
+
+  it('rejects the game-files scheme — schemes must be distinct', () => {
+    expect(parseDesignFilesUrl('game-files://designs/abc-123/index.html')).toBeNull();
+  });
+
+  it('rejects the _build/ namespace — design-mode never serves builds', () => {
+    expect(parseDesignFilesUrl('design-files://designs/abc-123/_build/index.html')).toBeNull();
+  });
+
+  it('rejects path traversal attempts', () => {
+    expect(parseDesignFilesUrl('design-files://designs/abc-123/../secret')).toBeNull();
+  });
+});
+
+describe('resolveDesignFilesRequest', () => {
+  it('returns row content for an existing design_files entry', () => {
+    const db = initInMemoryDb();
+    const d = createDesign(db, 'D');
+    upsertDesignFile(db, d.id, 'index.html', '<!doctype html><body>hi</body>');
+    upsertDesignFile(db, d.id, 'styles.css', 'body{font:14px sans-serif}');
+    const html = resolveDesignFilesRequest({
+      rawUrl: `design-files://designs/${d.id}/index.html`,
+      db,
+    });
+    expect(html.status).toBe(200);
+    expect(html.contentType).toContain('text/html');
+    expect(decode(html.body)).toContain('hi');
+
+    const css = resolveDesignFilesRequest({
+      rawUrl: `design-files://designs/${d.id}/styles.css`,
+      db,
+    });
+    expect(css.status).toBe(200);
+    expect(css.contentType).toContain('text/css');
+    expect(decode(css.body)).toContain('font:14px');
+  });
+
+  it('returns 404 for an unknown path', () => {
+    const db = initInMemoryDb();
+    const d = createDesign(db, 'D');
+    const result = resolveDesignFilesRequest({
+      rawUrl: `design-files://designs/${d.id}/missing.js`,
+      db,
+    });
+    expect(result.status).toBe(404);
+  });
+
+  it('returns 404 for an unknown design id', () => {
+    const db = initInMemoryDb();
+    const result = resolveDesignFilesRequest({
+      rawUrl: 'design-files://designs/nope/index.html',
+      db,
+    });
+    expect(result.status).toBe(404);
+  });
+
+  it('does NOT serve game-files:// URLs (schemes are independent)', () => {
+    const db = initInMemoryDb();
+    const d = createDesign(db, 'D');
+    upsertDesignFile(db, d.id, 'index.html', '<html></html>');
+    const result = resolveDesignFilesRequest({
+      rawUrl: `game-files://designs/${d.id}/index.html`,
+      db,
+    });
+    expect(result.status).toBe(404);
+  });
+
+  it('refuses _build/ requests via the design-files resolver', () => {
+    const db = initInMemoryDb();
+    const d = createDesign(db, 'D');
+    const result = resolveDesignFilesRequest({
+      rawUrl: `design-files://designs/${d.id}/_build/index.html`,
+      db,
+    });
+    expect(result.status).toBe(404);
+  });
+});
+
+describe('DESIGN_FILES_SCHEME constants', () => {
+  it('exposes a sibling scheme name', () => {
+    expect(DESIGN_FILES_SCHEME).toBe('design-files');
+    expect(DESIGN_FILES_SCHEME).not.toBe(GAME_FILES_SCHEME);
+  });
+
+  it('registers the same privileged-scheme shape as game-files', () => {
+    expect(DESIGN_FILES_PRIVILEGED_SCHEME.privileges).toEqual(
+      GAME_FILES_PRIVILEGED_SCHEME.privileges,
+    );
+    expect(DESIGN_FILES_PRIVILEGED_SCHEME.scheme).toBe(DESIGN_FILES_SCHEME);
   });
 });

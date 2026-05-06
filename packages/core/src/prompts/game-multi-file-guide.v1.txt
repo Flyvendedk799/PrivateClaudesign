@@ -2,25 +2,27 @@
 
 Multi-file projects are first-class in game-builder mode. The agent persists every file via `text_editor`, and the privileged `game-files://designs/{designId}/` protocol serves them into the preview iframe. Snapshots capture the full bundle so restore recovers the entire project tree, not just the entry point.
 
-## When to split (use multi-file)
+## Default to multi-file
 
-Use multi-file authoring when *any* of these hold:
+For Three.js and Phaser, **multi-file is the default expectation** — these engines benefit immediately from a separate scene file, an entity module, and a small data/config sidecar even on small games. The engine starter's `index.html` is a thin shell + importmap; your job is to author `main.js` plus the game's modules around it.
 
-- ≥ 3 scenes (boot / menu / play / gameover, or a level-per-screen platformer)
-- ≥ 300 LOC in any one file
+Use multi-file authoring when *any* of these hold (most non-trivial games hit at least one):
+
+- ≥ 2 scenes (boot / menu / play / gameover, or a level-per-screen platformer)
+- ≥ 200 LOC anticipated in any one file
 - ≥ 2 entity types with substantive behaviour (player + enemy + projectile)
 - An asset bundle (sprites, tilemaps, audio) that wants its own folder
 - The user asked for "a real game / a real engine / a Godot project"
 
-## When to stay single-file
+## When to stay single-file (rare)
 
-Stay single-file (`index.html` only, no `src/`) when:
+Stay single-file (`main.js` inlined into `index.html` only, no `src/`) ONLY when ALL of these hold:
 
-- Jam-scale ≤ 200 LOC
-- One mechanic, one screen, one entity type
-- The brief says "quick", "minimal", "the simplest version of …"
+- Trivial canvas demo: one mechanic, one screen, one entity type, < 150 LOC
+- Brief explicitly says "quick", "minimal", or "the simplest version of …"
+- No asset bundle (no sprites / tilemaps / audio files)
 
-A single-file Phaser game with one Scene is fine. Don't pre-split for the sake of looking professional — readability wins.
+If the brief is just "an endless runner" or "a 2D platformer", that's NOT trivial — split. Don't pre-split for the sake of looking professional; do split when readability or asset structure is starting to suffer. Default toward splitting; the user almost always benefits more from a structured tree than from a 700-line single file.
 
 ## Recommended layouts per engine
 

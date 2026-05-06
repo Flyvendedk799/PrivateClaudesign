@@ -9,6 +9,7 @@ import {
   isOverlayMessage,
 } from '@open-codesign/runtime';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useDesignFiles } from '../hooks/useDesignFiles';
 import { EmptyState } from '../preview/EmptyState';
 import { ErrorState } from '../preview/ErrorState';
 import { useCodesignStore } from '../store';
@@ -72,11 +73,35 @@ export function scaleRectForZoom(
   };
 }
 
+/**
+ * Backlog-3 §1 — extract the body text of every `<style>` or `<script>`
+ * block in document order. Used by the HMR effect in `PreviewSlot` to
+ * build the postMessage envelope that patches CSS / single-script
+ * content in place.
+ */
+function collectBlockBodies(html: string, re: RegExp): string[] {
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  re.lastIndex = 0;
+  // biome-ignore lint/suspicious/noAssignInExpressions: standard regex iteration idiom
+  while ((m = re.exec(html)) !== null) out.push(m[1] ?? '');
+  return out;
+}
+
 export function stablePreviewSourceKey(source: string): string {
   const head = source.trimStart().slice(0, 2048).toLowerCase();
-  // Full HTML documents do not get the JSX tweaks bridge injected, so token
-  // changes must invalidate srcdoc and force a reload to take effect.
-  if (head.startsWith('<!doctype') || head.startsWith('<html')) return source;
+  // Full HTML documents — Backlog-3 §1 — collapse `<style>` and
+  // `<script>` block bodies to placeholders so CSS-only / JS-only diffs
+  // produce the same stable key. The HMR patcher (./hmr-patcher.ts in
+  // packages/runtime) takes the content delta via postMessage, so the
+  // iframe document never reloads when only block bodies changed.
+  // Structural changes (added/removed elements outside blocks, or
+  // mismatched block counts) DO change the key and force a reload.
+  if (head.startsWith('<!doctype') || head.startsWith('<html')) {
+    return source
+      .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, '<style>__HMR_CSS__</style>')
+      .replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, '<script>__HMR_JS__</script>');
+  }
   return source
     .replace(
       /\/\*\s*EDITMODE-BEGIN\s*\*\/[\s\S]*?\/\*\s*EDITMODE-END\s*\*\//g,
@@ -163,6 +188,23 @@ export function resolveGameSrc(
   return undefined;
 }
 
+/**
+ * Pick the iframe src for a multi-file design-mode artifact. Returns a
+ * `design-files://` URL with a cache-busting query string so the
+ * iframe re-fetches each file after a write tick. Returns undefined
+ * when the design only has a single file (or none) — caller falls
+ * back to the cheaper `srcdoc` path. Game-mode designs route through
+ * `resolveGameSrc` instead; this helper is design-mode-only.
+ */
+export function resolveDesignFilesSrc(
+  designId: string,
+  multiFile: boolean,
+  reloadTick: number,
+): string | undefined {
+  if (!multiFile) return undefined;
+  return `design-files://designs/${designId}/index.html?v=${reloadTick}`;
+}
+
 interface PreviewSlotProps {
   designId: string;
   html: string;
@@ -224,8 +266,111 @@ function PreviewSlot({
   // biome-ignore lint/correctness/useExhaustiveDependencies: srcDocStableKey is the intentional dependency. html flows through naturally because the factory closes over it and re-runs whenever the stable key flips, which is exactly when structural changes (anything outside EDITMODE / TWEAK_SCHEMA markers) are present.
   const srcDoc = useMemo(() => buildSrcdoc(html), [srcDocStableKey]);
 
+  // Backlog-3 §1 — when srcDocStableKey did NOT change but `html` did
+  // (i.e. CSS-only or single-script JS-only edits to a full HTML
+  // document), post the patch into the iframe so the in-document
+  // `<style>` block updates without a full reload. This preserves
+  // canvas rAF state, video playback, scroll position, and form
+  // values across iteration runs.
+  const lastAppliedHtmlRef = useRef<string>(html);
+  const iframeElRef = useRef<HTMLIFrameElement | null>(null);
+
+  // Backlog-3 §1 telemetry — capture HMR acks from the in-iframe
+  // patcher so we can see how often CSS/JS-only patches succeed vs.
+  // fall back to a full reload. Active is the only slot that matters
+  // (background pool slots don't fire HMR). Throttled-light: one
+  // console.debug per ack.
+  useEffect(() => {
+    if (!active) return;
+    const onAck = (event: MessageEvent) => {
+      const iframe = iframeElRef.current;
+      if (!iframe || event.source !== iframe.contentWindow) return;
+      const data = event.data as {
+        __codesign_hmr_ack?: unknown;
+        protocolVersion?: unknown;
+        ok?: unknown;
+        kind?: unknown;
+        error?: unknown;
+      } | null;
+      if (!data || data.__codesign_hmr_ack !== true) return;
+      // eslint-disable-next-line no-console
+      console.debug('[hmr] ack', {
+        designId,
+        ok: data.ok,
+        kind: data.kind,
+        protocolVersion: data.protocolVersion,
+        ...(typeof data.error === 'string' ? { error: data.error } : {}),
+      });
+    };
+    window.addEventListener('message', onAck);
+    return () => window.removeEventListener('message', onAck);
+  }, [active, designId]);
+
+  useEffect(() => {
+    const prev = lastAppliedHtmlRef.current;
+    if (prev === html) return;
+    lastAppliedHtmlRef.current = html;
+    const iframe = iframeElRef.current;
+    if (!iframe || !iframe.contentWindow) return;
+    const win = iframe.contentWindow;
+    const headPrev = prev.trimStart().slice(0, 2048).toLowerCase();
+    const headCur = html.trimStart().slice(0, 2048).toLowerCase();
+    const wasFullDoc = headPrev.startsWith('<!doctype') || headPrev.startsWith('<html');
+    const isFullDoc = headCur.startsWith('<!doctype') || headCur.startsWith('<html');
+    if (!wasFullDoc || !isFullDoc) return;
+    const oldStyles = collectBlockBodies(prev, /<style\b[^>]*>([\s\S]*?)<\/style>/gi);
+    const newStyles = collectBlockBodies(html, /<style\b[^>]*>([\s\S]*?)<\/style>/gi);
+    const oldScripts = collectBlockBodies(prev, /<script\b[^>]*>([\s\S]*?)<\/script>/gi);
+    const newScripts = collectBlockBodies(html, /<script\b[^>]*>([\s\S]*?)<\/script>/gi);
+    const stylesDiffer =
+      oldStyles.length === newStyles.length && oldStyles.some((s, i) => s !== newStyles[i]);
+    const scriptsDiffer =
+      oldScripts.length === newScripts.length && oldScripts.some((s, i) => s !== newScripts[i]);
+    if (stylesDiffer && oldStyles.length === newStyles.length) {
+      try {
+        win.postMessage(
+          {
+            __codesign_hmr: true,
+            protocolVersion: 1,
+            kind: 'css',
+            oldStyles,
+            newStyles,
+          },
+          '*',
+        );
+        // Backlog-3 §1 telemetry — record what we just attempted so
+        // a missing ack reads as "iframe never replied" rather than
+        // "renderer skipped the patch path".
+        // eslint-disable-next-line no-console
+        console.debug('[hmr] send', { designId, kind: 'css', styleBlocks: newStyles.length });
+      } catch {
+        /* iframe may have closed */
+      }
+    } else if (scriptsDiffer && oldScripts.length === newScripts.length) {
+      try {
+        win.postMessage(
+          {
+            __codesign_hmr: true,
+            protocolVersion: 1,
+            kind: 'js',
+            oldScripts,
+            newScripts,
+          },
+          '*',
+        );
+        // eslint-disable-next-line no-console
+        console.debug('[hmr] send', { designId, kind: 'js', scriptBlocks: newScripts.length });
+      } catch {
+        /* iframe may have closed */
+      }
+    }
+  }, [html, designId]);
+
   const setRef = useCallback(
-    (el: HTMLIFrameElement | null) => registerIframe(designId, el),
+    (el: HTMLIFrameElement | null) => {
+      iframeElRef.current = el;
+      registerIframe(designId, el);
+    },
     [designId, registerIframe],
   );
 
@@ -243,7 +388,11 @@ function PreviewSlot({
     <iframe
       ref={setRef}
       title={`design-preview-${designId}`}
-      sandbox={useSrcUrl ? 'allow-scripts allow-same-origin' : 'allow-scripts'}
+      sandbox={
+        useSrcUrl
+          ? 'allow-scripts allow-same-origin allow-pointer-lock allow-fullscreen'
+          : 'allow-scripts'
+      }
       {...(useSrcUrl ? { src: srcUrl } : { srcDoc })}
       onLoad={(e) => {
         // Once the iframe's document has actually loaded, its in-page message
@@ -409,6 +558,12 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
   const previewHtmlByDesign = useCodesignStore((s) => s.previewHtmlByDesign);
   const recentDesignIds = useCodesignStore((s) => s.recentDesignIds);
   const currentDesignId = useCodesignStore((s) => s.currentDesignId);
+  // Multi-file design-mode artifacts route through the `design-files://`
+  // protocol so sidecar `.css` / `.js` resolve via the FS-backed handler.
+  // Only the active slot needs this — background pool slots are
+  // display:none and never render. Cheap: the hook only re-IPCs when
+  // designId or previewReloadTick changes.
+  const activeDesignFiles = useDesignFiles(currentDesignId);
   const currentDesignEngine = useCodesignStore((s) => s.currentDesignEngine);
   const godotPreviewByDesign = useCodesignStore((s) => s.godotPreviewByDesign);
   const gameAspect = useCodesignStore((s) => s.gameAspect);
@@ -687,8 +842,22 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
             designId={entry.id}
             html={entry.html}
             {...(() => {
-              const url = resolveGameSrc(entry.id, currentDesignEngine, godotPreviewByDesign);
-              return url !== undefined ? { srcUrl: url } : {};
+              // Game-mode designs always go through the protocol when an
+              // engine is selected. Design-mode designs only switch to
+              // the protocol when the active design has > 1 file in
+              // `design_files`. Background slots fall through to srcdoc
+              // (cheaper, and they're invisible anyway).
+              const gameUrl = resolveGameSrc(entry.id, currentDesignEngine, godotPreviewByDesign);
+              if (gameUrl !== undefined) return { srcUrl: gameUrl };
+              if (entry.id === currentDesignId) {
+                const designUrl = resolveDesignFilesSrc(
+                  entry.id,
+                  activeDesignFiles.multiFile,
+                  previewReloadTick,
+                );
+                if (designUrl !== undefined) return { srcUrl: designUrl };
+              }
+              return {};
             })()}
             active={entry.id === currentDesignId}
             viewport={previewViewport}

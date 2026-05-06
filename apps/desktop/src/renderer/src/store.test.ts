@@ -172,7 +172,10 @@ describe('useCodesignStore generation cancellation', () => {
     });
     await secondRun;
 
-    expect(cancelGeneration).toHaveBeenCalledWith(firstId);
+    // Backlog-3 §5 — cancelGeneration takes an optional 2nd arg
+    // {asCheckpoint?: boolean}; the regular cancel path passes
+    // undefined explicitly. Match the first positional arg only.
+    expect(cancelGeneration).toHaveBeenCalledWith(firstId, undefined);
     expect(useCodesignStore.getState().previewHtml).toBe('<html>fresh</html>');
     expect(useCodesignStore.getState().isGenerating).toBe(false);
   });
@@ -296,7 +299,13 @@ describe('useCodesignStore token usage tracking', () => {
     await useCodesignStore.getState().sendPrompt({ prompt: 'design landing' });
 
     const state = useCodesignStore.getState();
-    expect(state.lastUsage).toEqual({ inputTokens: 1200, outputTokens: 800, costUsd: 0.0125 });
+    expect(state.lastUsage).toEqual({
+      inputTokens: 1200,
+      outputTokens: 800,
+      costUsd: 0.0125,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    });
   });
 
   it('treats missing usage fields as zero without crashing', async () => {
@@ -315,7 +324,13 @@ describe('useCodesignStore token usage tracking', () => {
     await useCodesignStore.getState().sendPrompt({ prompt: 'fallback' });
 
     const state = useCodesignStore.getState();
-    expect(state.lastUsage).toEqual({ inputTokens: 0, outputTokens: 0, costUsd: 0 });
+    expect(state.lastUsage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    });
   });
 });
 
@@ -349,7 +364,13 @@ describe('coerceUsageSnapshot', () => {
       outputTokens: 0,
       costUsd: 0,
     });
-    expect(usage).toEqual({ inputTokens: 0, outputTokens: 0, costUsd: 0 });
+    expect(usage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    });
     expect(rejected).toEqual([]);
   });
 });
@@ -1237,6 +1258,168 @@ describe('useCodesignStore generation-blocking workspace guards', () => {
     expect(useCodesignStore.getState().workspaceRebindPending).toEqual({
       design: mockDesign,
       newPath: '/new/path',
+    });
+  });
+});
+
+describe('patchStreamingToolResult — Backlog-3 §4', () => {
+  beforeEach(() => {
+    useCodesignStore.setState({ streamingToolResults: {} });
+  });
+
+  it('creates a new entry with the supplied patch', () => {
+    useCodesignStore.getState().patchStreamingToolResult('tc-1', {
+      progressPct: 25,
+      preview: 'Generating image (~25%)…',
+    });
+    const entry = useCodesignStore.getState().streamingToolResults['tc-1'];
+    expect(entry).toEqual({ progressPct: 25, preview: 'Generating image (~25%)…' });
+  });
+
+  it('merges fields across patches (does not clobber missing ones)', () => {
+    const s = useCodesignStore.getState();
+    s.patchStreamingToolResult('tc-2', { progressPct: 25 });
+    s.patchStreamingToolResult('tc-2', { byteCount: 1024 });
+    s.patchStreamingToolResult('tc-2', { progressPct: 50 });
+    const entry = useCodesignStore.getState().streamingToolResults['tc-2'];
+    expect(entry).toEqual({ progressPct: 50, byteCount: 1024 });
+  });
+
+  it('drains the entry when patch is null', () => {
+    const s = useCodesignStore.getState();
+    s.patchStreamingToolResult('tc-3', { progressPct: 90 });
+    expect(useCodesignStore.getState().streamingToolResults['tc-3']).toBeDefined();
+    s.patchStreamingToolResult('tc-3', null);
+    expect(useCodesignStore.getState().streamingToolResults['tc-3']).toBeUndefined();
+  });
+
+  it('drain on an unknown id is a no-op (does not break the slice)', () => {
+    const s = useCodesignStore.getState();
+    s.patchStreamingToolResult('tc-1', { progressPct: 10 });
+    s.patchStreamingToolResult('does-not-exist', null);
+    // Existing entry untouched.
+    expect(useCodesignStore.getState().streamingToolResults['tc-1']).toEqual({ progressPct: 10 });
+  });
+
+  it('different toolCallIds stay isolated', () => {
+    const s = useCodesignStore.getState();
+    s.patchStreamingToolResult('a', { progressPct: 10 });
+    s.patchStreamingToolResult('b', { progressPct: 90 });
+    s.patchStreamingToolResult('a', null);
+    expect(useCodesignStore.getState().streamingToolResults['a']).toBeUndefined();
+    expect(useCodesignStore.getState().streamingToolResults['b']).toEqual({ progressPct: 90 });
+  });
+
+  it('empty toolCallId is rejected (no slice mutation)', () => {
+    const before = useCodesignStore.getState().streamingToolResults;
+    useCodesignStore.getState().patchStreamingToolResult('', { progressPct: 50 });
+    expect(useCodesignStore.getState().streamingToolResults).toBe(before);
+  });
+});
+
+describe('requestNewSession (in-design new conversation)', () => {
+  beforeAll(async () => {
+    await initI18n('en');
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns null when no design is active', async () => {
+    useCodesignStore.setState({ currentDesignId: null, isGenerating: false });
+    const result = await useCodesignStore.getState().requestNewSession();
+    expect(result).toBeNull();
+  });
+
+  it('blocks while a generation is in flight and toasts', async () => {
+    const newSession = vi.fn();
+    vi.stubGlobal('window', {
+      codesign: { chat: { newSession } },
+      setTimeout,
+    });
+    useCodesignStore.setState({
+      currentDesignId: 'design-1',
+      isGenerating: true,
+      generatingDesignId: 'design-1',
+      toasts: [],
+    });
+    const result = await useCodesignStore.getState().requestNewSession();
+    expect(result).toBeNull();
+    expect(newSession).not.toHaveBeenCalled();
+    expect(useCodesignStore.getState().toasts.at(-1)).toMatchObject({ variant: 'info' });
+  });
+
+  it('calls newSession IPC and resets liveness slices on success', async () => {
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 3 });
+    vi.stubGlobal('window', {
+      codesign: { chat: { newSession } },
+      setTimeout,
+    });
+    useCodesignStore.setState({
+      currentDesignId: 'design-1',
+      isGenerating: false,
+      generatingDesignId: null,
+      lastUsage: {
+        inputTokens: 1000,
+        outputTokens: 500,
+        costUsd: 0.05,
+        cachedInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      },
+      pendingToolCalls: [
+        {
+          toolName: 'foo',
+          toolCallId: 'a',
+          args: {},
+          status: 'done',
+          startedAt: '2026-05-06T00:00:00.000Z',
+          verbGroup: 'Working',
+        },
+      ],
+      streamingAssistantText: { designId: 'design-1', text: 'partial' },
+      errorMessage: 'old error',
+      toasts: [],
+    });
+
+    const result = await useCodesignStore.getState().requestNewSession();
+    expect(result).toBe(3);
+    expect(newSession).toHaveBeenCalledWith('design-1');
+
+    const state = useCodesignStore.getState();
+    expect(state.lastUsage).toBeNull();
+    expect(state.agentLiveness).toBeNull();
+    expect(state.pendingToolCalls).toEqual([]);
+    expect(state.streamingAssistantText).toBeNull();
+    expect(state.errorMessage).toBeNull();
+    expect(state.toasts.at(-1)).toMatchObject({ variant: 'info' });
+  });
+
+  it('toasts an error and returns null when the IPC bridge is unavailable', async () => {
+    vi.stubGlobal('window', { codesign: {}, setTimeout });
+    useCodesignStore.setState({
+      currentDesignId: 'design-1',
+      isGenerating: false,
+      toasts: [],
+    });
+    const result = await useCodesignStore.getState().requestNewSession();
+    expect(result).toBeNull();
+    expect(useCodesignStore.getState().toasts.at(-1)).toMatchObject({ variant: 'error' });
+  });
+
+  it('toasts an error and returns null when the IPC throws', async () => {
+    const newSession = vi.fn().mockRejectedValue(new Error('db locked'));
+    vi.stubGlobal('window', { codesign: { chat: { newSession } }, setTimeout });
+    useCodesignStore.setState({
+      currentDesignId: 'design-1',
+      isGenerating: false,
+      toasts: [],
+    });
+    const result = await useCodesignStore.getState().requestNewSession();
+    expect(result).toBeNull();
+    expect(useCodesignStore.getState().toasts.at(-1)).toMatchObject({
+      variant: 'error',
+      description: 'db locked',
     });
   });
 });

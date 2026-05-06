@@ -250,10 +250,11 @@ const MAX_TOTAL_DONE_CALLS = 6;
  * checks for in-flight self-correction). Extracted 2026-04-28 — see
  * Group C1.
  */
-async function runArtifactChecks(
+export async function runArtifactChecks(
   fs: TextEditorFsCallbacks,
   runtimeVerify: DoneRuntimeVerifier | undefined,
   path: string,
+  artifactType?: 'design' | 'game',
 ): Promise<{ found: boolean; content?: string; errors: DoneError[] }> {
   const file = fs.view(path);
   if (file === null) {
@@ -276,7 +277,7 @@ async function runArtifactChecks(
     ...(isJsxArtifact ? [] : findUnclosedTags(file.content)),
     ...findDuplicateIds(file.content),
     ...(isJsxArtifact ? [] : findMissingAlt(file.content)),
-    ...runHeuristics(file.content, knownFiles),
+    ...runHeuristics(file.content, knownFiles, artifactType === undefined ? {} : { artifactType }),
   ];
   if (runtimeVerify) {
     try {
@@ -315,6 +316,7 @@ export function makeVerifyArtifactTool(
   fs: TextEditorFsCallbacks,
   runtimeVerify?: DoneRuntimeVerifier,
   editBudget?: EditBudget,
+  artifactType?: 'design' | 'game',
 ): AgentTool<typeof VerifyParams, VerifyDetails> {
   return {
     name: 'verify_artifact',
@@ -330,7 +332,7 @@ export function makeVerifyArtifactTool(
     parameters: VerifyParams,
     async execute(_id, params): Promise<AgentToolResult<VerifyDetails>> {
       const path = params.path ?? 'index.html';
-      const result = await runArtifactChecks(fs, runtimeVerify, path);
+      const result = await runArtifactChecks(fs, runtimeVerify, path, artifactType);
       const fatal = result.errors.filter((e) => !ADVISORY_SOURCES.has(e.source ?? ''));
       const status: VerifyDetails['status'] = fatal.length === 0 ? 'ok' : 'has_errors';
       if (status === 'ok' && editBudget !== undefined) editBudget.reset();
@@ -355,6 +357,7 @@ export function makeDoneTool(
   fs: TextEditorFsCallbacks,
   runtimeVerify?: DoneRuntimeVerifier,
   logger: CoreLogger = NOOP_LOGGER,
+  artifactType?: 'design' | 'game',
 ): AgentTool<typeof DoneParams, DoneDetails> {
   // Per-tool-instance state. `makeDoneTool` is called once per `Agent`
   // construction (see generateViaAgent), so these counters are naturally
@@ -438,7 +441,11 @@ export function makeDoneTool(
         // Advisory ones show up but don't trip has_errors. Fatal ones
         // (WCAG A failures, missing local refs) DO trip has_errors so the
         // agent fixes them before `done` accepts.
-        ...runHeuristics(file.content, knownFiles),
+        ...runHeuristics(
+          file.content,
+          knownFiles,
+          artifactType === undefined ? {} : { artifactType },
+        ),
       ];
       if (runtimeVerify) {
         try {

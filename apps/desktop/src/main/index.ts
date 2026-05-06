@@ -6,8 +6,6 @@ import { fileURLToPath } from 'node:url';
 import {
   type AgentEvent,
   type CoreLogger,
-  DESIGN_SKILLS,
-  FRAME_TEMPLATES,
   type GenerateImageAssetRequest,
   type GenerateImageAssetResult,
   applyComment,
@@ -15,6 +13,40 @@ import {
   generateTitle,
   generateViaAgent,
 } from '@open-codesign/core';
+// Backlog-3 §8 — DESIGN_SKILLS (~204KB) and FRAME_TEMPLATES (~48KB) seed
+// the per-generation virtual fs but are never read until the first run
+// starts. Lazy-load on first-call cache-once to keep cold-start RAM lean.
+type LazyTemplates = ReadonlyArray<readonly [string, string]>;
+let _FRAME_TEMPLATES: LazyTemplates | null = null;
+let _DESIGN_SKILLS: LazyTemplates | null = null;
+async function loadFrameTemplates(): Promise<LazyTemplates> {
+  if (_FRAME_TEMPLATES === null) {
+    // Backlog-3 §8 telemetry — log first-call timing so we can see
+    // exactly when the ~48KB of frame templates land in the main
+    // process bundle (should be lazy: never on cold boot, only after
+    // the first generation).
+    const t0 = Date.now();
+    const mod = await import('@open-codesign/core');
+    _FRAME_TEMPLATES = mod.FRAME_TEMPLATES;
+    getLogger('lazy-load').info('frame_templates.first_load', {
+      ms: Date.now() - t0,
+      entries: _FRAME_TEMPLATES.length,
+    });
+  }
+  return _FRAME_TEMPLATES;
+}
+async function loadDesignSkills(): Promise<LazyTemplates> {
+  if (_DESIGN_SKILLS === null) {
+    const t0 = Date.now();
+    const mod = await import('@open-codesign/core');
+    _DESIGN_SKILLS = mod.DESIGN_SKILLS;
+    getLogger('lazy-load').info('design_skills.first_load', {
+      ms: Date.now() - t0,
+      entries: _DESIGN_SKILLS.length,
+    });
+  }
+  return _DESIGN_SKILLS;
+}
 import type { GenerateViaAgentDeps } from '@open-codesign/core';
 import {
   detectProviderFromKey,
@@ -62,10 +94,13 @@ import {
 } from './electron-runtime';
 import { registerExporterIpc } from './exporter-ipc';
 import {
+  DESIGN_FILES_PRIVILEGED_SCHEME,
+  DESIGN_FILES_SCHEME,
   GAME_FILES_PRIVILEGED_SCHEME,
   GAME_FILES_SCHEME,
   gameFilesResponseHeaders,
   parseGameFilesUrl,
+  resolveDesignFilesRequest,
   resolveGameFilesBuildRequest,
   resolveGameFilesRequest,
 } from './game-files-protocol';
@@ -75,10 +110,12 @@ import {
   armGenerationTimeout,
   cancelGenerationRequest,
   extractGenerationTimeoutError,
+  requestCheckpointAbort,
 } from './generation-ipc';
 import { readGodotBuildFile } from './godot-web-build';
 import { registerGodotWebBuildIpc } from './godot-web-build-ipc';
 import { getGodotWebBuildDir } from './godot-web-build-registry';
+import { type ImageCache, makeImageCache } from './image-cache';
 import {
   registerImageGenerationSettingsIpc,
   resolveImageGenerationConfig,
@@ -108,15 +145,18 @@ import { withRun } from './runContext';
 import { resolveUseAgentRuntime } from './runtime-flag';
 import { registerSkillsIpc, registerSkillsUnavailableIpc } from './skills-ipc';
 import {
+  getBudget,
   getDesign,
   getDesignUsageTotals,
   listChatMessages,
+  listDailyUsage,
   listUserSkills,
   normalizeDesignFilePath,
   pruneDiagnosticEvents,
   recordDiagnosticEvent,
   recordRunUsage,
   safeInitSnapshotsDb,
+  upsertBudget,
   upsertDesignFile,
 } from './snapshots-db';
 import {
@@ -150,6 +190,15 @@ const storageLocations = initStorageSettings(defaultUserDataDir);
 if (storageLocations.dataDir !== undefined) {
   mkdirSync(storageLocations.dataDir, { recursive: true });
   app.setPath('userData', storageLocations.dataDir);
+}
+
+// Phase 1 — content-addressed image asset cache. Lazy: dir created on first
+// put. Lives at userData so it survives app updates but follows storage
+// relocation if the user picked a custom dataDir.
+let _imageCache: ImageCache | null = null;
+function imageCache(): ImageCache {
+  if (_imageCache === null) _imageCache = makeImageCache(app.getPath('userData'));
+  return _imageCache;
 }
 
 /**
@@ -313,11 +362,17 @@ function resolveApiKeyForActive(providerId: string, allowKeyless: boolean): Prom
  *   chunk and landing 0-1 tool calls per chunk.
  */
 const HISTORY_FULL_CAP = 12;
+/** Phase 2 — compact mode keeps the last N tool round-trips inline so a
+ *  continuation can pick up the active edit chain without paying full-mode
+ *  byte costs. Two pairs covers the typical "last edit + verify result"
+ *  cadence; with Phase 1's cache hit on the system prefix the per-turn
+ *  delta is negligible. */
+const HISTORY_COMPACT_TOOL_PAIRS = 2;
 
 function loadHistoryForAutoContinue(
   db: BetterSqlite3.Database | null,
   designId: string | null,
-  mode: 'slim' | 'full' = 'slim',
+  mode: 'slim' | 'compact' | 'full' = 'compact',
 ): Array<{ role: 'user' | 'assistant'; content: string }> {
   if (!db || !designId) return [];
   try {
@@ -338,6 +393,100 @@ function loadHistoryForAutoContinue(
         }
       }
       return all.length > HISTORY_FULL_CAP ? all.slice(-HISTORY_FULL_CAP) : all;
+    }
+    if (mode === 'compact') {
+      // Compact: first user prompt + last N tool_call→result pairs (rendered
+      // as a tagged assistant block) + last assistant_text + todo digest.
+      // This is the new default — cheap because Phase 1 caches the system
+      // prefix, smarter than slim because the agent sees what just happened.
+      let firstUserCompact: string | null = null;
+      let lastAssistantCompact: string | null = null;
+      let assistantTurnCountCompact = 0;
+      let latestTodosCompact: Array<{ text: string; checked: boolean }> | null = null;
+      const recentToolPayloads: Array<{
+        toolName: string;
+        args: unknown;
+        status: string;
+        result: unknown;
+      }> = [];
+      for (const row of rows) {
+        if (row.kind === 'user' && firstUserCompact === null) {
+          const text = (row.payload as { text?: string } | null)?.text;
+          if (typeof text === 'string' && text.length > 0) firstUserCompact = text;
+        } else if (row.kind === 'assistant_text') {
+          const text = (row.payload as { text?: string } | null)?.text;
+          if (typeof text === 'string' && text.length > 0) {
+            lastAssistantCompact = text;
+            assistantTurnCountCompact += 1;
+          }
+        } else if (row.kind === 'tool_call') {
+          const payload = row.payload as {
+            toolName?: string;
+            args?: { items?: Array<{ text: unknown; checked: unknown }> };
+            status?: string;
+            result?: unknown;
+          } | null;
+          if (payload?.toolName === 'set_todos' && Array.isArray(payload.args?.items)) {
+            const items: Array<{ text: string; checked: boolean }> = [];
+            for (const it of payload.args.items) {
+              if (typeof it?.text === 'string') {
+                items.push({ text: it.text, checked: it.checked === true });
+              }
+            }
+            if (items.length > 0) latestTodosCompact = items;
+          }
+          if (payload?.toolName !== undefined) {
+            recentToolPayloads.push({
+              toolName: payload.toolName,
+              args: payload.args ?? {},
+              status: payload.status ?? 'done',
+              result: payload.result,
+            });
+          }
+        }
+      }
+      const out: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+      if (firstUserCompact) out.push({ role: 'user', content: firstUserCompact });
+      const tail = recentToolPayloads.slice(-HISTORY_COMPACT_TOOL_PAIRS);
+      if (tail.length > 0) {
+        const lines = tail.map((p) => {
+          const status = p.status === 'error' ? ' (error)' : '';
+          let argsPreview = '';
+          try {
+            argsPreview = JSON.stringify(p.args ?? {}).slice(0, 240);
+          } catch {
+            argsPreview = '<unserializable args>';
+          }
+          let resultPreview = '';
+          if (typeof p.result === 'string') resultPreview = p.result.slice(0, 240);
+          else if (p.result !== undefined && p.result !== null) {
+            try {
+              resultPreview = JSON.stringify(p.result).slice(0, 240);
+            } catch {
+              resultPreview = '<unserializable result>';
+            }
+          }
+          return `- ${p.toolName}${status} args=${argsPreview}${resultPreview.length > 0 ? `\n    → ${resultPreview}` : ''}`;
+        });
+        out.push({
+          role: 'assistant',
+          content: `[recent tool transcript — last ${tail.length} call${tail.length === 1 ? '' : 's'}]\n${lines.join('\n')}`,
+        });
+      }
+      if (lastAssistantCompact) out.push({ role: 'assistant', content: lastAssistantCompact });
+      if (latestTodosCompact) {
+        const done = latestTodosCompact.filter((it) => it.checked).map((it) => `  ✓ ${it.text}`);
+        const pending = latestTodosCompact
+          .filter((it) => !it.checked)
+          .map((it) => `  ○ ${it.text}`);
+        const summary = [
+          `[progress digest after ${assistantTurnCountCompact} prior agent turn(s)]`,
+          ...(done.length > 0 ? ['', 'Completed sections:', ...done] : []),
+          ...(pending.length > 0 ? ['', 'Remaining sections:', ...pending] : []),
+        ].join('\n');
+        out.push({ role: 'assistant', content: summary });
+      }
+      return out;
     }
     let firstUserPrompt: string | null = null;
     let lastAssistantText: string | null = null;
@@ -500,11 +649,31 @@ export function createRuntimeTextEditorFs({
   if (previousHtml && previousHtml.trim().length > 0) {
     fsMap.set('index.html', previousHtml);
   }
-  for (const [name, content] of FRAME_TEMPLATES) {
-    fsMap.set(`frames/${name}`, content);
+  // Backlog-3 §8 — frame + skill templates (~250KB combined) are loaded
+  // lazily and seeded into the fs map. Synchronous fast path: if they
+  // were already loaded by a prior generation, copy from the cached
+  // module exports immediately. Otherwise schedule a microtask to seed
+  // before the first agent tool runs (the agent's first action is
+  // always set_todos, never view of frames/* or skills/*).
+  if (_FRAME_TEMPLATES !== null) {
+    for (const [name, content] of _FRAME_TEMPLATES) fsMap.set(`frames/${name}`, content);
   }
-  for (const [name, content] of DESIGN_SKILLS) {
-    fsMap.set(`skills/${name}`, content);
+  if (_DESIGN_SKILLS !== null) {
+    for (const [name, content] of _DESIGN_SKILLS) fsMap.set(`skills/${name}`, content);
+  }
+  if (_FRAME_TEMPLATES === null || _DESIGN_SKILLS === null) {
+    // Fire and forget — seeded before any tool that would view frames/*
+    // or skills/*. The agent's standard cadence is set_todos → view
+    // index.html → str_replace, so frames/skills hits land at turn 3+
+    // at the earliest, leaving 2-3 LLM round-trips for these to land.
+    void Promise.all([loadFrameTemplates(), loadDesignSkills()]).then(([frames, skills]) => {
+      for (const [name, content] of frames) {
+        if (!fsMap.has(`frames/${name}`)) fsMap.set(`frames/${name}`, content);
+      }
+      for (const [name, content] of skills) {
+        if (!fsMap.has(`skills/${name}`)) fsMap.set(`skills/${name}`, content);
+      }
+    });
   }
 
   function emitFsUpdated(filePath: string, content: string): void {
@@ -626,6 +795,87 @@ export function createRuntimeTextEditorFs({
       const endLine = startLine + countNewlines(text);
       const totalLines = next.split('\n').length;
       return { path, startLine, endLine, totalLines };
+    },
+    async patch(
+      path: string,
+      hunks: Array<{
+        startLine: number;
+        endLine: number;
+        replacement: string;
+        expectedOriginal?: string | undefined;
+      }>,
+    ) {
+      // Backlog-3 §2 — apply hunks in descending startLine order so
+      // earlier (lower line) hunks don't invalidate later ones'
+      // numbers. Validate every hunk's bounds + optional
+      // expectedOriginal BEFORE mutating, so a single bad hunk doesn't
+      // leave the file half-edited.
+      const current = fsMap.get(path);
+      if (current === undefined) throw new Error(`File not found: ${path}`);
+      const lines = current.split('\n');
+      const totalLinesBefore = lines.length;
+      const sorted = [...hunks].sort((a, b) => b.startLine - a.startLine);
+      // Validate all bounds first.
+      for (const h of sorted) {
+        if (
+          !Number.isInteger(h.startLine) ||
+          !Number.isInteger(h.endLine) ||
+          h.startLine < 1 ||
+          h.endLine < h.startLine - 1 ||
+          h.endLine > totalLinesBefore
+        ) {
+          throw new Error(
+            `patch hunk has invalid line range [${h.startLine}, ${h.endLine}] (file has ${totalLinesBefore} lines, 1-indexed inclusive endLine).`,
+          );
+        }
+        if (h.expectedOriginal !== undefined) {
+          const sliceLines = lines.slice(h.startLine - 1, h.endLine);
+          const actual = sliceLines.join('\n');
+          if (actual !== h.expectedOriginal) {
+            // Improver1 §2 — embed the actual current bytes inline so
+            // the agent doesn't need a follow-up view turn. Today's
+            // run-1 had 2 patch retries with the same stale
+            // expectedOriginal because the prior generic message
+            // didn't surface the current content.
+            const before = Math.max(1, h.startLine - 5);
+            const after = Math.min(lines.length, h.endLine + 5);
+            const window: string[] = [];
+            for (let i = before; i <= after; i += 1) {
+              window.push(`${String(i).padStart(4, ' ')}  ${lines[i - 1] ?? ''}`);
+            }
+            throw new Error(
+              `patch hunk at lines ${h.startLine}-${h.endLine}: expectedOriginal does not match current content. The file has shifted since you last viewed.\n\nCURRENT CONTENT (lines ${before}-${after} of ${path}):\n${window.join('\n')}\n\nNext step: rebuild your hunk's expectedOriginal from the bytes above, OR drop expectedOriginal entirely if you trust the line range. Do NOT retry with the same expectedOriginal.`,
+            );
+          }
+        }
+      }
+      // Apply.
+      let firstStartLine = Number.MAX_SAFE_INTEGER;
+      let lastEndLineAfter = 0;
+      for (const h of sorted) {
+        const replacementLines = h.replacement.length === 0 ? [] : h.replacement.split('\n');
+        lines.splice(h.startLine - 1, h.endLine - h.startLine + 1, ...replacementLines);
+        if (h.startLine < firstStartLine) firstStartLine = h.startLine;
+        // Recompute the endLine post-splice for THIS hunk (only meaningful
+        // for the lowest-startLine one because higher startLines apply
+        // first and don't shift earlier line numbers).
+        lastEndLineAfter = Math.max(
+          lastEndLineAfter,
+          h.startLine + Math.max(0, replacementLines.length - 1),
+        );
+      }
+      const next = lines.join('\n');
+      await persistMutation(path, next);
+      fsMap.set(path, next);
+      emitFsUpdated(path, next);
+      emitIndexIfAssetChanged(path);
+      const totalLines = lines.length;
+      return {
+        path,
+        startLine: firstStartLine === Number.MAX_SAFE_INTEGER ? 1 : firstStartLine,
+        endLine: lastEndLineAfter,
+        totalLines,
+      };
     },
     listDir(dir: string) {
       const prefix = dir.length === 0 || dir === '.' ? '' : `${dir.replace(/\/+$/, '')}/`;
@@ -813,8 +1063,62 @@ function registerIpcHandlers(db: Database | null): void {
             outputFormat: options.outputFormat,
             promptChars: options.prompt.length,
           });
+          // Backlog-3 §4 — synthetic progress for image-asset gen.
+          // The provider call is opaque (no bytes-arrived callback) so
+          // we tick 25/50/75% on a timer until either the response
+          // lands or 90% (the response is "imminent" but unknown).
+          // Renderer accumulates per toolCallId and closes on the
+          // corresponding `tool_call_result` event.
+          const toolCallIdForDelta = `image-asset-${id}-${Date.now()}`;
+          let progressPct = 0;
+          const progressTimer = setInterval(() => {
+            if (progressPct >= 90) return;
+            progressPct = Math.min(90, progressPct + 25);
+            sendEvent({
+              ...baseCtx,
+              type: 'tool_result_delta',
+              toolCallId: toolCallIdForDelta,
+              progressPct,
+              resultPreview: `Generating image (~${progressPct}%)…`,
+            });
+          }, 5000);
+          // Phase 1 — content-addressed cache hit short-circuits the
+          // 20–60s provider round-trip when the agent reissues the same
+          // (provider, model, prompt, size, ...) tuple.
+          const cacheKey = {
+            provider: options.provider,
+            model: options.model,
+            prompt: options.prompt,
+            size: options.size,
+            quality: options.quality,
+            outputFormat: options.outputFormat,
+            aspectRatio: request.aspectRatio,
+          };
+          const cached = imageCache().get(cacheKey);
+          if (cached !== null) {
+            clearInterval(progressTimer);
+            const path = allocateAssetPath(fsMap, request, cached.mimeType);
+            imageLog.info('provider.cache_hit', {
+              generationId: id,
+              provider: cached.provider,
+              model: cached.model,
+              path,
+              ms: Date.now() - started,
+            });
+            return {
+              path,
+              dataUrl: cached.dataUrl,
+              mimeType: cached.mimeType,
+              model: cached.model,
+              provider: cached.provider,
+              ...(cached.revisedPrompt !== undefined
+                ? { revisedPrompt: cached.revisedPrompt }
+                : {}),
+            };
+          }
           try {
             const image = await generateImage(options);
+            clearInterval(progressTimer);
             const path = allocateAssetPath(fsMap, request, image.mimeType);
             imageLog.info('provider.ok', {
               generationId: id,
@@ -823,6 +1127,13 @@ function registerIpcHandlers(db: Database | null): void {
               path,
               ms: Date.now() - started,
               revised: image.revisedPrompt !== undefined,
+            });
+            imageCache().put(cacheKey, {
+              dataUrl: image.dataUrl,
+              mimeType: image.mimeType,
+              model: image.model,
+              provider: image.provider,
+              ...(image.revisedPrompt !== undefined ? { revisedPrompt: image.revisedPrompt } : {}),
             });
             return {
               path,
@@ -833,6 +1144,7 @@ function registerIpcHandlers(db: Database | null): void {
               ...(image.revisedPrompt !== undefined ? { revisedPrompt: image.revisedPrompt } : {}),
             };
           } catch (err) {
+            clearInterval(progressTimer);
             imageLog.warn('provider.fail', {
               generationId: id,
               provider: options.provider,
@@ -964,6 +1276,16 @@ function registerIpcHandlers(db: Database | null): void {
           toolCount += 1;
           const tn = event.toolName ?? 'unknown';
           toolByName.set(tn, (toolByName.get(tn) ?? 0) + 1);
+          // Backlog-3 §2 telemetry — count text_editor sub-commands
+          // separately so we can measure patch-protocol adoption.
+          // The `command` arg lives on the tool's args object.
+          if (tn === 'str_replace_based_edit_tool') {
+            const cmd = (event as unknown as { args?: { command?: unknown } }).args?.command;
+            if (typeof cmd === 'string' && cmd.length > 0) {
+              const key = `text_editor.${cmd}`;
+              toolByName.set(key, (toolByName.get(key) ?? 0) + 1);
+            }
+          }
           logIpc.info('agent.tool_start', { generationId: id, tool: tn });
         } else if (event.type === 'tool_execution_end') {
           // A1: log the actual error snippet on failure so post-hoc
@@ -982,7 +1304,43 @@ function registerIpcHandlers(db: Database | null): void {
             ...(event.isError && errSnippet.length > 0 ? { errorSnippet: errSnippet } : {}),
           });
         } else if (event.type === 'turn_end') {
-          logIpc.info('agent.turn_end', { generationId: id, deltas: deltaCount, tools: toolCount });
+          // Backlog-3 logging — per-turn cache + cost breakdown so a
+          // long run's hit ratio can be inspected turn-by-turn rather
+          // than only at agent.run_summary. Reads the just-completed
+          // assistant message's usage envelope; falls back gracefully
+          // when the field shape is missing.
+          const turnUsage = (
+            event as unknown as {
+              message?: {
+                usage?: {
+                  input?: number;
+                  output?: number;
+                  cacheRead?: number;
+                  cacheWrite?: number;
+                  cost?: { total?: number };
+                };
+              };
+            }
+          ).message?.usage;
+          const turnLog: Record<string, unknown> = {
+            generationId: id,
+            deltas: deltaCount,
+            tools: toolCount,
+          };
+          if (turnUsage) {
+            const uncached = turnUsage.input ?? 0;
+            const cacheRead = turnUsage.cacheRead ?? 0;
+            const cacheWrite = turnUsage.cacheWrite ?? 0;
+            const inputTotal = uncached + cacheRead + cacheWrite;
+            turnLog['inputTokens'] = inputTotal;
+            turnLog['outputTokens'] = turnUsage.output ?? 0;
+            turnLog['cacheReadTokens'] = cacheRead;
+            turnLog['cacheWriteTokens'] = cacheWrite;
+            turnLog['cacheHitPct'] =
+              inputTotal > 0 ? Math.round((cacheRead / inputTotal) * 100) : 0;
+            turnLog['costUsd'] = Number((turnUsage.cost?.total ?? 0).toFixed(6));
+          }
+          logIpc.info('agent.turn_end', turnLog);
         } else if (event.type === 'agent_end') {
           // A2: emit a single structured summary at run end. Captures
           // tool counts by name, failure counts, slowest tool, total
@@ -1217,6 +1575,12 @@ function registerIpcHandlers(db: Database | null): void {
   /** In-flight requests: generationId → AbortController */
   const inFlight = new Map<string, AbortController>();
 
+  /** Backlog-3 §5 — checkpoint hints per generationId. Set by the
+   *  cancel-with-checkpoint IPC; read by the agent loop's turn_end
+   *  subscriber so cancellation lands at a safe boundary instead of
+   *  mid-stream. */
+  const checkpointHints = new Map<string, boolean>();
+
   /** Promise-level dedup so an accidental double-IPC of the same generation
    *  collapses to one provider call. See generate-dedup.ts for the strategy. */
   const inFlightGenerations = new Map<string, Promise<unknown>>();
@@ -1423,11 +1787,19 @@ function registerIpcHandlers(db: Database | null): void {
       }
       coreLogger.info('[generate] step=validate_provider.ok', { provider: active.model.provider });
 
-      const promptContext = await preparePromptContext({
-        attachments: payload.attachments,
-        referenceUrl: payload.referenceUrl,
-        designSystem: cfg.designSystem ?? null,
-      });
+      // Phase 3 — parallel preflight. preparePromptContext fetches the
+      // referenceUrl + materialises attachment buffers; readPreferences
+      // hits disk for prefs. Independent, both are awaited downstream
+      // before the first LLM call. Running them in parallel shaves the
+      // longer of the two off TTFT.
+      const [promptContext, prefsPreloaded] = await Promise.all([
+        preparePromptContext({
+          attachments: payload.attachments,
+          referenceUrl: payload.referenceUrl,
+          designSystem: cfg.designSystem ?? null,
+        }),
+        readPreferences(),
+      ]);
 
       logIpc.info('generate', {
         generationId: id,
@@ -1454,257 +1826,138 @@ function registerIpcHandlers(db: Database | null): void {
       // Cursor / Aider all run a single agent session bounded by an
       // outer timeout. We default to that shape now.
       //
-      // The chunk-loop scaffolding stays in place (so we can opt back
-      // into chunking via a Settings toggle later if telemetry shows
-      // it's needed for ultra-long runs), but MAX_AUTO_CONTINUE=1 means
-      // exactly one runGenerate call fires per IPC request. The
-      // wall_clock budget for that single chunk is set to the user's
-      // GENERATION_TIMEOUT minus 30s headroom, so the agent runs until
-      // the user's outer pref — not the old hardcoded 5 min.
-      const MAX_AUTO_CONTINUE = 1;
-      const generationTimeoutSec = (await readPreferences()).generationTimeoutSec;
+      // Backlog-3 §9 — chunk-loop scaffolding deleted. The framework runs
+      // the entire generation inside one outer timeout (matching Claude
+      // Code / Cursor / Aider). chunk_start / chunk_end events still
+      // fire once each with chunkIndex=1, chunkCap=1 for renderer
+      // compatibility (ChatStatusHeader gates on chunkCap > 1; older
+      // subscribers continue to work). If chunked execution ever
+      // returns it lives behind an explicit feature flag, not as
+      // permanent scaffolding.
+      const generationTimeoutSec = prefsPreloaded.generationTimeoutSec;
       const SINGLE_SESSION_WALL_CLOCK_MS = Math.max(60_000, generationTimeoutSec * 1000 - 30_000);
       const isCodex = active.model.provider === CHATGPT_CODEX_PROVIDER_ID;
-      let activeController = controller;
-      let chunkPrompt = payload.prompt;
-      let chunkHistory = payload.history;
-      let chunkPreviousHtml = payload.previousHtml ?? null;
-      let lastResult: Awaited<ReturnType<typeof runGenerate>> | null = null;
-      const totals = {
-        chunks: 0,
-        chunksInterrupted: 0,
-        totalInputTokens: 0,
-        totalOutputTokens: 0,
-        totalCachedInputTokens: 0,
-        totalCacheCreationInputTokens: 0,
-        totalCostUsd: 0,
-      };
+      const activeController = controller;
       try {
-        for (let chunk = 1; chunk <= MAX_AUTO_CONTINUE; chunk += 1) {
-          // Fresh controller per chunk so Cancel reliably aborts the
-          // current chunk only. Initial chunk uses the outer controller
-          // (already in inFlight); subsequent chunks swap in new ones.
-          if (chunk > 1) {
-            // Bail if the user already cancelled during the previous chunk.
-            if (activeController.signal.aborted) break;
-            activeController = new AbortController();
-            inFlight.set(id, activeController);
-          }
-          // Fresh GENERATION_TIMEOUT per chunk — that's the whole point
-          // of "a new prompt whenever it finishes a task in its plan".
-          clearTimeoutGuard();
-          clearTimeoutGuard = await armTimeout(id, activeController);
+        clearTimeoutGuard = await armTimeout(id, activeController);
+        const chunkBudgetMs = active.wallClockBudgetMs ?? SINGLE_SESSION_WALL_CLOCK_MS;
+        mainWindow?.webContents.send('agent:event:v1', {
+          type: 'chunk_start',
+          designId: payload.designId ?? '',
+          generationId: id,
+          chunkIndex: 1,
+          chunkCap: 1,
+          chunkBudgetMs,
+        });
 
-          // Surface chunk progress to the renderer so the chat status
-          // header can show "Chunk N of M · X:YY remaining" without
-          // inferring from log lines.
-          const chunkBudgetMs = active.wallClockBudgetMs ?? SINGLE_SESSION_WALL_CLOCK_MS;
-          mainWindow?.webContents.send('agent:event:v1', {
-            type: 'chunk_start',
-            designId: payload.designId ?? '',
-            generationId: id,
-            chunkIndex: chunk,
-            chunkCap: MAX_AUTO_CONTINUE,
-            chunkBudgetMs,
-          });
-
-          const chunkResult = await runGenerate(
-            {
-              prompt: chunkPrompt,
-              history: chunkHistory,
-              model: active.model,
-              apiKey,
-              ...(isCodex
-                ? { getApiKey: () => resolveActiveApiKeyFromState(active.model.provider) }
-                : {}),
-              // Attachments + referenceUrl are first-prompt context only;
-              // re-sending on auto-continue would re-bill input tokens for
-              // unchanged content already in the system prompt.
-              attachments: chunk === 1 ? promptContext.attachments : [],
-              ...(chunk === 1 && promptContext.referenceUrl !== undefined
-                ? { referenceUrl: promptContext.referenceUrl }
-                : {}),
-              designSystem: promptContext.designSystem ?? null,
-              ...(baseUrl !== undefined ? { baseUrl } : {}),
-              wire: active.wire,
-              ...(active.httpHeaders !== undefined ? { httpHeaders: active.httpHeaders } : {}),
-              ...(allowKeyless ? { allowKeyless: true } : {}),
-              ...(active.reasoningLevel !== undefined
-                ? { reasoningLevel: active.reasoningLevel }
-                : {}),
-              ...(active.cacheRetention !== undefined
-                ? { cacheRetention: active.cacheRetention }
-                : {}),
-              signal: activeController.signal,
-              logger: coreLogger,
-              agentBudget: {
-                chunkIndex: chunk,
-                // Per-provider override beats the single-session default;
-                // the single-session default beats core's hardcoded 5-min.
-                maxWallClockMs: active.wallClockBudgetMs ?? SINGLE_SESSION_WALL_CLOCK_MS,
-              },
-              // Drain any user-pushed steers (e.g. Wrap-up button) that
-              // landed since this chunk's prior turn_end.
-              getPendingSteers: () => drainUserSteers(id),
-              // Slash-command-driven artifact pattern (renderer parses
-              // /jsx /vanilla and forwards via the IPC payload). Defaults
-              // to undefined → JSX guidance in agent.ts.
-              ...(payload.pattern !== undefined ? { pattern: payload.pattern } : {}),
-              // gameplan §A6 — when the New-design dialog picked Game,
-              // route through the game-builder prompt + tool stack.
-              ...(payload.artifactMode !== undefined ? { artifactType: payload.artifactMode } : {}),
-              ...(payload.gameEngine !== undefined ? { engine: payload.gameEngine } : {}),
-              // Read prompt-assist constraints from the design so the system
-              // prompt can render them as load-bearing scope guidance. Only
-              // available when the design has metadata (long prompts skip
-              // the dialog and leave it null/undefined). See backlog-1 #9.
-              ...(payload.designId !== undefined && db !== null
-                ? (() => {
-                    const design = getDesign(db, payload.designId);
-                    return design?.promptAssistMetadata
-                      ? { promptAssist: design.promptAssistMetadata }
-                      : {};
-                  })()
-                : {}),
+        const runResult = await runGenerate(
+          {
+            prompt: payload.prompt,
+            history: payload.history,
+            model: active.model,
+            apiKey,
+            ...(isCodex
+              ? { getApiKey: () => resolveActiveApiKeyFromState(active.model.provider) }
+              : {}),
+            attachments: promptContext.attachments,
+            ...(promptContext.referenceUrl !== undefined
+              ? { referenceUrl: promptContext.referenceUrl }
+              : {}),
+            designSystem: promptContext.designSystem ?? null,
+            ...(baseUrl !== undefined ? { baseUrl } : {}),
+            wire: active.wire,
+            ...(active.httpHeaders !== undefined ? { httpHeaders: active.httpHeaders } : {}),
+            ...(allowKeyless ? { allowKeyless: true } : {}),
+            ...(active.reasoningLevel !== undefined
+              ? { reasoningLevel: active.reasoningLevel }
+              : {}),
+            ...(active.cacheRetention !== undefined
+              ? { cacheRetention: active.cacheRetention }
+              : {}),
+            signal: activeController.signal,
+            logger: coreLogger,
+            agentBudget: {
+              chunkIndex: 1,
+              maxWallClockMs: active.wallClockBudgetMs ?? SINGLE_SESSION_WALL_CLOCK_MS,
             },
-            id,
-            payload.designId ?? null,
-            chunkPreviousHtml,
-          );
+            getPendingSteers: () => drainUserSteers(id),
+            // Backlog-3 §5 — checkpoint-cancel poll wired to the
+            // per-generationId hint Map.
+            getCheckpointHint: () => checkpointHints.get(id) === true,
+            // Improver1 §6 — wire auto-verify on by default. The
+            // Backlog-3 §7 logic gates internally on
+            // VERIFY_MIN_TURN=8 and caps at 3 fires per run, so
+            // short runs silently no-op. The IPC handler had been
+            // forgetting to set this flag in production, leaving the
+            // feature dead. Today's c44763af-21e9-4fb5-9c39-cc2865a37c30
+            // run had 49-95 turn runs that never saw a single
+            // auto_verify_fired log line.
+            incrementalVerify: prefsPreloaded.incrementalVerifyDisabled !== true,
+            ...(payload.pattern !== undefined ? { pattern: payload.pattern } : {}),
+            ...(payload.artifactMode !== undefined ? { artifactType: payload.artifactMode } : {}),
+            ...(payload.gameEngine !== undefined ? { engine: payload.gameEngine } : {}),
+            ...(payload.designId !== undefined && db !== null
+              ? (() => {
+                  const design = getDesign(db, payload.designId);
+                  return design?.promptAssistMetadata
+                    ? { promptAssist: design.promptAssistMetadata }
+                    : {};
+                })()
+              : {}),
+          },
+          id,
+          payload.designId ?? null,
+          payload.previousHtml ?? null,
+        );
 
-          totals.chunks += 1;
-          totals.totalInputTokens += chunkResult.inputTokens;
-          totals.totalOutputTokens += chunkResult.outputTokens;
-          totals.totalCachedInputTokens += chunkResult.cachedInputTokens;
-          totals.totalCacheCreationInputTokens += chunkResult.cacheCreationInputTokens;
-          totals.totalCostUsd += chunkResult.costUsd;
-          if (chunkResult.interrupted) totals.chunksInterrupted += 1;
-          lastResult = chunkResult;
+        mainWindow?.webContents.send('agent:event:v1', {
+          type: 'chunk_end',
+          designId: payload.designId ?? '',
+          generationId: id,
+          chunkIndex: 1,
+          chunkCap: 1,
+          chunkInterrupted: runResult.interrupted,
+        });
 
-          // Notify renderer that this chunk just settled. Includes the
-          // interrupted flag so the status header can transition between
-          // "auto-resuming…" (interrupted, more chunks coming) and
-          // "completing" (clean finish or cap reached).
-          mainWindow?.webContents.send('agent:event:v1', {
-            type: 'chunk_end',
-            designId: payload.designId ?? '',
-            generationId: id,
-            chunkIndex: chunk,
-            chunkCap: MAX_AUTO_CONTINUE,
-            chunkInterrupted: chunkResult.interrupted,
-          });
-
-          // Cap reached → exit and let the cap-message branch below fire.
-          if (chunk >= MAX_AUTO_CONTINUE) break;
-          // Exit detection — three states:
-          //   1. interrupted = budget hit, definitely keep going
-          //   2. !interrupted + done called this run = clean finish, stop
-          //   3. !interrupted + NO done called yet = ABANDONED — model
-          //      stopped emitting tools without converging. Production
-          //      trace 2026-04-27 mogvfm77 hit this on chunk 4: agent
-          //      ran out of ideas mid-design and the loop wrongly read
-          //      the empty turn as "we're done". Force one more chunk
-          //      with a strong steer; if THAT chunk also abandons,
-          //      truly stop (fall through on the next iteration).
-          if (!chunkResult.interrupted) {
-            const doneCallCount =
-              db && payload.designId
-                ? listChatMessages(db, payload.designId).filter((row) => {
-                    if (row.kind !== 'tool_call') return false;
-                    const p = row.payload as { toolName?: string } | null;
-                    return p?.toolName === 'done';
-                  }).length
-                : 0;
-            if (doneCallCount > 0) break; // clean exit — agent really finished
-            // Abandonment: agent went quiet without calling done. Fire
-            // one more chunk with an explicit "you stopped without
-            // calling done — finish or call done now" steer. We fold
-            // the steer into chunkPrompt for the next iteration.
-            logIpc.warn('agent.abandoned_without_done', {
-              generationId: id,
-              chunk,
-              tip: 'forcing one more chunk with a wrap-up steer',
-            });
-            chunkPrompt = `[auto-continue chunk ${chunk + 1}/${MAX_AUTO_CONTINUE}] You stopped emitting tool calls but never called \`done\`. The artifact is incomplete. Either: (a) finish the remaining unticked todos as quickly as possible (1-3 small str_replace per turn, then call \`done\`), OR (b) if you genuinely think the artifact is finished, call \`done\` immediately so the run can exit cleanly. Do NOT just produce more prose — every turn must include at least one tool call.`;
-            chunkHistory = loadHistoryForAutoContinue(
-              db,
-              payload.designId ?? null,
-              active.reasoningLevel !== undefined ? 'full' : 'slim',
-            );
-            chunkPreviousHtml = chunkResult.artifacts[0]?.content ?? chunkPreviousHtml;
-            continue;
-          }
-
-          // Prepare the next chunk: synthesized continue prompt, history
-          // reloaded from DB (includes everything just appended during
-          // this chunk's runGenerate), seed previousHtml with the artifact
-          // we just produced so the next chunk's fresh fs starts from it.
-          chunkPrompt = `[auto-continue chunk ${chunk + 1}/${MAX_AUTO_CONTINUE}] Continue where you left off — pick the next plan items and finish them. Aim to finish the design within the remaining ${MAX_AUTO_CONTINUE - chunk} chunk(s).`;
-          // Reasoning-on agents need full history to maintain chain-of-
-          // thought across chunk boundaries (Anthropic doesn't expose
-          // internal thinking blocks to subsequent API calls). Reasoning-
-          // off agents get the slim summary for the cache + first-token
-          // win.
-          chunkHistory = loadHistoryForAutoContinue(
-            db,
-            payload.designId ?? null,
-            active.reasoningLevel !== undefined ? 'full' : 'slim',
-          );
-          chunkPreviousHtml = chunkResult.artifacts[0]?.content ?? chunkPreviousHtml;
-        }
-
-        if (!lastResult) {
-          throw new CodesignError('Auto-continue loop produced no result', 'PROVIDER_ERROR');
-        }
-
-        // Hit the cap with work still pending — rewrite the final message
-        // so the user knows manual resume is needed. Distinct copy from
-        // the per-chunk "Paused — auto-resuming" hint so the UI reads
-        // differently in the cap-reached case.
-        if (lastResult.interrupted && totals.chunks >= MAX_AUTO_CONTINUE) {
-          const baseMsg = lastResult.message;
-          lastResult = {
-            ...lastResult,
-            message: `${baseMsg}${baseMsg.length > 0 ? '\n\n' : ''}— Reached the ${MAX_AUTO_CONTINUE}-chunk auto-continue cap. The artifact above is what landed; type **keep going** (or any follow-up) to do more. —`,
-          };
-        }
+        const finalResult = runResult.interrupted
+          ? {
+              ...runResult,
+              message: `${runResult.message}${runResult.message.length > 0 ? '\n\n' : ''}— Run paused after ${Math.round((active.wallClockBudgetMs ?? SINGLE_SESSION_WALL_CLOCK_MS) / 1000)}s. The artifact above is what landed; type **keep going** (or any follow-up) to do more. —`,
+            }
+          : runResult;
 
         logIpc.info('generate.ok', {
           generationId: id,
           ms: Date.now() - t0,
-          artifacts: lastResult.artifacts.length,
-          cost: totals.totalCostUsd,
-          inputTokens: totals.totalInputTokens,
-          outputTokens: totals.totalOutputTokens,
-          cachedInputTokens: totals.totalCachedInputTokens,
-          cacheCreationInputTokens: totals.totalCacheCreationInputTokens,
+          artifacts: finalResult.artifacts.length,
+          cost: finalResult.costUsd,
+          inputTokens: finalResult.inputTokens,
+          outputTokens: finalResult.outputTokens,
+          cachedInputTokens: finalResult.cachedInputTokens,
+          cacheCreationInputTokens: finalResult.cacheCreationInputTokens,
         });
         logIpc.info('generate.summary', {
           generationId: id,
           totalMs: Date.now() - t0,
-          totalChunks: totals.chunks,
-          chunksInterrupted: totals.chunksInterrupted,
-          capReached: lastResult.interrupted && totals.chunks >= MAX_AUTO_CONTINUE,
-          totalInputTokens: totals.totalInputTokens,
-          totalOutputTokens: totals.totalOutputTokens,
-          totalCachedInputTokens: totals.totalCachedInputTokens,
-          totalCostUsd: totals.totalCostUsd,
+          totalChunks: 1,
+          chunksInterrupted: finalResult.interrupted ? 1 : 0,
+          capReached: finalResult.interrupted,
+          totalInputTokens: finalResult.inputTokens,
+          totalOutputTokens: finalResult.outputTokens,
+          totalCachedInputTokens: finalResult.cachedInputTokens,
+          totalCostUsd: finalResult.costUsd,
         });
-        // plan0305 P3.2 — persist per-run token + cost telemetry. Aggregated
-        // across all auto-continue chunks; keyed by generationId so a retry
-        // overwrites rather than duplicating. Read by the chat status header
-        // ("this design cost $X.XX") and any future cost dashboards.
         if (db !== null) {
           try {
             recordRunUsage(db, {
               generationId: id,
               designId: payload.designId ?? null,
-              inputTokens: totals.totalInputTokens,
-              outputTokens: totals.totalOutputTokens,
-              cachedInputTokens: totals.totalCachedInputTokens,
-              cacheCreationInputTokens: totals.totalCacheCreationInputTokens,
-              costUsd: totals.totalCostUsd,
-              totalChunks: totals.chunks,
+              inputTokens: finalResult.inputTokens,
+              outputTokens: finalResult.outputTokens,
+              cachedInputTokens: finalResult.cachedInputTokens,
+              cacheCreationInputTokens: finalResult.cacheCreationInputTokens,
+              costUsd: finalResult.costUsd,
+              totalChunks: 1,
               totalMs: Date.now() - t0,
               provider: active.model.provider,
               modelId: active.model.modelId,
@@ -1716,16 +1969,7 @@ function registerIpcHandlers(db: Database | null): void {
             });
           }
         }
-        // Surface aggregate metrics on the returned result so the renderer
-        // shows total tokens (across all chunks), not just the last one.
-        return {
-          ...lastResult,
-          inputTokens: totals.totalInputTokens,
-          outputTokens: totals.totalOutputTokens,
-          cachedInputTokens: totals.totalCachedInputTokens,
-          cacheCreationInputTokens: totals.totalCacheCreationInputTokens,
-          costUsd: totals.totalCostUsd,
-        };
+        return finalResult;
       } catch (err) {
         // Attach upstream metadata to the thrown err so the renderer's
         // diagnostic pipeline (store.ts::applyGenerateError →
@@ -1789,6 +2033,10 @@ function registerIpcHandlers(db: Database | null): void {
     const cleanupDedup = () => {
       if (inFlightGenerations.get(id) === wrapped) inFlightGenerations.delete(id);
       if (inFlightContentToId.get(contentKey) === id) inFlightContentToId.delete(contentKey);
+      // Backlog-3 §5 — clear any checkpoint hint so it doesn't leak
+      // into a subsequent run with the same id (shouldn't happen
+      // given GenerationId is unique-per-attempt, but belt-and-braces).
+      checkpointHints.delete(id);
     };
     wrapped.then(cleanupDedup, cleanupDedup);
     return wrapped;
@@ -1920,8 +2168,24 @@ function registerIpcHandlers(db: Database | null): void {
   });
 
   ipcMain.handle('codesign:v1:cancel-generation', (_e, raw: unknown) => {
-    const { generationId } = CancelGenerationPayloadV1.parse(raw);
-    cancelGenerationRequest(generationId, inFlight, logIpc);
+    const parsed = CancelGenerationPayloadV1.parse(raw);
+    if (parsed.asCheckpoint === true) {
+      // Backlog-3 §5 — soft cancel: set the hint and let the agent's
+      // turn_end subscriber convert it into a clean abort at the next
+      // safe boundary. Falls back to a hard abort after 10s in case
+      // the model is mid-stream and won't reach turn_end on its own.
+      requestCheckpointAbort(parsed.generationId, checkpointHints, logIpc);
+      const fallbackId = parsed.generationId;
+      setTimeout(() => {
+        if (checkpointHints.get(fallbackId) === true) {
+          logIpc.warn('generate.cancel.checkpoint_fallback', { id: fallbackId });
+          cancelGenerationRequest(fallbackId, inFlight, logIpc);
+          checkpointHints.delete(fallbackId);
+        }
+      }, 10_000);
+      return;
+    }
+    cancelGenerationRequest(parsed.generationId, inFlight, logIpc);
   });
 
   /**
@@ -1946,6 +2210,74 @@ function registerIpcHandlers(db: Database | null): void {
       };
     }
     return getDesignUsageTotals(db, designId);
+  });
+
+  /**
+   * Backlog-3 §10 — read a budget record. id='global' returns the
+   * catch-all entry; design IDs return per-design overrides.
+   */
+  ipcMain.handle('codesign:v1:get-budget', (_e, raw: unknown) => {
+    const obj = raw as { id?: unknown } | null;
+    const id = obj?.id;
+    if (typeof id !== 'string' || id.length === 0) {
+      throw new CodesignError('get-budget expects { id: string }', 'IPC_BAD_INPUT');
+    }
+    if (db === null) return null;
+    return getBudget(db, id);
+  });
+
+  /**
+   * Backlog-3 §10 — upsert a budget record. Pass null for either limit
+   * to clear it.
+   */
+  ipcMain.handle('codesign:v1:set-budget', (_e, raw: unknown) => {
+    const obj = raw as {
+      id?: unknown;
+      dailyLimitUsd?: unknown;
+      perDesignLimitUsd?: unknown;
+      alertAtPct?: unknown;
+    } | null;
+    if (
+      !obj ||
+      typeof obj.id !== 'string' ||
+      obj.id.length === 0 ||
+      (obj.dailyLimitUsd !== null &&
+        obj.dailyLimitUsd !== undefined &&
+        typeof obj.dailyLimitUsd !== 'number') ||
+      (obj.perDesignLimitUsd !== null &&
+        obj.perDesignLimitUsd !== undefined &&
+        typeof obj.perDesignLimitUsd !== 'number') ||
+      typeof obj.alertAtPct !== 'number'
+    ) {
+      throw new CodesignError('set-budget payload malformed', 'IPC_BAD_INPUT');
+    }
+    if (db === null) return;
+    upsertBudget(db, {
+      id: obj.id,
+      dailyLimitUsd:
+        typeof obj.dailyLimitUsd === 'number' && Number.isFinite(obj.dailyLimitUsd)
+          ? obj.dailyLimitUsd
+          : null,
+      perDesignLimitUsd:
+        typeof obj.perDesignLimitUsd === 'number' && Number.isFinite(obj.perDesignLimitUsd)
+          ? obj.perDesignLimitUsd
+          : null,
+      alertAtPct: Math.max(1, Math.min(100, Math.round(obj.alertAtPct))),
+    });
+  });
+
+  /**
+   * Backlog-3 §10 — last N days of daily_usage roll-ups for the
+   * cost dashboard sparkline. Default 7 days.
+   */
+  ipcMain.handle('codesign:v1:daily-usage', (_e, raw: unknown) => {
+    const obj = raw as { daysBack?: unknown } | null;
+    const daysBack =
+      typeof obj?.daysBack === 'number' && Number.isFinite(obj.daysBack)
+        ? Math.max(1, Math.min(90, Math.round(obj.daysBack)))
+        : 7;
+    if (db === null) return [];
+    return listDailyUsage(db, daysBack);
   });
 
   /**
@@ -2195,7 +2527,15 @@ if (!IS_VITEST) {
   // imports + binary assets out of the multi-file project bundle into the
   // preview iframe. The handler itself attaches once the DB is open.
   try {
-    protocol.registerSchemesAsPrivileged([GAME_FILES_PRIVILEGED_SCHEME]);
+    protocol.registerSchemesAsPrivileged([
+      GAME_FILES_PRIVILEGED_SCHEME,
+      // Multi-file design-mode artifacts share the same privileged-scheme
+      // shape as game-mode bundles (FS semantics, ES-module loading,
+      // streaming binary assets). Registered alongside so the design
+      // preview iframe can switch to `design-files://` when sidecar files
+      // exist.
+      DESIGN_FILES_PRIVILEGED_SCHEME,
+    ]);
   } catch (err) {
     // Re-registration in dev (hot reload) throws; main-process logger isn't
     // wired yet at this point, so route through console which is allowed
@@ -2304,6 +2644,33 @@ if (!IS_VITEST) {
             });
           } catch (err) {
             gameFilesLog.error('handle.fail', {
+              url: request.url,
+              message: err instanceof Error ? err.message : String(err),
+            });
+            return new Response('Internal protocol error', {
+              status: 500,
+              headers: { 'content-type': 'text/plain' },
+            });
+          }
+        });
+        // Multi-file design artifacts — same on-disk lookup as
+        // game-files but no `_build/*` namespace and no synthesizer.
+        // PreviewPane switches to this scheme when a design has more
+        // than one file in `design_files`; trivial single-file
+        // designs still take the cheaper `srcdoc` path.
+        const designFilesLog = getLogger('design-files');
+        protocol.handle(DESIGN_FILES_SCHEME, async (request) => {
+          try {
+            const resolved = resolveDesignFilesRequest({
+              rawUrl: request.url,
+              db: dbResult.db,
+            });
+            return new Response(resolved.body, {
+              status: resolved.status,
+              headers: gameFilesResponseHeaders(resolved),
+            });
+          } catch (err) {
+            designFilesLog.error('handle.fail', {
               url: request.url,
               message: err instanceof Error ? err.message : String(err),
             });

@@ -9,6 +9,7 @@ Every item below is a hard fail in production play-testing. The validator catche
 - **Instant fail on first input.** A jump that kills the player on frame 2 reads as broken. Tutorialise the failure mode (warning, slow ramp, telegraph).
 - **No win state on completable games.** Pong needs a score cap; a platformer needs a flag. Without a win the player exits feeling cheated.
 - **Invisible hitboxes.** Hitbox must visually align with the sprite. Don't ship a 32×32 collision box on a 12×12 visual — the player can't reason about the rules.
+- **Trigger-zone reachability.** Advance zones (exits, pickups, switches) must overlap the player's post-collision position, not just the object surface. If the collider stops at distance D from a wall, make the trigger at least D + ε deep in code.
 
 ## Feedback (every action gets one within 100 ms)
 

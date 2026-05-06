@@ -1,6 +1,7 @@
 import { useT } from '@open-codesign/i18n';
 import {
   Download,
+  FolderTree,
   Hammer,
   Loader2,
   MessageSquare,
@@ -12,8 +13,8 @@ import {
 } from 'lucide-react';
 import { type ReactElement, useEffect, useRef, useState } from 'react';
 import type { ExportFormat } from '../../../preload/index';
-import type { GameAspect, PreviewViewport } from '../store';
-import { useCodesignStore } from '../store';
+import { useDesignFiles } from '../hooks/useDesignFiles';
+import { type GameAspect, type PreviewViewport, useCodesignStore } from '../store';
 
 const GAME_ASPECT_OPTIONS: GameAspect[] = ['16:9', '4:3', '1:1', '9:16'];
 
@@ -61,6 +62,13 @@ export function PreviewToolbar(): ReactElement {
   const gameAspect = useCodesignStore((s) => s.gameAspect);
   const setGameAspect = useCodesignStore((s) => s.setGameAspect);
   const isGameMode = currentDesignEngine !== null;
+  // Multi-file affordance — surface "N files" when the design has
+  // sidecars in `design_files`. Click switches the canvas to the
+  // Files tab so the user can inspect the tree.
+  const designFiles = useDesignFiles(currentDesignId);
+  const canvasTabs = useCodesignStore((s) => s.canvasTabs);
+  const setActiveCanvasTab = useCodesignStore((s) => s.setActiveCanvasTab);
+  const filesTabIndex = canvasTabs.findIndex((tab) => tab.kind === 'files');
   const [refreshSpinning, setRefreshSpinning] = useState(false);
   const [open, setOpen] = useState(false);
   const [zoomOpen, setZoomOpen] = useState(false);
@@ -133,6 +141,19 @@ export function PreviewToolbar(): ReactElement {
           {toastMessage}
         </output>
       )}
+      {designFiles.multiFile && filesTabIndex >= 0 ? (
+        <button
+          type="button"
+          onClick={() => setActiveCanvasTab(filesTabIndex)}
+          aria-label={`${designFiles.files.length} files in this design — click to view file tree`}
+          title={`${designFiles.files.length} files — click to view file tree`}
+          className="inline-flex items-center gap-[4px] rounded-[var(--radius-sm)] px-[var(--space-2)] h-[22px] text-[11px] tabular-nums text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)] transition-colors"
+          style={{ fontFamily: 'var(--font-mono)' }}
+        >
+          <FolderTree className="w-[12px] h-[12px]" aria-hidden />
+          <span>{designFiles.files.length} files</span>
+        </button>
+      ) : null}
 
       <button
         type="button"

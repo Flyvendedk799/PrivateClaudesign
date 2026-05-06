@@ -358,6 +358,7 @@ describe('FilesPanel workspace integration', () => {
           files: [],
           loading: false,
           backend: 'snapshots',
+          multiFile: false,
         });
         useCodesignStore.setState({
           currentDesignId: 'design-1',

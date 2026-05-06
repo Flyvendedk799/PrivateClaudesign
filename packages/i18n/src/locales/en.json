@@ -140,7 +140,24 @@
     "sendAnywhere": "anywhere",
     "send": "Send prompt",
     "stop": "Stop generation",
-    "placeholderRich": "Describe a design… try 'Pitch deck for a fintech startup'"
+    "placeholderRich": "Describe a design… try 'Pitch deck for a fintech startup'",
+    "newSession": {
+      "label": "New conversation",
+      "tooltip": "Start a fresh conversation in this design (clears LLM context — saves tokens, frees cache, keeps the preview).",
+      "previousSessionDivider": "Previous conversation",
+      "blocked": {
+        "title": "Generation in flight",
+        "description": "Stop or wait for the current run before starting a new conversation."
+      },
+      "success": {
+        "title": "New conversation started",
+        "description": "The next prompt ships with empty history. Past messages stay visible above."
+      },
+      "failed": {
+        "title": "Couldn't start a new conversation",
+        "description": "Try again — the design is unchanged."
+      }
+    }
   },
   "sidebar": {
     "localContext": "Local context",

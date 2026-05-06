@@ -124,6 +124,8 @@ export interface Preferences {
   diagnosticsLastReadTs: number;
   /** gameplan §A6 / Q2 — last-picked mode in the New-design dialog. */
   lastPickedMode: 'design' | 'game';
+  /** Improver1 §6 — opt-out of mid-run auto-verify. Default false (ON). */
+  incrementalVerifyDisabled: boolean;
 }
 
 /**
@@ -155,6 +157,11 @@ export interface AgentStreamEvent {
     | 'turn_end'
     | 'tool_call_start'
     | 'tool_call_result'
+    // Backlog-3 §4 — partial result delta. Emitted by tools that opt
+    // into streaming (today: image-asset synthetic progress; future:
+    // chunked view results). Renderer accumulates per toolCallId; the
+    // final `tool_call_result` event closes the streaming entry.
+    | 'tool_result_delta'
     | 'fs_updated'
     | 'chunk_start'
     | 'chunk_end'
@@ -183,6 +190,16 @@ export interface AgentStreamEvent {
   // tool_call_result
   result?: unknown;
   durationMs?: number;
+  // tool_result_delta (Backlog-3 §4)
+  /** Partial result preview text — typically a small, truncated head of
+   *  the in-flight result. Cumulative byte count is reported via
+   *  `byteCount` so the UI can show progress without buffering the
+   *  full body. */
+  resultPreview?: string;
+  byteCount?: number;
+  /** Synthetic progress percent for tools that don't ship bytes
+   *  incrementally (e.g. image generation). Range 0-100. */
+  progressPct?: number;
   // tool_call_result enrichments — present only when the tool was the agent's
   // text_editor (str_replace / insert) and the FS callback returned a populated
   // EditResult. Powers the follow-the-edit cursor in the preview.
@@ -246,10 +263,11 @@ const api = {
       schemaVersion: 1,
       ...payload,
     } satisfies GeneratePayloadV1) as Promise<GenerateResponse>,
-  cancelGeneration: (generationId: string) =>
+  cancelGeneration: (generationId: string, opts?: { asCheckpoint?: boolean }) =>
     ipcRenderer.invoke('codesign:v1:cancel-generation', {
       schemaVersion: 1,
       generationId,
+      ...(opts?.asCheckpoint === true ? { asCheckpoint: true } : {}),
     } satisfies CancelGenerationPayloadV1),
   /** Push a "wrap up now" override into the agent's pending-steers queue.
    *  The agent picks it up at the next turn_end and converges to `done`
@@ -272,6 +290,34 @@ const api = {
       costUsd: number;
       runs: number;
     }>,
+  /** Backlog-3 §10 — read a budget record. id='global' or designId. */
+  getBudget: (id: string) =>
+    ipcRenderer.invoke('codesign:v1:get-budget', { id }) as Promise<{
+      id: string;
+      dailyLimitUsd: number | null;
+      perDesignLimitUsd: number | null;
+      alertAtPct: number;
+    } | null>,
+  /** Backlog-3 §10 — upsert a budget record. */
+  setBudget: (input: {
+    id: string;
+    dailyLimitUsd: number | null;
+    perDesignLimitUsd: number | null;
+    alertAtPct: number;
+  }) => ipcRenderer.invoke('codesign:v1:set-budget', input) as Promise<void>,
+  /** Backlog-3 §10 — last N days of daily_usage rolled up for the
+   *  cost dashboard sparkline. */
+  getDailyUsage: (daysBack = 7) =>
+    ipcRenderer.invoke('codesign:v1:daily-usage', { daysBack }) as Promise<
+      Array<{
+        date: string;
+        costUsd: number;
+        inputTokens: number;
+        outputTokens: number;
+        cachedInputTokens: number;
+        runCount: number;
+      }>
+    >,
   applyComment: (payload: {
     html: string;
     comment: string;
@@ -562,6 +608,17 @@ const api = {
         schemaVersion: 1,
         designId,
       }) as Promise<{ exists: boolean }>,
+    /**
+     * Multi-file artifacts — list every `design_files` row for this
+     * design as `{ path, sizeBytes, updatedAt }`. Body content is NOT
+     * shipped (use `view` via the agent's text_editor or render the
+     * file via the `design-files://` protocol if you need bytes).
+     */
+    listFiles: (designId: string) =>
+      ipcRenderer.invoke('snapshots:v1:list-files', {
+        schemaVersion: 1,
+        designId,
+      }) as Promise<Array<{ path: string; sizeBytes: number; updatedAt: string }>>,
   },
   chat: {
     list: (designId: string) =>
@@ -578,6 +635,16 @@ const api = {
         schemaVersion: 1,
         designId,
       }) as Promise<{ inserted: number }>,
+    newSession: (designId: string) =>
+      ipcRenderer.invoke('chat:v1:new-session', {
+        schemaVersion: 1,
+        designId,
+      }) as Promise<{ sessionId: number }>,
+    currentSession: (designId: string) =>
+      ipcRenderer.invoke('chat:v1:current-session', {
+        schemaVersion: 1,
+        designId,
+      }) as Promise<{ sessionId: number }>,
     updateToolStatus: (input: {
       designId: string;
       seq: number;

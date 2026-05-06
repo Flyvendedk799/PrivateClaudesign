@@ -4,8 +4,9 @@
  * scratch. Pure-function test against fixture chat rows.
  */
 
+import type { ChatMessage } from '@open-codesign/shared';
 import { describe, expect, it } from 'vitest';
-import { buildHistoryFromChatRows } from './store';
+import { buildHistoryFromChatRows, capHistoryToTurnBoundary } from './store';
 
 type Row = { kind: string; payload?: unknown };
 
@@ -219,5 +220,96 @@ describe('buildHistoryFromChatRows', () => {
       (m) => m.role === 'assistant' && m.content.startsWith('[tool transcript clipped'),
     );
     expect(clipMarker).toBeDefined();
+  });
+});
+
+describe('capHistoryToTurnBoundary', () => {
+  const u = (content: string): ChatMessage => ({ role: 'user', content });
+  const a = (content: string, toolCalls?: ChatMessage['toolCalls']): ChatMessage =>
+    toolCalls === undefined
+      ? { role: 'assistant', content }
+      : { role: 'assistant', content, toolCalls };
+  const t = (content: string, toolCallId: string, toolName = 'text_editor'): ChatMessage => ({
+    role: 'tool',
+    content,
+    toolCallId,
+    toolName,
+    isError: false,
+  });
+
+  it('returns input unchanged when under cap', () => {
+    const history: ChatMessage[] = [u('hi'), a('done')];
+    expect(capHistoryToTurnBoundary(history, 12)).toEqual(history);
+  });
+
+  it('trims leading tool/assistant rows so the array starts on a user turn', () => {
+    // 5 messages: assistant(toolCalls) + tool + user + assistant(toolCalls) + tool.
+    // Cap of 4 would naively slice from index 1 — leaving a `tool` first.
+    // capHistoryToTurnBoundary must drop forward to the first `user`.
+    const history: ChatMessage[] = [
+      a('', [{ id: 'c1', name: 'text_editor', argsJson: '{}' }]),
+      t('ok', 'c1'),
+      u('next prompt'),
+      a('done', [{ id: 'c2', name: 'text_editor', argsJson: '{}' }]),
+      t('ok', 'c2'),
+    ];
+    const out = capHistoryToTurnBoundary(history, 4);
+    expect(out[0]?.role).toBe('user');
+    expect(out[0]?.content).toBe('next prompt');
+    expect(out).toHaveLength(3);
+  });
+
+  it('returns empty when slice contains no user row at all', () => {
+    // Pathological: slice contains only an orphaned tool result. Drop it
+    // entirely rather than send a malformed request to the provider.
+    const history: ChatMessage[] = [t('ok', 'orphan')];
+    expect(capHistoryToTurnBoundary(history, 12)).toEqual([]);
+  });
+});
+
+describe('buildHistoryFromChatRows session filter (in-design new conversation)', () => {
+  it('returns all rows when no sessionId filter is provided', () => {
+    const rows: Array<Row & { sessionId?: number }> = [
+      { ...userRow('s0 prompt'), sessionId: 0 },
+      { ...assistantTextRow('s0 done'), sessionId: 0 },
+      { ...userRow('s1 prompt'), sessionId: 1 },
+      { ...assistantTextRow('s1 done'), sessionId: 1 },
+    ];
+    const out = buildHistoryFromChatRows(rows);
+    // Two user prompts → two assistant turns → 4 messages total.
+    expect(out.filter((m) => m.role === 'user')).toHaveLength(2);
+  });
+
+  it('drops rows from prior sessions when sessionId=current is passed', () => {
+    const rows: Array<Row & { sessionId?: number }> = [
+      { ...userRow('old prompt'), sessionId: 0 },
+      { ...assistantTextRow('old done'), sessionId: 0 },
+      { ...userRow('fresh prompt'), sessionId: 1 },
+      { ...assistantTextRow('fresh done'), sessionId: 1 },
+    ];
+    const out = buildHistoryFromChatRows(rows, { sessionId: 1 });
+    expect(out.filter((m) => m.role === 'user')).toHaveLength(1);
+    expect(out[0]?.content).toBe('fresh prompt');
+  });
+
+  it('treats missing sessionId as session 0 for legacy rows', () => {
+    const rows: Array<Row & { sessionId?: number }> = [
+      // Legacy row pre-migration (no sessionId field at all).
+      { ...userRow('legacy prompt') },
+      { ...assistantTextRow('legacy done') },
+    ];
+    const out = buildHistoryFromChatRows(rows, { sessionId: 0 });
+    expect(out.filter((m) => m.role === 'user')).toHaveLength(1);
+    // Filtering to a non-zero session removes the legacy rows.
+    const out1 = buildHistoryFromChatRows(rows, { sessionId: 1 });
+    expect(out1).toEqual([]);
+  });
+
+  it('returns empty when the requested session has no rows', () => {
+    const rows: Array<Row & { sessionId?: number }> = [
+      { ...userRow('s0 prompt'), sessionId: 0 },
+      { ...assistantTextRow('s0 done'), sessionId: 0 },
+    ];
+    expect(buildHistoryFromChatRows(rows, { sessionId: 99 })).toEqual([]);
   });
 });

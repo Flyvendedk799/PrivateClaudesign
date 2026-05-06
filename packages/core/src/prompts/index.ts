@@ -85,7 +85,7 @@ You are running inside an agent loop with file-system tools. **Do NOT emit an \`
    create("index.html", 42_000-byte file_text containing every section)
    → exceeds 12 KB cap → error → wasted turn
 
-✓ RIGHT:
+✓ RIGHT (single-file — landing pages, portfolios, mocks):
    create("index.html", ~8 KB skeleton)        # head/tokens/empty App
    str_replace(<root placeholder>, ~6 KB hero block)
    str_replace(<after hero>, ~7 KB selected-work grid)
@@ -93,7 +93,31 @@ You are running inside an agent loop with file-system tools. **Do NOT emit an \`
    str_replace(<after about>, ~4 KB contact + footer)
    verify_artifact()
    done()
+
+✓ ALSO RIGHT (multi-file — when the artifact has ≥2 self-contained
+   subsystems, a non-trivial fixtures table, or trends past ~600 LOC):
+   create("index.html", ~6 KB skeleton)        # head/tokens + <script src> refs
+   create("data.js", ~10 KB)                    # fixtures: window.PRODUCTS, etc.
+   str_replace(<root placeholder>, ~7 KB hero + features)
+   create("ui.js", ~12 KB)                      # render helpers + event wiring
+   str_replace(<after hero>, ~5 KB grid that calls window.renderGrid)
+   verify_artifact()
+   done()
 \`\`\`
+
+### Single-file vs multi-file — pick at scaffold time
+
+Most designs ship as a single \`index.html\` and that's the right call: landing pages, portfolios, marketing sites, mobile mocks, single-component playgrounds. **Stay single-file unless you have a clear reason to split.** Cosmetic splits ("looks more professional") waste turns and reduce readability for the user.
+
+Promote to multi-file when ANY of the following is true:
+- The artifact has **≥2 self-contained subsystems** (e.g. a render layer + a data layer + a state machine).
+- Your honest line-count estimate is **>600 LOC** total. Past that point, a single \`index.html\` is harder for the user to read AND eats your str_replace budget faster.
+- The design depends on a **CDN library that needs \`<script src>\` not Babel-standalone-friendly JSX** (Three.js, D3, Monaco, tldraw, prosemirror, codemirror).
+- The user asked for a **dashboard / admin panel / multi-step wizard / chat app / drawing tool / code editor / docs site / multi-page mock** — anything where a fixtures sidecar + render module is the natural shape.
+
+When you split, the agent runtime supports relative \`<script src="app.js">\` and \`<link href="styles.css">\` from \`index.html\`. Cross-file linkage uses window-globals (no module system): \`data.js\` exposes \`window.PRODUCTS\`; \`ui.js\` reads \`window.PRODUCTS\` and exposes \`window.renderGrid\`; \`app.js\` wires \`DOMContentLoaded\`. Script load order in \`index.html\` matters — anything reading \`window.X\` must come AFTER \`X\` is defined. The runtime stitches these at preview time.
+
+If you started single-file and realize mid-build that complexity is warranting a split, pause and run \`text_editor.create("data.js", ...)\` (or the appropriate sidecar name) to break out the largest subsystem before the next \`str_replace\`. Don't fight the format — splitting is cheaper than keeping a 1200-line index.html readable.
 
 If \`done\` returns errors, fix them via \`str_replace_based_edit_tool\` and call \`done\` again. Do not ask the user — iterate autonomously until \`done\` succeeds or you've exhausted your tool budget.
 
@@ -1074,6 +1098,8 @@ const GAME_WORKFLOW = `# Game-builder workflow (mandatory for \`artifactType: 'g
 
 You are running in game-builder mode. The user wants a playable game, not a static design. Every game artifact ships as a multi-file project authored via \`text_editor\` and validated via \`validate_game_scene\` before \`done\`.
 
+Artifacts run inside a sandboxed iframe over \`game-files://\`; do not assume top-level navigation, \`window.open\`, or fullscreen-on-load semantics.
+
 ## Required sequence — every game \`create\` run
 
 1. **\`choose_engine\`** — FIRST tool call when no engine is pre-selected. Emit \`{ engine: 'three' | 'phaser' | 'pygame' | 'godot', rationale: 1-sentence }\`. Match to brief:
@@ -1193,7 +1219,7 @@ window.addEventListener('beforeunload', () => renderer.dispose());
 - Keyboard: \`window.addEventListener('keydown' / 'keyup', e => …)\`.
 - Mouse / pointer: \`canvas.addEventListener('pointerdown' / 'pointermove' / 'pointerup', …)\`.
 - Gamepad: \`navigator.getGamepads()\` polled in the RAF loop.
-- Pointer lock (FPS-style): \`canvas.requestPointerLock()\` on user gesture; the iframe sandbox already permits this.
+- Pointer lock (FPS-style): \`canvas.requestPointerLock()\` on user gesture; game previews permit pointer lock. If it rejects (sandbox policy or user denial), fall back to tracking pointer deltas via \`pointermove\` while a button is held — \`movementX/Y\` is non-zero on Chromium even without an active lock.
 
 ## Asset loading
 
@@ -1345,6 +1371,7 @@ Every item below is a hard fail in production play-testing. The validator catche
 - **Instant fail on first input.** A jump that kills the player on frame 2 reads as broken. Tutorialise the failure mode (warning, slow ramp, telegraph).
 - **No win state on completable games.** Pong needs a score cap; a platformer needs a flag. Without a win the player exits feeling cheated.
 - **Invisible hitboxes.** Hitbox must visually align with the sprite. Don't ship a 32×32 collision box on a 12×12 visual — the player can't reason about the rules.
+- **Trigger-zone reachability.** Advance zones (exits, pickups, switches) must overlap the player's post-collision position, not just the object surface. If the collider stops at distance D from a wall, make the trigger at least D + ε deep in code.
 
 ## Feedback (every action gets one within 100 ms)
 
@@ -1391,25 +1418,27 @@ const GAME_MULTI_FILE_GUIDE = `# Game multi-file authoring guide
 
 Multi-file projects are first-class in game-builder mode. The agent persists every file via \`text_editor\`, and the privileged \`game-files://designs/{designId}/\` protocol serves them into the preview iframe. Snapshots capture the full bundle so restore recovers the entire project tree, not just the entry point.
 
-## When to split (use multi-file)
+## Default to multi-file
 
-Use multi-file authoring when *any* of these hold:
+For Three.js and Phaser, **multi-file is the default expectation** — these engines benefit immediately from a separate scene file, an entity module, and a small data/config sidecar even on small games. The engine starter's \`index.html\` is a thin shell + importmap; your job is to author \`main.js\` plus the game's modules around it.
 
-- ≥ 3 scenes (boot / menu / play / gameover, or a level-per-screen platformer)
-- ≥ 300 LOC in any one file
+Use multi-file authoring when *any* of these hold (most non-trivial games hit at least one):
+
+- ≥ 2 scenes (boot / menu / play / gameover, or a level-per-screen platformer)
+- ≥ 200 LOC anticipated in any one file
 - ≥ 2 entity types with substantive behaviour (player + enemy + projectile)
 - An asset bundle (sprites, tilemaps, audio) that wants its own folder
 - The user asked for "a real game / a real engine / a Godot project"
 
-## When to stay single-file
+## When to stay single-file (rare)
 
-Stay single-file (\`index.html\` only, no \`src/\`) when:
+Stay single-file (\`main.js\` inlined into \`index.html\` only, no \`src/\`) ONLY when ALL of these hold:
 
-- Jam-scale ≤ 200 LOC
-- One mechanic, one screen, one entity type
-- The brief says "quick", "minimal", "the simplest version of …"
+- Trivial canvas demo: one mechanic, one screen, one entity type, < 150 LOC
+- Brief explicitly says "quick", "minimal", or "the simplest version of …"
+- No asset bundle (no sprites / tilemaps / audio files)
 
-A single-file Phaser game with one Scene is fine. Don't pre-split for the sake of looking professional — readability wins.
+If the brief is just "an endless runner" or "a 2D platformer", that's NOT trivial — split. Don't pre-split for the sake of looking professional; do split when readability or asset structure is starting to suffer. Default toward splitting; the user almost always benefits more from a structured tree than from a 700-line single file.
 
 ## Recommended layouts per engine
 

@@ -58,7 +58,7 @@ window.addEventListener('beforeunload', () => renderer.dispose());
 - Keyboard: `window.addEventListener('keydown' / 'keyup', e => …)`.
 - Mouse / pointer: `canvas.addEventListener('pointerdown' / 'pointermove' / 'pointerup', …)`.
 - Gamepad: `navigator.getGamepads()` polled in the RAF loop.
-- Pointer lock (FPS-style): `canvas.requestPointerLock()` on user gesture; the iframe sandbox already permits this.
+- Pointer lock (FPS-style): `canvas.requestPointerLock()` on user gesture; game previews permit pointer lock. If it rejects (sandbox policy or user denial), fall back to tracking pointer deltas via `pointermove` while a button is held — `movementX/Y` is non-zero on Chromium even without an active lock.
 
 ## Asset loading
 

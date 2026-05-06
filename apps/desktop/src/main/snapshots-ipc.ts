@@ -28,11 +28,14 @@ import {
   duplicateDesign,
   getDesign,
   getSnapshot,
+  listDesignFiles,
   listDesigns,
   listSnapshots,
   renameDesign,
+  restoreSnapshotFiles,
   setDesignPromptAssistMetadata,
   setDesignThumbnail,
+  snapshotDesignFiles,
   softDeleteDesign,
 } from './snapshots-db';
 
@@ -193,6 +196,34 @@ export function registerSnapshotsIpc(db: Database): void {
     return runDb('list', () => listSnapshots(db, r['designId'] as string));
   });
 
+  // Multi-file design support — returns the live `design_files` rows
+  // for the given design, dropped to the (path, sizeBytes, updatedAt)
+  // shape the renderer's Files tab + preview-source helper actually
+  // need. Body is omitted to keep the IPC payload small even when the
+  // tree is large.
+  ipcMain.handle(
+    'snapshots:v1:list-files',
+    (_e: unknown, raw: unknown): Array<{ path: string; sizeBytes: number; updatedAt: string }> => {
+      if (typeof raw !== 'object' || raw === null) {
+        throw new CodesignError(
+          'snapshots:v1:list-files expects an object with designId',
+          'IPC_BAD_INPUT',
+        );
+      }
+      const r = raw as Record<string, unknown>;
+      requireSchemaV1(r, 'snapshots:v1:list-files');
+      if (typeof r['designId'] !== 'string' || r['designId'].trim().length === 0) {
+        throw new CodesignError('designId must be a non-empty string', 'IPC_BAD_INPUT');
+      }
+      const files = runDb('list-files', () => listDesignFiles(db, r['designId'] as string));
+      return files.map((f) => ({
+        path: f.path,
+        sizeBytes: f.content.length,
+        updatedAt: f.updatedAt,
+      }));
+    },
+  );
+
   ipcMain.handle('snapshots:v1:get', (_e: unknown, raw: unknown): DesignSnapshot | null => {
     if (typeof raw !== 'object' || raw === null) {
       throw new CodesignError('snapshots:v1:get expects an object with id', 'IPC_BAD_INPUT');
@@ -223,10 +254,20 @@ export function registerSnapshotsIpc(db: Database): void {
       }
     }
     const snapshot = runDb('create', () => createSnapshot(db, input));
+    // Multi-file artifacts — copy the design's live `design_files`
+    // tree into `design_snapshot_files` so a future restore can rewind
+    // every sidecar (`.css` / `.js` / `.png` / etc.), not just the
+    // single `artifact_source` blob. Skips silently when the design
+    // has no files (game-mode bundles always have files; design-mode
+    // single-file artifacts skip and stay backward-compatible).
+    const filesCount = runDb('create.snapshot-files', () =>
+      snapshotDesignFiles(db, snapshot.id, input.designId),
+    );
     logger.info('snapshot.created', {
       id: snapshot.id,
       type: input.type,
       designId: input.designId,
+      filesSnapshot: filesCount,
     });
     return snapshot;
   });
@@ -577,6 +618,7 @@ export const SNAPSHOTS_CHANNELS_V1 = [
   'snapshots:v1:workspace:update',
   'snapshots:v1:workspace:open',
   'snapshots:v1:workspace:check',
+  'snapshots:v1:list-files',
 ] as const;
 
 export function registerSnapshotsUnavailableIpc(reason: string): void {

@@ -129,6 +129,7 @@ export function DesignCardPreview({ design }: DesignCardPreviewProps) {
   const [html, setHtml] = useState<string | null>(() =>
     readCache(cacheKey(design.id, design.updatedAt)),
   );
+  const [artifactType, setArtifactType] = useState<'html' | 'react' | 'svg' | 'game' | null>(null);
   const [failed, setFailed] = useState(false);
   const [visible, setVisible] = useState(false);
   const [scale, setScale] = useState(0.22);
@@ -205,6 +206,7 @@ export function DesignCardPreview({ design }: DesignCardPreviewProps) {
         if (cancelled || !mounted.current) return;
         const latest = snaps[0];
         const source = latest?.artifactSource ?? '';
+        setArtifactType(latest?.artifactType ?? null);
         if (source.trim().length === 0) {
           setFailed(true);
           return;
@@ -222,6 +224,12 @@ export function DesignCardPreview({ design }: DesignCardPreviewProps) {
 
   // JSX artifacts need the React+Babel runtime wrapper; HTML artifacts render directly.
   const isJsx = useMemo(() => (html ? needsJsxRuntime(html) : false), [html]);
+  const sandbox =
+    artifactType === 'game'
+      ? 'allow-scripts allow-pointer-lock allow-fullscreen'
+      : isJsx
+        ? 'allow-scripts'
+        : '';
   const srcDoc = useMemo(() => {
     if (!html) return null;
     const base = isJsx ? buildSrcdoc(html) : html;
@@ -248,7 +256,7 @@ export function DesignCardPreview({ design }: DesignCardPreviewProps) {
           <iframe
             title={design.name}
             srcDoc={srcDoc}
-            sandbox={isJsx ? 'allow-scripts' : ''}
+            sandbox={sandbox}
             className="pointer-events-none border-0"
             style={{ width: '1280px', height: '960px' }}
           />

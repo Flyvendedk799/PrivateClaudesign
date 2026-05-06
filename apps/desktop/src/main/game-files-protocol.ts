@@ -28,6 +28,14 @@ import type Database from 'better-sqlite3';
 import { contentTypeFromPath } from './snapshots-db';
 
 export const GAME_FILES_SCHEME = 'game-files';
+/**
+ * Design-mode sibling scheme — same on-disk lookup (design_files), same
+ * URL shape (`design-files://designs/{id}/{path}`), but no synthesizer
+ * and no `_build/*` namespace. Registered alongside `game-files://` so
+ * the design-mode preview iframe can load multi-file artifacts via
+ * native FS semantics (relative URLs, ES modules, dynamic fetch).
+ */
+export const DESIGN_FILES_SCHEME = 'design-files';
 
 export interface GameFilesPrivilegedScheme {
   scheme: string;
@@ -53,6 +61,18 @@ export const GAME_FILES_PRIVILEGED_SCHEME: GameFilesPrivilegedScheme = {
   },
 };
 
+export const DESIGN_FILES_PRIVILEGED_SCHEME: GameFilesPrivilegedScheme = {
+  scheme: DESIGN_FILES_SCHEME,
+  privileges: {
+    secure: true,
+    supportFetchAPI: true,
+    corsEnabled: true,
+    stream: true,
+    bypassCSP: false,
+    standard: true,
+  },
+};
+
 export interface ParsedGameFilesUrl {
   designId: string;
   /** POSIX-style relative path inside the design's file bundle, with no leading slash. */
@@ -61,16 +81,17 @@ export interface ParsedGameFilesUrl {
   isBuild: boolean;
 }
 
-/** Parse a `game-files://designs/{id}/{path}` URL. Returns null on any
- *  shape mismatch — caller turns that into a 404. */
-export function parseGameFilesUrl(rawUrl: string): ParsedGameFilesUrl | null {
+/** Parse a `<scheme>://designs/{id}/{path}` URL. Returns null on any
+ *  shape mismatch — caller turns that into a 404. The scheme is a parameter
+ *  so the same parser handles both `game-files://` and `design-files://`. */
+function parseFilesUrl(rawUrl: string, scheme: string): ParsedGameFilesUrl | null {
   let url: URL;
   try {
     url = new URL(rawUrl);
   } catch {
     return null;
   }
-  if (url.protocol !== `${GAME_FILES_SCHEME}:`) return null;
+  if (url.protocol !== `${scheme}:`) return null;
   // URL.host carries the authority segment (`designs` in our shape). Path
   // captures everything after that — e.g. `/{id}/{path}`. Strip the leading
   // slash + the designId segment to recover the in-bundle path.
@@ -91,6 +112,25 @@ export function parseGameFilesUrl(rawUrl: string): ParsedGameFilesUrl | null {
     if (rest.length === 0) return null;
   }
   return { designId, path: rest, isBuild };
+}
+
+/** Parse a `game-files://designs/{id}/{path}` URL. Returns null on any
+ *  shape mismatch — caller turns that into a 404. */
+export function parseGameFilesUrl(rawUrl: string): ParsedGameFilesUrl | null {
+  return parseFilesUrl(rawUrl, GAME_FILES_SCHEME);
+}
+
+/** Parse a `design-files://designs/{id}/{path}` URL. Same shape as
+ *  game-files but no `_build/*` semantics — design-mode never needs
+ *  the Godot web export namespace. */
+export function parseDesignFilesUrl(rawUrl: string): ParsedGameFilesUrl | null {
+  const parsed = parseFilesUrl(rawUrl, DESIGN_FILES_SCHEME);
+  if (parsed === null) return null;
+  // Design-mode never serves the `_build/*` namespace — that's
+  // game-mode-only. Reject up front so callers get a clean 404
+  // instead of going through the build resolver.
+  if (parsed.isBuild) return null;
+  return parsed;
 }
 
 export interface GameFilesResolved {
@@ -164,6 +204,38 @@ export function resolveGameFilesRequest(input: {
     return NOT_FOUND;
   }
 
+  const contentType = contentTypeFromPath(parsed.path);
+  if (row.content.startsWith(SENTINEL_BASE64)) {
+    const b64 = row.content.slice(SENTINEL_BASE64.length);
+    let body: Uint8Array;
+    try {
+      body = Uint8Array.from(Buffer.from(b64, 'base64'));
+    } catch {
+      return NOT_FOUND;
+    }
+    return { status: 200, contentType, body, crossOriginIsolated: false };
+  }
+  return {
+    status: 200,
+    contentType,
+    body: new TextEncoder().encode(row.content),
+    crossOriginIsolated: false,
+  };
+}
+
+/** Pure resolver for `design-files://` URLs. Same on-disk lookup as
+ *  the game-mode resolver, minus the `_build/*` namespace and the
+ *  pygame synthesizer — design mode doesn't need either. */
+export function resolveDesignFilesRequest(input: {
+  rawUrl: string;
+  db: Database.Database;
+}): GameFilesResolved {
+  const parsed = parseDesignFilesUrl(input.rawUrl);
+  if (parsed === null) return NOT_FOUND;
+  const row = input.db
+    .prepare('SELECT content FROM design_files WHERE design_id = ? AND path = ?')
+    .get(parsed.designId, parsed.path) as { content: string } | undefined;
+  if (row === undefined) return NOT_FOUND;
   const contentType = contentTypeFromPath(parsed.path);
   if (row.content.startsWith(SENTINEL_BASE64)) {
     const b64 = row.content.slice(SENTINEL_BASE64.length);

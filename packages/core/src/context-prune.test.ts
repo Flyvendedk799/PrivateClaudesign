@@ -1,6 +1,6 @@
 import type { AgentMessage } from '@mariozechner/pi-agent-core';
 import { describe, expect, it } from 'vitest';
-import { buildTransformContext } from './context-prune.js';
+import { buildToolNameMap, buildTransformContext, topByBytes } from './context-prune.js';
 
 function userMsg(text: string): AgentMessage {
   return {
@@ -106,7 +106,7 @@ describe('buildTransformContext — size-based block compaction with recent-turn
     expect(tc?.arguments?.inputArg).toBe(bulk);
   });
 
-  it('summarizes a large toolCall.arguments for older turns outside the window', async () => {
+  it('Improver1 §1 — summarizes large toolCall.arguments with an echo-proof placeholder', async () => {
     const transform = buildTransformContext();
     const bulk = 'a'.repeat(30_000);
     const messages: AgentMessage[] = [userMsg('build')];
@@ -122,19 +122,26 @@ describe('buildTransformContext — size-based block compaction with recent-turn
       content: Array<{
         type?: string;
         id?: string;
-        arguments?: {
-          __codesign_stripped?: string;
-          __codesign_original_bytes?: number;
-        };
+        name?: string;
+        arguments?: Record<string, unknown>;
       }>;
     };
     const tc = oldAssistant.content.find((c) => c.type === 'toolCall');
     expect(tc?.id).toBe('call-old');
-    // Directive string instead of a `_summarized: true` flag, so the model
-    // can't echo the placeholder as a fresh tool call.
-    expect(tc?.arguments?.__codesign_stripped).toMatch(/REDACTED/);
-    expect(tc?.arguments?.__codesign_stripped).toMatch(/DO NOT reproduce/);
-    expect(tc?.arguments?.__codesign_original_bytes ?? 0).toBeGreaterThan(20_000);
+    // Improver1 §1 — placeholder MUST carry the poison marker so the
+    // tool's execute body can short-circuit on echo. For
+    // str_replace_based_edit_tool specifically the placeholder is
+    // also schema-valid (command='view', path=sentinel) so ajv
+    // doesn't pre-empt our intercept with its generic error.
+    expect(tc?.arguments?.['__do_not_echo_this_object']).toBe(true);
+    expect(tc?.arguments?.['__redaction_message']).toMatch(/REDACTED/);
+    expect(tc?.arguments?.['__redaction_message']).toMatch(/never paste/i);
+    expect((tc?.arguments?.['__redaction_original_bytes'] as number) ?? 0).toBeGreaterThan(20_000);
+    // Belt-and-braces: when the tool name is the text editor, the
+    // placeholder is also schema-valid for it.
+    expect(tc?.name).toBe('str_replace_based_edit_tool');
+    expect(tc?.arguments?.['command']).toBe('view');
+    expect(tc?.arguments?.['path']).toBe('__redacted_history_placeholder__');
   });
 
   it('keeps a large toolResult verbatim inside the recent window', async () => {
@@ -210,6 +217,73 @@ describe('buildTransformContext — size-based block compaction with recent-turn
   });
 });
 
+describe('buildTransformContext — Improver1 §11 tuning overrides', () => {
+  it('respects toolResultLimit override on older turns', async () => {
+    // Default toolResultLimit is 8 KB; with override = 1 KB and a 4 KB
+    // toolResult parked outside the recent window, the result should
+    // become a stub.
+    const tight = buildTransformContext(undefined, { toolResultLimit: 1024 });
+    const bulk = 'y'.repeat(4_000);
+    const messages: AgentMessage[] = [userMsg('x')];
+    messages.push(assistantWithToolCall('call-old', 'a'));
+    messages.push(toolResult('call-old', bulk));
+    for (let i = 0; i < 3; i += 1) {
+      messages.push(assistantWithToolCall(`t${i}`, 'small'));
+      messages.push(toolResult(`t${i}`, 'ok'));
+    }
+    const out = await tight(messages);
+    const tr = out[2] as { content: Array<{ text?: string }> };
+    expect(tr.content[0]?.text?.startsWith('[tool result dropped')).toBe(true);
+
+    // Sanity: the same 4 KB body is well under the default 8 KB cap, so
+    // the unmodified pruner leaves it alone.
+    const loose = buildTransformContext();
+    const out2 = await loose(messages);
+    const tr2 = out2[2] as { content: Array<{ text?: string }> };
+    expect(tr2.content[0]?.text).toBe(bulk);
+  });
+
+  it('respects recentWindow override (window=0 stubs everything older)', async () => {
+    const transform = buildTransformContext(undefined, { recentWindow: 0 });
+    const bulk = 'y'.repeat(20_000);
+    const messages: AgentMessage[] = [
+      userMsg('x'),
+      assistantWithToolCall('call-0', 'a'),
+      toolResult('call-0', bulk),
+    ];
+    const out = await transform(messages);
+    // recentWindow=0 puts even the latest pair outside the window, so
+    // the toolResult collapses to a stub.
+    const tr = out[2] as { content: Array<{ text?: string }> };
+    expect(tr.content[0]?.text?.startsWith('[tool result dropped')).toBe(true);
+  });
+
+  it('respects hardCapBytes override (lower cap fires aggressive mode sooner)', async () => {
+    let aggressiveFired = false;
+    const log = {
+      info: (msg: string) => {
+        if (msg.includes('step=aggressive') && !msg.includes('aggressive_dominant_msgs')) {
+          aggressiveFired = true;
+        }
+      },
+      warn: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+    };
+    // ~30 KB of tiny blocks — well under the default 200 KB hard cap, so
+    // aggressive mode normally never fires. Drop hardCapBytes to 8 KB
+    // and the aggressive-mode log line must appear.
+    const transform = buildTransformContext(log, { hardCapBytes: 8_000 });
+    const messages: AgentMessage[] = [userMsg('go')];
+    for (let i = 0; i < 30; i += 1) {
+      messages.push(assistantWithToolCall(`t${i}`, 'a'.repeat(800)));
+      messages.push(toolResult(`t${i}`, 'b'.repeat(800)));
+    }
+    await transform(messages);
+    expect(aggressiveFired).toBe(true);
+  });
+});
+
 describe('buildTransformContext — active-file exemption (backlog-2 #3)', () => {
   it('keeps the most-recent active-file toolResults un-pruned even under aggressive mode', async () => {
     const transform = buildTransformContext();
@@ -237,35 +311,66 @@ describe('buildTransformContext — active-file exemption (backlog-2 #3)', () =>
     }
   });
 
-  it('only the most-recent active file counts (switch from styles.css to index.html drops styles.css)', async () => {
+  it('Phase 2 — pins up to K=3 distinct active files; both styles.css and index.html survive', async () => {
+    // Multi-file pinning. Older edits on styles.css + newer edits on
+    // index.html — both should be preserved because the active-file set
+    // now holds the K most-recent distinct paths, not just the last one.
     const transform = buildTransformContext();
     const big = 'b'.repeat(20_000);
     const messages: AgentMessage[] = [
       userMsg('go'),
-      // Older edits on styles.css
       assistantWithEditorCall('css-1', 'styles.css'),
       toolResult('css-1', big),
-      // Then newer edits on index.html — index.html becomes active
       assistantWithEditorCall('html-1', 'index.html'),
       toolResult('html-1', big),
-      // Plus enough noise to push into aggressive mode
+      // Push into aggressive mode.
       ...Array.from({ length: 14 }, (_, i) => [
         assistantWithToolCall(`n-${i}`, 'n'.repeat(10_000)),
         toolResult(`n-${i}`, 'n'.repeat(10_000)),
       ]).flat(),
     ];
     const out = await transform(messages);
-    // index.html result kept verbatim
     const htmlRes = out.find(
       (m) => (m as unknown as { toolCallId?: string }).toolCallId === 'html-1',
     ) as { content: Array<{ text: string }> } | undefined;
     expect(htmlRes?.content[0]?.text.startsWith('[tool result dropped')).toBe(false);
-    // styles.css result stubbed (under aggressive mode, no active-file
-    // exemption since index.html displaced it)
     const cssRes = out.find(
       (m) => (m as unknown as { toolCallId?: string }).toolCallId === 'css-1',
     ) as { content: Array<{ text: string }> } | undefined;
-    expect(cssRes?.content[0]?.text.startsWith('[tool result dropped')).toBe(true);
+    expect(cssRes?.content[0]?.text.startsWith('[tool result dropped')).toBe(false);
+  });
+
+  it('Phase 2 — beyond K=3, the oldest file is no longer pinned', async () => {
+    // Edits across 4 distinct paths in order: a.js, b.css, c.html, d.json.
+    // With K=3, the {b.css, c.html, d.json} window survives; a.js drops.
+    const transform = buildTransformContext();
+    const big = 'b'.repeat(20_000);
+    const messages: AgentMessage[] = [
+      userMsg('go'),
+      assistantWithEditorCall('a-1', 'a.js'),
+      toolResult('a-1', big),
+      assistantWithEditorCall('b-1', 'b.css'),
+      toolResult('b-1', big),
+      assistantWithEditorCall('c-1', 'c.html'),
+      toolResult('c-1', big),
+      assistantWithEditorCall('d-1', 'd.json'),
+      toolResult('d-1', big),
+      ...Array.from({ length: 14 }, (_, i) => [
+        assistantWithToolCall(`n-${i}`, 'n'.repeat(10_000)),
+        toolResult(`n-${i}`, 'n'.repeat(10_000)),
+      ]).flat(),
+    ];
+    const out = await transform(messages);
+    for (const id of ['b-1', 'c-1', 'd-1']) {
+      const r = out.find((m) => (m as unknown as { toolCallId?: string }).toolCallId === id) as
+        | { content: Array<{ text: string }> }
+        | undefined;
+      expect(r?.content[0]?.text.startsWith('[tool result dropped')).toBe(false);
+    }
+    const aRes = out.find((m) => (m as unknown as { toolCallId?: string }).toolCallId === 'a-1') as
+      | { content: Array<{ text: string }> }
+      | undefined;
+    expect(aRes?.content[0]?.text.startsWith('[tool result dropped')).toBe(true);
   });
 
   it('falls back gracefully when no text_editor calls have happened (returns null)', async () => {
@@ -302,5 +407,160 @@ describe('buildTransformContext — active-file exemption (backlog-2 #3)', () =>
       if (txt.startsWith('[tool result dropped')) stubbed += 1;
     }
     expect(stubbed).toBeGreaterThanOrEqual(10);
+  });
+});
+
+describe('buildToolNameMap — Backlog-3 §6 local-join', () => {
+  it('indexes every assistant toolCall by id', () => {
+    const messages: AgentMessage[] = [
+      userMsg('hi'),
+      {
+        role: 'assistant',
+        content: [
+          { type: 'toolCall', id: 'a', name: 'view' },
+          { type: 'toolCall', id: 'b', name: 'str_replace_based_edit_tool' },
+        ],
+      } as unknown as AgentMessage,
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'c', name: 'read_url' }],
+      } as unknown as AgentMessage,
+    ];
+    const map = buildToolNameMap(messages);
+    expect(map.get('a')).toBe('view');
+    expect(map.get('b')).toBe('str_replace_based_edit_tool');
+    expect(map.get('c')).toBe('read_url');
+  });
+
+  it('returns empty map for messages with no toolCalls', () => {
+    const map = buildToolNameMap([userMsg('x'), assistantText('y')]);
+    expect(map.size).toBe(0);
+  });
+});
+
+describe('buildTransformContext — per-tool window enforcement (Backlog-3 §6)', () => {
+  // Helper: assistant message that calls a specific tool by name with id.
+  function assistantWithCall(toolCallId: string, name: string): AgentMessage {
+    return {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'ok' },
+        { type: 'toolCall', id: toolCallId, name, arguments: {} },
+      ],
+    } as unknown as AgentMessage;
+  }
+
+  it('view results outside the 1-call per-tool window get stubbed even inside the recent-3 window', async () => {
+    // Three consecutive view calls. The default RECENT_WINDOW=3 would
+    // keep all three verbatim. The PER_TOOL_RECENT_BUDGET.view = 1
+    // override means only the LAST view stays full-size; the older two
+    // get stubbed once they're outside their per-tool budget.
+    const transform = buildTransformContext();
+    const big = 'v'.repeat(20_000);
+    const messages: AgentMessage[] = [
+      userMsg('inspect'),
+      assistantWithCall('v1', 'view'),
+      toolResult('v1', big),
+      assistantWithCall('v2', 'view'),
+      toolResult('v2', big),
+      assistantWithCall('v3', 'view'),
+      toolResult('v3', big),
+    ];
+    const out = await transform(messages);
+    const v1 = out.find((m) => (m as unknown as { toolCallId?: string }).toolCallId === 'v1') as
+      | { content: Array<{ text: string }> }
+      | undefined;
+    const v2 = out.find((m) => (m as unknown as { toolCallId?: string }).toolCallId === 'v2') as
+      | { content: Array<{ text: string }> }
+      | undefined;
+    const v3 = out.find((m) => (m as unknown as { toolCallId?: string }).toolCallId === 'v3') as
+      | { content: Array<{ text: string }> }
+      | undefined;
+    expect(v3?.content[0]?.text).toBe(big);
+    expect(v1?.content[0]?.text.startsWith('[tool result dropped')).toBe(true);
+    expect(v2?.content[0]?.text.startsWith('[tool result dropped')).toBe(true);
+  });
+
+  it('str_replace results stay verbatim across 3 calls (per-tool budget = 3)', async () => {
+    // The default str_replace_based_edit_tool budget is 3 — the last
+    // three results should stay verbatim despite being in the inner
+    // recent window. (No aggressive mode: the bodies are small enough
+    // that HARD_CAP_BYTES isn't crossed.)
+    const transform = buildTransformContext();
+    const body = 's'.repeat(4_000);
+    const messages: AgentMessage[] = [
+      userMsg('edit'),
+      assistantWithCall('s1', 'str_replace_based_edit_tool'),
+      toolResult('s1', body),
+      assistantWithCall('s2', 'str_replace_based_edit_tool'),
+      toolResult('s2', body),
+      assistantWithCall('s3', 'str_replace_based_edit_tool'),
+      toolResult('s3', body),
+    ];
+    const out = await transform(messages);
+    for (const id of ['s1', 's2', 's3']) {
+      const r = out.find((m) => (m as unknown as { toolCallId?: string }).toolCallId === id) as
+        | { content: Array<{ text: string }> }
+        | undefined;
+      expect(r?.content[0]?.text).toBe(body);
+    }
+  });
+});
+
+describe('topByBytes — Improver1 §9 aggressive root-cause logging', () => {
+  it('returns top-N entries sorted by bytes desc', () => {
+    const messages: AgentMessage[] = [
+      userMsg('short'),
+      assistantWithToolCall('big', 'X'.repeat(10_000)),
+      toolResult('big', 'Y'.repeat(2_000)),
+      assistantText('a'.repeat(500)),
+    ];
+    const map = buildToolNameMap(messages);
+    const top = topByBytes(messages, map, 2);
+    expect(top.length).toBe(2);
+    // The largest is the assistant tool-call (10K bytes JSON-encoded
+    // dominates). Result row is second-largest.
+    expect(top[0]?.bytes).toBeGreaterThan(top[1]?.bytes ?? 0);
+    expect(top[0]?.role).toBe('assistant');
+  });
+
+  it('annotates assistant rows with kind and tool name', () => {
+    const messages: AgentMessage[] = [userMsg('go'), assistantWithToolCall('a', 'X'.repeat(5_000))];
+    const map = buildToolNameMap(messages);
+    const top = topByBytes(messages, map, 5);
+    const tcEntry = top.find((e) => e.kind === 'toolCall');
+    expect(tcEntry).toBeDefined();
+    expect(tcEntry?.toolName).toBe('str_replace_based_edit_tool');
+    expect(tcEntry?.toolCallId).toBe('a');
+  });
+
+  it('annotates toolResult rows with the joined tool name from the map', () => {
+    const messages: AgentMessage[] = [
+      userMsg('go'),
+      assistantWithToolCall('z', 'small'),
+      toolResult('z', 'Y'.repeat(8_000)),
+    ];
+    const map = buildToolNameMap(messages);
+    const top = topByBytes(messages, map, 5);
+    const trEntry = top.find((e) => e.kind === 'toolResult');
+    expect(trEntry).toBeDefined();
+    expect(trEntry?.toolName).toBe('str_replace_based_edit_tool');
+    expect(trEntry?.toolCallId).toBe('z');
+  });
+
+  it('handles n=0 by returning empty', () => {
+    const messages: AgentMessage[] = [userMsg('hi'), assistantText('there')];
+    expect(topByBytes(messages, new Map(), 0)).toEqual([]);
+  });
+
+  it('returns idx pointing back at the original message position', () => {
+    const messages: AgentMessage[] = [
+      userMsg('go'),
+      assistantText('x'.repeat(100)),
+      assistantWithToolCall('big', 'Z'.repeat(5_000)),
+    ];
+    const map = buildToolNameMap(messages);
+    const top = topByBytes(messages, map, 1);
+    expect(top[0]?.idx).toBe(2);
   });
 });

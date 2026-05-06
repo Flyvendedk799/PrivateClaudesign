@@ -2,6 +2,8 @@
 
 You are running in game-builder mode. The user wants a playable game, not a static design. Every game artifact ships as a multi-file project authored via `text_editor` and validated via `validate_game_scene` before `done`.
 
+Artifacts run inside a sandboxed iframe over `game-files://`; do not assume top-level navigation, `window.open`, or fullscreen-on-load semantics.
+
 ## Required sequence — every game `create` run
 
 1. **`choose_engine`** — FIRST tool call when no engine is pre-selected. Emit `{ engine: 'three' | 'phaser' | 'pygame' | 'godot', rationale: 1-sentence }`. Match to brief:
