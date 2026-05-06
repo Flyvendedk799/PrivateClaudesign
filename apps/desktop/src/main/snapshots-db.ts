@@ -87,7 +87,10 @@ function openDatabase(filename: string, options?: BetterSqlite3.Options): Databa
   return new Database(filename, { ...options, nativeBinding: resolveNativeBinding() });
 }
 
-function applySchema(db: Database): void {
+/** Idempotent schema initializer. Exported for migration tests that
+ *  pre-seed a legacy table shape and then assert applySchema upgrades it.
+ *  Production callers should prefer `initInMemoryDb` / `initSnapshotsDb`. */
+export function applySchema(db: Database): void {
   // foreign_keys is a per-connection pragma and defaults to OFF; enabling it
   // here is what makes the ON DELETE CASCADE / SET NULL clauses below actually fire.
   db.pragma('foreign_keys = ON');
@@ -136,7 +139,10 @@ function applySchema(db: Database): void {
                         'assistant_text',
                         'tool_call',
                         'artifact_delivered',
-                        'error'
+                        'error',
+                        'checkpoint',
+                        'reasoning_summary',
+                        'continuation_pending'
                       )),
       payload         TEXT NOT NULL,
       snapshot_id     TEXT REFERENCES design_snapshots(id) ON DELETE SET NULL,
@@ -202,6 +208,7 @@ function applySchema(db: Database): void {
       cached_input_tokens        INTEGER NOT NULL DEFAULT 0,
       cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
       cost_usd                   REAL NOT NULL DEFAULT 0,
+      implied_cost_usd           REAL NOT NULL DEFAULT 0,
       total_chunks               INTEGER NOT NULL DEFAULT 0,
       total_ms                   INTEGER NOT NULL DEFAULT 0,
       provider                   TEXT,
@@ -209,6 +216,29 @@ function applySchema(db: Database): void {
       created_at                 TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_run_usage_design ON run_usage(design_id, created_at);
+
+    -- Phase 3 — per-tool latency telemetry. Drives the cost & speed
+    -- analyses in the Phase 4 work (which tools dominate wall-clock,
+    -- which round-trips to fuse). One row per tool_execution_end. The
+    -- main-process logger already emits agent.tool_duration to console;
+    -- this table promotes it to durable storage so post-hoc analysis
+    -- survives an app restart.
+    CREATE TABLE IF NOT EXISTS run_tool_durations (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      schema_version  INTEGER NOT NULL DEFAULT 1,
+      generation_id   TEXT NOT NULL,
+      design_id       TEXT REFERENCES designs(id) ON DELETE CASCADE,
+      tool_name       TEXT NOT NULL,
+      tool_call_id    TEXT,
+      command         TEXT,
+      duration_ms     INTEGER NOT NULL,
+      status          TEXT NOT NULL CHECK (status IN ('done','error')),
+      created_at      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_run_tool_durations_gen
+      ON run_tool_durations(generation_id);
+    CREATE INDEX IF NOT EXISTS idx_run_tool_durations_tool
+      ON run_tool_durations(tool_name);
 
     -- Backlog-3 §10 — per-design / global budget caps. id='global' for
     -- the catch-all entry; otherwise a designId. Either limit field
@@ -344,6 +374,39 @@ function applyAdditiveMigrations(db: Database): void {
     db.exec('ALTER TABLE diagnostic_events ADD COLUMN context_json TEXT');
   }
 
+  // Phase 3 — run_usage v2 schema additions. `implied_cost_usd` lets the
+  // budget UI surface a meaningful number for subscription-provider runs
+  // where `cost_usd` is $0. Existing rows backfill to 0 — they predate
+  // the metric and we don't retroactively recompute (would require the
+  // full token shape recall which we have, but historic re-pricing is
+  // out of scope for this phase).
+  const runUsageCols = (db.prepare('PRAGMA table_info(run_usage)').all() as ColumnInfo[]).map(
+    (c) => c.name,
+  );
+  if (!runUsageCols.includes('implied_cost_usd')) {
+    db.exec('ALTER TABLE run_usage ADD COLUMN implied_cost_usd REAL NOT NULL DEFAULT 0');
+  }
+  // Phase 3 — run_tool_durations table. Per-tool latency telemetry.
+  // Idempotent CREATE; tests rely on this being safe to re-apply.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS run_tool_durations (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      schema_version  INTEGER NOT NULL DEFAULT 1,
+      generation_id   TEXT NOT NULL,
+      design_id       TEXT REFERENCES designs(id) ON DELETE CASCADE,
+      tool_name       TEXT NOT NULL,
+      tool_call_id    TEXT,
+      command         TEXT,
+      duration_ms     INTEGER NOT NULL,
+      status          TEXT NOT NULL CHECK (status IN ('done','error')),
+      created_at      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_run_tool_durations_gen
+      ON run_tool_durations(generation_id);
+    CREATE INDEX IF NOT EXISTS idx_run_tool_durations_tool
+      ON run_tool_durations(tool_name);
+  `);
+
   // One-shot cleanup: chat_messages rows written before the designId race
   // fixes (commits 2a316b7 / f41d1f8) may carry the wrong design_id and
   // cross-contaminate the Sidebar history. Clear the table once; the next
@@ -362,6 +425,71 @@ function applyAdditiveMigrations(db: Database): void {
     db.exec('DELETE FROM chat_messages');
     db.prepare('INSERT INTO db_meta (key, value) VALUES (?, ?)').run(
       'chat_messages_purged_2026_04_20',
+      new Date().toISOString(),
+    );
+  }
+
+  // Phase 2 / 4 — relax chat_messages.kind CHECK to admit the new persisted
+  // kinds: 'checkpoint' (Backlog-3 §5; was already written by the renderer
+  // but the original CHECK rejected it and the row never reached disk on
+  // strict installs), 'reasoning_summary' (Phase 2 — model's adaptive-thinking
+  // rollup) and 'continuation_pending' (Phase 4 — first-class continuation
+  // signal). SQLite has no ALTER TABLE … MODIFY CONSTRAINT, so we rebuild
+  // the table via temporary-swap. Mirrors the design_snapshots pattern
+  // already established below. Idempotent — gated on a db_meta marker
+  // and a sql-string sniff so a second pass is a no-op.
+  const chatKindsV3 = db.prepare('SELECT value FROM db_meta WHERE key = ?').get('chat_kinds_v3') as
+    | { value?: string }
+    | undefined;
+  if (chatKindsV3 === undefined) {
+    const sqlRow = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_messages'")
+      .get() as { sql?: string } | undefined;
+    const needsRebuild =
+      !!sqlRow?.sql &&
+      (!sqlRow.sql.includes("'reasoning_summary'") ||
+        !sqlRow.sql.includes("'continuation_pending'") ||
+        !sqlRow.sql.includes("'checkpoint'"));
+    if (needsRebuild) {
+      const rebuildChat = db.transaction(() => {
+        db.exec(`
+          CREATE TABLE chat_messages_new (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            schema_version  INTEGER NOT NULL DEFAULT 1,
+            design_id       TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+            seq             INTEGER NOT NULL,
+            kind            TEXT NOT NULL CHECK (kind IN (
+                              'user',
+                              'assistant_text',
+                              'tool_call',
+                              'artifact_delivered',
+                              'error',
+                              'checkpoint',
+                              'reasoning_summary',
+                              'continuation_pending'
+                            )),
+            payload         TEXT NOT NULL,
+            snapshot_id     TEXT REFERENCES design_snapshots(id) ON DELETE SET NULL,
+            created_at      TEXT NOT NULL,
+            session_id      INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (design_id, seq)
+          );
+          INSERT INTO chat_messages_new
+            (id, schema_version, design_id, seq, kind, payload, snapshot_id, created_at, session_id)
+            SELECT id, schema_version, design_id, seq, kind, payload, snapshot_id, created_at,
+                   COALESCE(session_id, 0)
+              FROM chat_messages;
+          DROP TABLE chat_messages;
+          ALTER TABLE chat_messages_new RENAME TO chat_messages;
+          CREATE INDEX IF NOT EXISTS idx_chat_design ON chat_messages(design_id, seq);
+          CREATE INDEX IF NOT EXISTS idx_chat_design_session
+            ON chat_messages(design_id, session_id, seq);
+        `);
+      });
+      rebuildChat();
+    }
+    db.prepare('INSERT INTO db_meta (key, value) VALUES (?, ?)').run(
+      'chat_kinds_v3',
       new Date().toISOString(),
     );
   }
@@ -1797,6 +1925,43 @@ export function listDiagnosticEvents(
   return rows.map(rowToDiagnosticEvent);
 }
 
+/** Phase 5 — error-pill aggregator. Counts diagnostic_events in a date
+ *  range, grouped by level. Drives the chrome's "3 provider errors today
+ *  — view" pill. Pure DB query, no IO. */
+export interface DiagnosticEventCounts {
+  info: number;
+  warn: number;
+  error: number;
+  total: number;
+}
+export function countDiagnosticEvents(
+  db: Database,
+  range: { sinceMs: number; untilMs?: number; includeTransient?: boolean } = {
+    sinceMs: 0,
+  },
+): DiagnosticEventCounts {
+  const includeTransient = range.includeTransient ?? false;
+  const untilMs = range.untilMs ?? Number.MAX_SAFE_INTEGER;
+  const params: Array<number> = [range.sinceMs, untilMs];
+  const transientClause = includeTransient ? '' : 'AND transient = 0';
+  const rows = db
+    .prepare(
+      `SELECT level, COUNT(*) AS n
+         FROM diagnostic_events
+         WHERE ts >= ? AND ts <= ? ${transientClause}
+         GROUP BY level`,
+    )
+    .all(...params) as Array<{ level: string; n: number }>;
+  const out: DiagnosticEventCounts = { info: 0, warn: 0, error: 0, total: 0 };
+  for (const r of rows) {
+    if (r.level === 'info' || r.level === 'warn' || r.level === 'error') {
+      out[r.level] = r.n;
+      out.total += r.n;
+    }
+  }
+  return out;
+}
+
 export function pruneDiagnosticEvents(db: Database, maxRows: number): number {
   const result = db
     .prepare(
@@ -1930,7 +2095,10 @@ export function deleteUserSkill(db: Database, id: string): void {
 // from byte counts (which under-count cache writes).
 // ---------------------------------------------------------------------------
 
-export const RUN_USAGE_SCHEMA_VERSION = 1;
+/** Phase 3 — bumped from 1 → 2 with the addition of `implied_cost_usd`.
+ *  Forward-migration of v1 rows is identity (the column is added with a
+ *  default of 0; the read path treats absent values as 0). */
+export const RUN_USAGE_SCHEMA_VERSION = 2;
 
 export interface RunUsageInput {
   generationId: string;
@@ -1939,7 +2107,17 @@ export interface RunUsageInput {
   outputTokens: number;
   cachedInputTokens: number;
   cacheCreationInputTokens: number;
+  /** Real provider-billed cost. For `claude-code-imported` and other
+   *  subscription providers this is `0` (no cash cost). */
   costUsd: number;
+  /** Phase 3 — what an API user would have paid at standard Anthropic
+   *  pricing for the same token shape. Computed via `computeImpliedCost`
+   *  in the renderer / write path. Optional in the input shape only so
+   *  legacy callers (test fixtures + future callers that don't care) can
+   *  omit it; the writer treats absent / undefined as 0 (the row's column
+   *  default). Drives the budget-alert threshold for subscription-provider
+   *  users. */
+  impliedCostUsd?: number;
   totalChunks: number;
   totalMs: number;
   provider?: string | undefined;
@@ -1977,14 +2155,15 @@ export function recordRunUsage(db: Database, input: RunUsageInput): void {
     `INSERT INTO run_usage (
        generation_id, schema_version, design_id,
        input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
-       cost_usd, total_chunks, total_ms, provider, model_id, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       cost_usd, implied_cost_usd, total_chunks, total_ms, provider, model_id, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(generation_id) DO UPDATE SET
        input_tokens                = excluded.input_tokens,
        output_tokens               = excluded.output_tokens,
        cached_input_tokens         = excluded.cached_input_tokens,
        cache_creation_input_tokens = excluded.cache_creation_input_tokens,
        cost_usd                    = excluded.cost_usd,
+       implied_cost_usd            = excluded.implied_cost_usd,
        total_chunks                = excluded.total_chunks,
        total_ms                    = excluded.total_ms,
        provider                    = excluded.provider,
@@ -1998,6 +2177,7 @@ export function recordRunUsage(db: Database, input: RunUsageInput): void {
     input.cachedInputTokens,
     input.cacheCreationInputTokens,
     input.costUsd,
+    input.impliedCostUsd ?? 0,
     input.totalChunks,
     input.totalMs,
     input.provider ?? null,
@@ -2033,6 +2213,77 @@ export function recordRunUsage(db: Database, input: RunUsageInput): void {
     input.cachedInputTokens,
     now,
   );
+}
+
+/** Phase 3 — per-tool latency telemetry insert. Idempotency: not enforced
+ *  (a tool can legitimately be called multiple times per run). The caller
+ *  is responsible for one row per tool_execution_end event. Failures are
+ *  swallowed (the caller is the main process IPC handler — telemetry must
+ *  never break a run). */
+export interface ToolDurationInput {
+  generationId: string;
+  designId: string | null;
+  toolName: string;
+  toolCallId?: string | null;
+  command?: string | null;
+  durationMs: number;
+  status: 'done' | 'error';
+}
+export function recordToolDuration(db: Database, input: ToolDurationInput): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO run_tool_durations (
+       schema_version, generation_id, design_id, tool_name, tool_call_id,
+       command, duration_ms, status, created_at
+     ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.generationId,
+    input.designId,
+    input.toolName,
+    input.toolCallId ?? null,
+    input.command ?? null,
+    Math.max(0, Math.round(input.durationMs)),
+    input.status,
+    now,
+  );
+}
+
+/** Phase 3 — read aggregated per-tool latency for a generation or
+ *  globally. Used by the cost & speed analysis dashboard and by the
+ *  Phase 4 fused-tool acceptance fixtures. */
+export interface ToolDurationStats {
+  toolName: string;
+  count: number;
+  avgMs: number;
+  maxMs: number;
+  errorCount: number;
+}
+export function listToolDurationStats(
+  db: Database,
+  filter: { generationId?: string } = {},
+): ToolDurationStats[] {
+  const where = filter.generationId !== undefined ? 'WHERE generation_id = ?' : '';
+  const params = filter.generationId !== undefined ? [filter.generationId] : [];
+  const rows = db
+    .prepare(
+      `SELECT tool_name AS toolName,
+              COUNT(*)  AS count,
+              AVG(duration_ms) AS avgMs,
+              MAX(duration_ms) AS maxMs,
+              SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS errorCount
+         FROM run_tool_durations
+         ${where}
+         GROUP BY tool_name
+         ORDER BY count DESC`,
+    )
+    .all(...params) as Array<{
+    toolName: string;
+    count: number;
+    avgMs: number;
+    maxMs: number;
+    errorCount: number;
+  }>;
+  return rows;
 }
 
 /** Backlog-3 §10 — budget settings (id='global' or a designId). */

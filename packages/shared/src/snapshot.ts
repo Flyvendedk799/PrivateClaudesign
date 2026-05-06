@@ -87,6 +87,18 @@ export const ChatMessageKind = z.enum([
   // "Stop & checkpoint"; payload carries enough state to resume from
   // the same design with the prior agent's history rehydrated.
   'checkpoint',
+  // Phase 2 — adaptive-thinking rollup persisted at thinking_end →
+  // tool_draft_start. Payload: { fullText, toolName?, durationMs }. The
+  // renderer renders these as a clickable, collapsible reasoning pill;
+  // the full thinking text survives reload without dominating the chat
+  // viewport. Replaces ephemeral streamingThinking-only display.
+  'reasoning_summary',
+  // Phase 4 — first-class continuation marker. The model (or runtime
+  // threshold check) decided the run should pause cleanly instead of
+  // truncating. Payload: { reason, todoSnapshotSeq?, decisionRecap,
+  // outputTokens, contextUsedPct, wallClockMs }. Renderer shows a
+  // non-modal "Continue" button + auto-continue toggle.
+  'continuation_pending',
 ]);
 export type ChatMessageKind = z.infer<typeof ChatMessageKind>;
 
@@ -173,6 +185,50 @@ export interface ChatToolCallPayload {
   durationMs?: number;
   verbGroup: string;
   toolCallId?: string;
+}
+/** Phase 2 — adaptive-thinking rollup. Persisted at thinking_end →
+ *  tool_draft_start so the chat survives reload without losing the model's
+ *  reasoning trace. The renderer collapses these into a single-line pill
+ *  ("Reasoned for 12s · 1.4k tokens — click to expand") so the chat stays
+ *  scannable but the full text is one click away. */
+export interface ChatReasoningSummaryPayload {
+  /** Verbatim concatenation of the run's `thinking_delta` chunks for this
+   *  burst. Token count is approximate and is encoded as
+   *  `tokenEstimate = Math.ceil(fullText.length / 4)` by the writer. */
+  fullText: string;
+  /** Wall-clock duration of the thinking burst. */
+  durationMs: number;
+  /** Approximate token count — `Math.ceil(fullText.length / 4)`. Stored so
+   *  the renderer doesn't have to recompute on every render. */
+  tokenEstimate: number;
+  /** The next tool the model committed to after this thinking burst, if
+   *  any. Captured by the agent stream when tool_draft_start fires; absent
+   *  when the burst was followed by user-visible text instead. */
+  toolName?: string;
+  /** ISO timestamp of when the rollup was finalised (thinking_end). */
+  finalisedAt: string;
+}
+/** Phase 4 — first-class continuation marker. The runtime decided this run
+ *  should pause cleanly (vs. truncate) because one of the documented
+ *  thresholds tripped: context %, output tokens, wall-clock, or the model
+ *  itself emitted `pause_for_continuation`. The renderer shows a non-modal
+ *  "Continue" button + auto-continue toggle. The continuation prompt is
+ *  reconstructed from `decisionRecap`, the latest set_todos, and current
+ *  FS state (NOT a full transcript replay — that's how Phase 4 reclaims
+ *  the cache-miss tail). */
+export interface ChatContinuationPendingPayload {
+  /** Why the run paused. Drives the "Continue" CTA copy and the recap
+   *  prompt template. */
+  reason: 'context_threshold' | 'output_budget' | 'wall_clock' | 'model_requested' | 'manual';
+  /** Latest set_todos seq at pause time, if one exists. The continuation
+   *  prompt embeds that snapshot verbatim. */
+  todoSnapshotSeq?: number;
+  /** ≤400-token rolled-up "what was decided + what is next" written at the
+   *  cut point. Reconstructed by `buildContinuationPrompt` (Phase 4). */
+  decisionRecap: string;
+  outputTokens: number;
+  contextUsedPct: number;
+  wallClockMs: number;
 }
 
 // ---------------------------------------------------------------------------

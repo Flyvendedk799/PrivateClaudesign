@@ -35,6 +35,14 @@ interface InFlightTurn {
    *  first text_delta or tool_call_start of the same turn so the chat
    *  doesn't show two streams at once. */
   thinkingBuffer: string;
+  /** Phase 2 — wall-clock the thinking burst started so we can persist
+   *  durationMs in the reasoning_summary chat row. Set on the first
+   *  thinking_delta of the turn; reset whenever thinkingBuffer is cleared. */
+  thinkingStartedAt: number | null;
+  /** Phase 2 — set true once the rollup for the current thinking burst
+   *  has been persisted as a reasoning_summary row, so we don't double-
+   *  write when both thinking_end and tool_draft_start fire. */
+  thinkingRolledUp: boolean;
   /** Final assistant text persisted on the previous turn_end of this run.
    *  pi-agent-core can re-emit the same trailing assistant prose across
    *  consecutive turns (e.g. tool turn → wrap-up turn that repeats the
@@ -212,6 +220,8 @@ export function useAgentStream(): void {
         generationId: event.generationId,
         textBuffer: '',
         thinkingBuffer: '',
+        thinkingStartedAt: null,
+        thinkingRolledUp: false,
         lastPersistedText: sameRun ? previous.lastPersistedText : null,
         pendingTools: sameRun ? previous.pendingTools : [],
         baselineBytes,
@@ -253,13 +263,45 @@ export function useAgentStream(): void {
       });
     };
 
+    /** Phase 2 — persist a `reasoning_summary` chat row. Called when a
+     *  thinking burst transitions to either a tool draft, a tool call, an
+     *  assistant_text delta, or the agent finishes — whichever fires first
+     *  after thinking content has been collected. The pill survives reload
+     *  without dominating the chat viewport.
+     *
+     *  No-op when the buffer is empty or the burst already rolled up. */
+    const rollupThinkingIfPending = (toolName?: string): void => {
+      const cur = inFlight.current;
+      if (!cur) return;
+      if (cur.thinkingRolledUp) return;
+      const fullText = cur.thinkingBuffer;
+      if (fullText.length === 0) return;
+      const startedAt = cur.thinkingStartedAt ?? Date.now();
+      const durationMs = Math.max(0, Date.now() - startedAt);
+      const tokenEstimate = Math.ceil(fullText.length / 4);
+      cur.thinkingRolledUp = true;
+      void appendChatMessage({
+        designId: cur.designId,
+        kind: 'reasoning_summary',
+        payload: {
+          fullText,
+          durationMs,
+          tokenEstimate,
+          ...(toolName ? { toolName } : {}),
+          finalisedAt: new Date().toISOString(),
+        },
+      });
+    };
+
     const handleTextDelta = (event: AgentStreamEvent) => {
       if (!inFlight.current || typeof event.delta !== 'string') return;
       inFlight.current.textBuffer += event.delta;
       // Once the model emits real assistant text, the thinking summary is
       // no longer informative — clear it so the chat shows the answer, not
-      // both at once.
+      // both at once. Phase 2: roll the buffer up into a persisted
+      // reasoning_summary row first so the reasoning isn't lost on reload.
       if (inFlight.current.thinkingBuffer.length > 0) {
+        rollupThinkingIfPending();
         inFlight.current.thinkingBuffer = '';
         setStreamingThinking(null);
       }
@@ -272,6 +314,14 @@ export function useAgentStream(): void {
 
     const handleThinkingDelta = (event: AgentStreamEvent) => {
       if (!inFlight.current || typeof event.delta !== 'string') return;
+      // Phase 2 — record the wall-clock start of the burst on the first
+      // delta so the rollup row carries an accurate durationMs. Reset
+      // thinkingRolledUp so a fresh burst (post-tool, mid-turn) earns its
+      // own pill instead of bouncing off the prior burst's flag.
+      if (inFlight.current.thinkingBuffer.length === 0) {
+        inFlight.current.thinkingStartedAt = Date.now();
+        inFlight.current.thinkingRolledUp = false;
+      }
       inFlight.current.thinkingBuffer += event.delta;
       setStreamingThinking({
         designId: inFlight.current.designId,
@@ -281,11 +331,13 @@ export function useAgentStream(): void {
     };
 
     const handleThinkingEnd = () => {
-      // Keep the buffer visible until the first text_delta or tool_call_start
-      // of the same turn — that's when the panel naturally fades out and is
-      // replaced by either the answer or the tool stream. Clearing here would
-      // flicker the panel off briefly between thinking_end and the next
-      // visible event.
+      // Phase 2 — thinking_end fires when the model ends a thinking block
+      // but BEFORE the next assistant_text or tool_call_start lands. We do
+      // NOT clear the buffer here (that'd flicker the panel) — but we DO
+      // capture a rollup so a reload mid-pause survives. The rollup is
+      // idempotent so a later transition (text_delta / tool_draft_start)
+      // is a no-op.
+      rollupThinkingIfPending();
     };
 
     const handleHeartbeat = (event: AgentStreamEvent) => {
@@ -317,13 +369,17 @@ export function useAgentStream(): void {
       // silent gap between thinking_end and the runtime's tool_call_start
       // (1–3 s window). The thinking panel is also explicitly cleared
       // here — once the model has committed to a tool, the previous
-      // reasoning is no longer the active narrative.
+      // reasoning is no longer the active narrative. Phase 2: roll the
+      // thinking buffer up into a persisted reasoning_summary row first,
+      // tagged with the upcoming tool name, so the chat keeps the trace
+      // even after the live panel clears.
       if (!inFlight.current) return;
+      const toolName = event.toolName ?? '';
       if (inFlight.current.thinkingBuffer.length > 0) {
+        rollupThinkingIfPending(toolName.length > 0 ? toolName : undefined);
         inFlight.current.thinkingBuffer = '';
         setStreamingThinking(null);
       }
-      const toolName = event.toolName ?? '';
       const toolCallId = event.toolCallId ?? '';
       if (toolName.length === 0) return;
       setStreamingToolDraft({
@@ -370,6 +426,11 @@ export function useAgentStream(): void {
         designId: event.designId,
         textLen: (event.finalText ?? current?.textBuffer ?? '').length,
       });
+      // Phase 2 — orphan thinking buffer can survive past turn_end if no
+      // text/tool transition fired (rare, but happens on turns where the
+      // model emits thinking → done without an intermediate tool draft).
+      // Persist the rollup before we lose the buffer.
+      rollupThinkingIfPending();
       const finalText = event.finalText ?? current?.textBuffer ?? '';
       const trimmed = finalText.trim();
       if (current && trimmed.length > 0 && trimmed !== current.lastPersistedText?.trim()) {
@@ -415,8 +476,9 @@ export function useAgentStream(): void {
       // the tool card itself — clear the thinking stream so the chat
       // doesn't show two competing live indicators. Same logic for the
       // drafting-tool indicator, which fades the moment the real tool
-      // card takes over.
+      // card takes over. Phase 2: persist the rollup before clearing.
       if (current && current.thinkingBuffer.length > 0) {
+        rollupThinkingIfPending(toolName !== 'unknown' ? toolName : undefined);
         current.thinkingBuffer = '';
         setStreamingThinking(null);
       }
@@ -600,6 +662,10 @@ export function useAgentStream(): void {
     };
 
     const handleAgentEnd = (event: AgentStreamEvent) => {
+      // Phase 2 — final flush for any leftover thinking buffer at the
+      // end of a run (rare, but agent_end can land without a preceding
+      // text_delta or tool transition).
+      rollupThinkingIfPending();
       // Flush any throttled fs_updated payload synchronously so the preview
       // store reflects the final html before we read it back for persistence.
       const slot = fsThrottle.current;

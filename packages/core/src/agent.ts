@@ -1471,6 +1471,21 @@ export async function generateViaAgent(
         agent.abort();
         return;
       }
+      // Integration E — continuation pause: when shouldPauseForContinuation
+      // has tripped (context window 80%, output budget, wall-clock, or
+      // the model emitted pause_for_continuation), the IPC layer signals
+      // via getContinuationHint and we abort cleanly. The IPC's
+      // post-abort handler writes a continuation_pending chat row + the
+      // run finishes with `interrupted: true`.
+      const continuationReason = input.getContinuationHint?.();
+      if (continuationReason !== null && continuationReason !== undefined) {
+        log.info('[generate] step=continuation.pause_safe_boundary', {
+          ...ctx,
+          reason: continuationReason,
+        });
+        agent.abort();
+        return;
+      }
       // Backlog-3 §3 — turn-0 detect-then-retry. After the FIRST turn
       // settles, if no tool calls fired AND the assistant emitted
       // non-trivial text, set retryArmed so the streamFn forces tools
@@ -2050,7 +2065,17 @@ export async function generateViaAgent(
   try {
     if (isFirstTurn) {
       const retryOpts: Parameters<typeof withBackoff>[1] = {
+        // Integration D — first-turn retry runs in unbounded mode. The
+        // user's AbortSignal is the cancellation lever; transient
+        // classes retry until backend recovery, capped at 60 s between
+        // attempts. Phase 7 ambition guardrail #4: Anthropic overloads
+        // can last 20+ min and a fixed budget guarantees the user
+        // retries by hand. The maxRetries here bounds NON-transient
+        // 5xx / 429 ladders only — transient classifier in withBackoff
+        // overrides for true overload paths.
         maxRetries: 3,
+        unbounded: true,
+        unboundedCapMs: 60_000,
         classify: (err): RetryDecision => {
           if ((err as RetryBlockedError)[RETRY_BLOCKED]) {
             return { retry: false, reason: 'agent already produced side effects' };

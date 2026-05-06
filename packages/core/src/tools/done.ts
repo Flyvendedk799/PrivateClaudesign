@@ -24,7 +24,10 @@
 
 import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
 import { Type } from '@sinclair/typebox';
+import { VerifyResultCache, hashContent } from '../incremental-verify.js';
 import { type CoreLogger, NOOP_LOGGER } from '../logger.js';
+import { planPlaytest } from '../playtest-planner.js';
+import { diffThemeTokens } from '../theme-token-diff.js';
 import { HEURISTIC_ADVISORY_SOURCES, runHeuristics } from './done-heuristics.js';
 import type { EditBudget } from './edit-budget.js';
 import type { TextEditorFsCallbacks } from './text-editor.js';
@@ -226,6 +229,13 @@ const ADVISORY_SOURCES = new Set<string>([
   'responsive.clip',
   'responsive.probe_failed',
   'darkmode.contrast',
+  // Phase 6 backport — silent theme-token swap + interactivity playtest
+  // surface as advisory rows the model can acknowledge. They never
+  // block done() — a deliberate palette change is fine, and the
+  // playtest-advisory is a heads-up that a Playwright micro-session
+  // would catch interaction failures (the host runs it lazily).
+  'theme-advisory',
+  'playtest-advisory',
   ...HEURISTIC_ADVISORY_SOURCES,
 ]);
 
@@ -250,12 +260,30 @@ const MAX_TOTAL_DONE_CALLS = 6;
  * checks for in-flight self-correction). Extracted 2026-04-28 — see
  * Group C1.
  */
+/** Optional previous-snapshot anchor for advisory checks that compare
+ *  against history (e.g. theme-token drift). The verify tool tracks the
+ *  last-verified content per-run and passes it on subsequent calls so
+ *  silent palette / radius / shadow swaps surface as a row the agent
+ *  can choose to acknowledge or fix. Pure — no side effects. */
+export interface RunArtifactChecksOptions {
+  artifactType?: 'design' | 'game' | undefined;
+  /** Content from the last successful verify of the same path, or
+   *  null on the first verify of a run. */
+  previousContent?: string | null;
+}
+
 export async function runArtifactChecks(
   fs: TextEditorFsCallbacks,
   runtimeVerify: DoneRuntimeVerifier | undefined,
   path: string,
-  artifactType?: 'design' | 'game',
+  artifactTypeOrOptions?: 'design' | 'game' | RunArtifactChecksOptions,
 ): Promise<{ found: boolean; content?: string; errors: DoneError[] }> {
+  const opts: RunArtifactChecksOptions =
+    typeof artifactTypeOrOptions === 'string'
+      ? { artifactType: artifactTypeOrOptions }
+      : (artifactTypeOrOptions ?? {});
+  const artifactType = opts.artifactType;
+  const previousContent = opts.previousContent ?? null;
   const file = fs.view(path);
   if (file === null) {
     return {
@@ -279,6 +307,42 @@ export async function runArtifactChecks(
     ...(isJsxArtifact ? [] : findMissingAlt(file.content)),
     ...runHeuristics(file.content, knownFiles, artifactType === undefined ? {} : { artifactType }),
   ];
+  // Phase 6 backport — silent theme-token swap detection. Only runs in
+  // design mode (game artifacts have their own engine-specific theme
+  // story); only fires when a previous snapshot is supplied so the very
+  // first verify of a run is silent.
+  if (
+    artifactType !== 'game' &&
+    typeof previousContent === 'string' &&
+    previousContent.length > 0
+  ) {
+    const tokenChanges = diffThemeTokens(previousContent, file.content);
+    for (const change of tokenChanges) {
+      const before = change.before.length === 0 ? '<added>' : change.before;
+      const after = change.after.length === 0 ? '<removed>' : change.after;
+      errors.push({
+        message: `Theme token --${change.name} changed ${before} → ${after} (intentional?)`,
+        source: 'theme-advisory',
+      });
+    }
+  }
+  // Phase 6 backport — interaction-playtest advisory. Plans are emitted
+  // as a single advisory row carrying the step count; the runtime
+  // executes the plan via Playwright when the host opts in (lazy-loaded
+  // per the §5 hard constraint). Skipped for game artifacts.
+  if (artifactType !== 'game') {
+    const playtestPlan = planPlaytest(file.content);
+    if (playtestPlan.shouldPlaytest) {
+      const summary = playtestPlan.steps
+        .slice(0, 3)
+        .map((s) => s.action)
+        .join(' / ');
+      errors.push({
+        message: `Interactivity detected — playtest plan: ${playtestPlan.steps.length} steps (${summary})`,
+        source: 'playtest-advisory',
+      });
+    }
+  }
   if (runtimeVerify) {
     try {
       const runtimeErrors = await runtimeVerify(file.content);
@@ -318,6 +382,21 @@ export function makeVerifyArtifactTool(
   editBudget?: EditBudget,
   artifactType?: 'design' | 'game',
 ): AgentTool<typeof VerifyParams, VerifyDetails> {
+  // Phase 4 — content-hash memoization. Repeat verifies with no edit
+  // hit the cache and skip the 200–800 ms re-parse. Per-instance state
+  // (the tool is constructed once per `makeVerifyArtifactTool` call,
+  // which is once per generateViaAgent run) so cross-run collisions
+  // can't produce stale results.
+  type CachedVerify = {
+    summary: string;
+    details: VerifyDetails;
+  };
+  const cache = new VerifyResultCache<CachedVerify>(32);
+  // Phase 6 backport — anchor for theme-token drift detection. Set on
+  // each successful verify (cache hit OR fresh parse) so subsequent
+  // verifies diff against the prior verified state. Per-path so a
+  // multi-file project doesn't cross-contaminate.
+  const lastVerifiedContentByPath = new Map<string, string>();
   return {
     name: 'verify_artifact',
     label: 'Verify (no commit)',
@@ -325,14 +404,40 @@ export function makeVerifyArtifactTool(
       'Run the same lint + runtime checks as `done`, but DO NOT end the run. ' +
       'Use this freely between sections to confirm a partial artifact still ' +
       'renders without errors before doing the next edit. Idempotent and ' +
-      'lighter than `done` — costs ~600 ms vs ~2 s, and never increments ' +
-      "the run's acceptance counter. Returns { status, errors[] } same shape " +
-      'as `done`. Default path is "index.html". Call `done` ONCE at the very ' +
-      'end of the run when you are sure the artifact is final.',
+      'incrementally cached — a re-verify against unchanged file content ' +
+      'returns instantly (Phase 4). Costs ~600 ms on a fresh hash vs ~0 ms ' +
+      "on a cache hit, never increments the run's acceptance counter. " +
+      'Returns { status, errors[] } same shape as `done`. Default path is ' +
+      '"index.html". Call `done` ONCE at the very end of the run when you ' +
+      'are sure the artifact is final.',
     parameters: VerifyParams,
     async execute(_id, params): Promise<AgentToolResult<VerifyDetails>> {
       const path = params.path ?? 'index.html';
-      const result = await runArtifactChecks(fs, runtimeVerify, path, artifactType);
+      // Check the cache first — read the current file content via the
+      // FS callback and key on its hash. If we already verified this
+      // exact (path, content, artifactType) tuple, return the cached
+      // result without re-parsing.
+      const viewResult = fs.view(path);
+      const fileNow = viewResult?.content ?? null;
+      if (fileNow !== null) {
+        const key = {
+          path,
+          contentHash: hashContent(fileNow),
+          artifactType: artifactType ?? null,
+        };
+        const cached = cache.get(key);
+        if (cached !== undefined) {
+          return {
+            content: [{ type: 'text', text: cached.summary }],
+            details: cached.details,
+          };
+        }
+      }
+      const previousContent = lastVerifiedContentByPath.get(path) ?? null;
+      const result = await runArtifactChecks(fs, runtimeVerify, path, {
+        ...(artifactType !== undefined ? { artifactType } : {}),
+        previousContent,
+      });
       const fatal = result.errors.filter((e) => !ADVISORY_SOURCES.has(e.source ?? ''));
       const status: VerifyDetails['status'] = fatal.length === 0 ? 'ok' : 'has_errors';
       if (status === 'ok' && editBudget !== undefined) editBudget.reset();
@@ -345,9 +450,31 @@ export function makeVerifyArtifactTool(
               .map((e) => `- ${e.message}${e.lineno ? ` (line ${e.lineno})` : ''}`)
               .slice(0, 8)
               .join('\n')}`;
+      const details: VerifyDetails = { status, path, errors: result.errors };
+      // Phase 6 backport — record this content as the anchor for the
+      // next theme-drift diff. Done unconditionally on success so a
+      // subsequent verify that adds a single token swap surfaces the
+      // delta cleanly.
+      if (typeof result.content === 'string') {
+        lastVerifiedContentByPath.set(path, result.content);
+      }
+      // Cache only when we have the content we used. `result.content`
+      // is the post-read snapshot from runArtifactChecks; key on that
+      // exact bytes so an evicted+re-fetched read doesn't poison the
+      // cache.
+      if (typeof result.content === 'string') {
+        cache.set(
+          {
+            path,
+            contentHash: hashContent(result.content),
+            artifactType: artifactType ?? null,
+          },
+          { summary, details },
+        );
+      }
       return {
         content: [{ type: 'text', text: summary }],
-        details: { status, path, errors: result.errors },
+        details,
       };
     },
   };

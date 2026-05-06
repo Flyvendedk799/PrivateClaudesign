@@ -118,4 +118,35 @@ describe('isInterToolNarration (plan0305 P2.1)', () => {
     const messages: ChatMessageRow[] = [row(0, 'user', { text: 'go' })];
     expect(isInterToolNarration(messages, 0)).toBe(false);
   });
+
+  it('Phase 2 / FPS-run regression: drops mid-stream intent even when artifact_delivered exists later in the run', () => {
+    // 2026-05-06 design ba2adf62 session 7. Seq 446 ("Now replace the
+    // `_updateDeath` method:") was followed by 40+ tool_calls and finally an
+    // artifact_delivered at seq 488. The old filter walked all the way to the
+    // artifact and returned false (= keep), leaking 15 intent lines per run.
+    // The boundary-first walk decides on the FIRST non-text non-user row.
+    const messages: ChatMessageRow[] = [
+      row(0, 'user', { text: 'improve all character animations' }),
+      row(1, 'tool_call', { toolName: 'set_todos' }),
+      row(2, 'assistant_text', { text: 'Now replace the `_updateDeath` method:' }),
+      row(3, 'tool_call', { toolName: 'str_replace_based_edit_tool' }),
+      row(4, 'tool_call', { toolName: 'str_replace_based_edit_tool' }),
+      // ...30+ more tool_calls and short assistant_text rows omitted...
+      row(40, 'tool_call', { toolName: 'done' }),
+      row(41, 'artifact_delivered', { filename: 'index.html' }),
+    ];
+    expect(isInterToolNarration(messages, 2)).toBe(true);
+  });
+
+  it('Phase 2: short text with assistant_text gap to next tool_call still drops', () => {
+    const messages: ChatMessageRow[] = [
+      row(0, 'user', { text: 'go' }),
+      row(1, 'tool_call', { toolName: 'set_todos' }),
+      row(2, 'assistant_text', { text: 'Next, the shader pass:' }),
+      row(3, 'assistant_text', { text: 'and after that bloom:' }),
+      row(4, 'tool_call', { toolName: 'str_replace_based_edit_tool' }),
+    ];
+    expect(isInterToolNarration(messages, 2)).toBe(true);
+    expect(isInterToolNarration(messages, 3)).toBe(true);
+  });
 });

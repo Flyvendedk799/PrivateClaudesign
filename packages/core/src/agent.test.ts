@@ -655,26 +655,40 @@ describe('generateViaAgent() — first-turn retry', () => {
     }
   });
 
-  it('throws after three consecutive 500s on the first turn (retries exhausted)', async () => {
+  it('Integration D — first-turn 500s retry until the user cancels (unbounded mode)', async () => {
+    // Phase 7 ambition guardrail #4: transient backend failures (5xx /
+    // overload / 429 / network) retry forever with capped backoff until
+    // the user cancels. This replaces the prior fixed 3-attempt budget
+    // — Anthropic overloads can last 20+ min and a fixed budget
+    // guaranteed the user retried by hand (production trace
+    // 2026-05-06 17:25 had 6 manual retries).
     vi.useFakeTimers();
     try {
       scriptedAgent = {
         assistantText: '',
         promptThrows: new HttpError('still down', 500),
       };
+      const ctrl = new AbortController();
       const promise = generateViaAgent({
         prompt: 'design a dashboard',
         history: [],
         model: MODEL,
         apiKey: 'sk-test',
+        signal: ctrl.signal,
       });
-      // Swallow the expected rejection while we drain timers so the test
-      // does not surface it as an unhandled promise.
       const settled = promise.catch((err: unknown) => ({ rejected: err }));
+      // Let several retries fire — drain enough timer cycles to confirm
+      // the loop is unbounded (well past the old 3-attempt cap).
+      for (let i = 0; i < 8; i += 1) {
+        await vi.advanceTimersByTimeAsync(70_000); // 60s cap + jitter
+      }
+      expect(agentCalls[0]?.prompts.length).toBeGreaterThan(3);
+      // Now cancel — the run should abort cleanly instead of riding the
+      // overload forever.
+      ctrl.abort();
       await vi.runAllTimersAsync();
       const outcome = (await settled) as { rejected?: unknown };
       expect(outcome.rejected).toBeDefined();
-      expect(agentCalls[0]?.prompts.length).toBe(3);
     } finally {
       vi.useRealTimers();
     }

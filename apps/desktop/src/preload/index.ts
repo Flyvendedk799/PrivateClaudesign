@@ -276,6 +276,16 @@ const api = {
     ipcRenderer.invoke('codesign:v1:request-wrap-up', { generationId }) as Promise<{
       queued: boolean;
     }>,
+  /** Integration F — request the reconstructed continuation prompt for
+   *  a paused run. Reads the latest set_todos snapshot, the recap from
+   *  the most recent continuation_pending row, and the current FS
+   *  state, and returns a cache-aligned prompt the renderer dispatches
+   *  via the existing sendPrompt path. Throws when no continuation row
+   *  exists for the design. */
+  continueDesign: (designId: string) =>
+    ipcRenderer.invoke('codesign:v1:continue', { designId }) as Promise<{
+      prompt: string;
+    }>,
   generateTitle: (prompt: string) =>
     ipcRenderer.invoke('codesign:v1:generate-title', { prompt }) as Promise<string>,
   /** plan0305 P3.2 — aggregate token + cost totals for one design, summed

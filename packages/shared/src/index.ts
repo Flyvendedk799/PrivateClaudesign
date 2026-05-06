@@ -411,12 +411,25 @@ export {
   PromptAssistMetadataV1,
   UserSkillV1,
 } from './snapshot';
+export {
+  ANTHROPIC_PRICING,
+  computeImpliedCost,
+  contextWindowFor,
+  type CumulativeContextBytes,
+  estimateContextUsedPct,
+  MODEL_CONTEXT_WINDOWS,
+  type ModelPricingEntry,
+  type UsageTokens,
+} from './pricing.js';
+
 export type {
   ChatAppendInput,
   ChatArtifactDeliveredPayload,
   ChatAssistantTextPayload,
+  ChatContinuationPendingPayload,
   ChatErrorPayload,
   ChatMessageRow,
+  ChatReasoningSummaryPayload,
   ChatToolCallPayload,
   ChatUserPayload,
   CommentCreateInput,

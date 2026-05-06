@@ -40,6 +40,74 @@ export function WorkingCard({ calls }: WorkingCardProps) {
   );
 }
 
+/** Phase 1 — formats the at-a-glance "Plan revised — N / M done at hh:mm:ss"
+ *  header used by both the collapsed snapshot pill and (potentially) other
+ *  progress-only summaries. Exported for testability of the formatter alone.
+ *  Time formatting falls back to an empty string when `startedAt` is missing
+ *  or unparseable so the caller can render the pill without a timestamp.
+ */
+export function formatTodoSnapshotSummary(call: ChatToolCallPayload): {
+  done: number;
+  total: number;
+  ts: string;
+  label: string;
+} {
+  const todos = extractTodos(call);
+  const total = todos.length;
+  const done = todos.filter((t) => t.status === 'completed').length;
+  let ts = '';
+  if (call.startedAt) {
+    const d = new Date(call.startedAt);
+    if (!Number.isNaN(d.getTime())) {
+      const pad = (n: number): string => n.toString().padStart(2, '0');
+      ts = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+  }
+  const label =
+    ts.length > 0
+      ? `Plan revised — ${done} / ${total} done at ${ts}`
+      : `Plan revised — ${done} / ${total} done`;
+  return { done, total, ts, label };
+}
+
+/** Phase 1 — collapsed historical `set_todos` snapshot. Renders as a single-line
+ *  pill ("Plan revised — 14 / 28 done at 19:14:22") that expands to the full
+ *  checklist on click. Used for every `set_todos` row that is NOT the latest
+ *  in the chat — it preserves the chronology without anchoring the user's eye
+ *  on a 0/N planning snapshot at the top of the run.
+ */
+export function TodoSnapshotCollapsed({ call }: { call: ChatToolCallPayload }) {
+  const [expanded, setExpanded] = useState(false);
+  const todos = useMemo(() => extractTodos(call), [call]);
+  const summary = useMemo(() => formatTodoSnapshotSummary(call), [call]);
+  if (todos.length === 0) return null;
+  return (
+    <div
+      data-testid="todo-snapshot-collapsed"
+      data-expanded={expanded ? 'true' : 'false'}
+      className="rounded-[var(--radius-md)] border border-[var(--color-border-subtle)] bg-[var(--color-background-secondary)] px-[var(--space-3)] py-[var(--space-1)]"
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded ? 'true' : 'false'}
+        className="w-full flex items-center gap-[var(--space-2)] text-left text-[12px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+      >
+        <ListChecks className="w-[12px] h-[12px] shrink-0" aria-hidden />
+        <span className="truncate">{summary.label}</span>
+        <span className="ml-auto text-[10px] uppercase tracking-wide opacity-70">
+          {expanded ? 'collapse' : 'expand'}
+        </span>
+      </button>
+      {expanded ? (
+        <div className="mt-[var(--space-2)]">
+          <TodoListView todos={todos} inferInProgress={false} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /**
  * Inline todo list — driven by the most recent `set_todos` payload at this
  * chronological position. Consumers (ChatMessageList) flush the tool bucket

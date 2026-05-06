@@ -36,6 +36,33 @@ export type { LoadAllSkillsOptions } from './skills/index.js';
 
 export { generateViaAgent } from './agent.js';
 export type { AgentEvent, GenerateViaAgentDeps } from './agent.js';
+export {
+  buildContinuationPrompt,
+  CONTINUATION_THRESHOLDS,
+  shouldPauseForContinuation,
+} from './continuation.js';
+export type {
+  ContinuationDecision,
+  ContinuationPromptInput,
+  ContinuationReason,
+  ContinuationState,
+  TodoSnapshot,
+} from './continuation.js';
+export {
+  classifyArtifactType,
+  type ArtifactType as ArtifactTypeGuess,
+  type ClassifyResult,
+} from './artifact-type-classifier.js';
+export {
+  planPlaytest,
+  type PlaytestPlan,
+  type PlaytestStep as DesignPlaytestStep,
+} from './playtest-planner.js';
+export {
+  diffThemeTokens,
+  extractCssTokens,
+  type TokenChange,
+} from './theme-token-diff.js';
 export { FRAME_TEMPLATES, type FrameName } from './frames/index.js';
 export { DESIGN_SKILLS, type DesignSkillName } from './design-skills/index.js';
 export {
@@ -202,6 +229,13 @@ export interface GenerateInput {
    *  poll is sync because turn_end fires synchronously — pi-agent-core
    *  awaits the subscriber callback before scheduling the next turn. */
   getCheckpointHint?: (() => boolean) | undefined;
+  /** Integration E — continuation-pause poll. When the IPC sets this
+   *  per-generationId hint (because `shouldPauseForContinuation` tripped
+   *  one of its thresholds), the agent's turn_end subscriber reads it
+   *  here and triggers a clean abort at the next safe boundary. Returned
+   *  payload carries the reason so the IPC layer can write a
+   *  `continuation_pending` chat row with the right cause string. */
+  getContinuationHint?: (() => import('./continuation.js').ContinuationReason | null) | undefined;
   /** Backlog-3 §7 — when true and total turns ≥ 8, run verify_artifact
    *  every Nth str_replace and inject the result as a synthetic
    *  toolResult on the agent's next turn. Off by default until A/B

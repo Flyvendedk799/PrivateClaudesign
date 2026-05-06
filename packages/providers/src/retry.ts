@@ -23,6 +23,11 @@ import {
 import { extractHttpStatus, normalizeProviderError } from './errors';
 import { looksLikeGatewayMissingMessagesApi } from './gateway-compat';
 import { type GenerateOptions, type GenerateResult, complete } from './index';
+import {
+  bufferedRetryDelay,
+  classifyError as classifyErrorPhase5,
+  shouldRetryUntilCancelled,
+} from './unbounded-retry';
 
 export interface RetryReason {
   attempt: number;
@@ -246,6 +251,19 @@ export interface BackoffOptions {
   classify?: (err: unknown) => RetryDecision;
   /** Invoked immediately before each retry sleep. */
   onRetry?: (info: RetryReason) => void;
+  /** Phase 5 / Integration D — unbounded retry mode. When true, transient
+   *  classes (overload / rate-limit / 5xx / network) retry forever with
+   *  capped exponential backoff (max 60 s between attempts) until the
+   *  AbortSignal fires. The 10-attempt hard ceiling becomes 1000; the
+   *  user is responsible for cancellation via the existing Stop button.
+   *  Permanent errors (4xx other than 429, classifier rejected) bail
+   *  immediately as before.
+   *
+   *  This implements the Phase 7 ambition guardrail #4 ("Never use a
+   *  fixed retry budget against transient backend failure"). */
+  unbounded?: boolean;
+  /** Cap on the buffered retry delay between unbounded attempts. */
+  unboundedCapMs?: number;
   /** Abort short-circuits both the in-flight call and the inter-retry sleep. */
   signal?: AbortSignal;
 }
@@ -288,12 +306,17 @@ export async function withBackoff<T>(fn: () => Promise<T>, opts: BackoffOptions 
   const baseDelayMs = opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
   const classify = opts.classify ?? classifyError;
   const signal = opts.signal;
+  const unbounded = opts.unbounded === true;
+  const unboundedCapMs = opts.unboundedCapMs ?? 60_000;
 
   let lastError: unknown;
-  // Hard ceiling for the for-loop so a malicious/buggy classify cannot return
-  // an unbounded retryBudget and pin the loop forever. The per-decision cap
-  // is honoured up to this ceiling.
-  const ABSOLUTE_CEILING = 10;
+  // Bounded mode: hard ceiling 10 so a malicious/buggy classify cannot
+  // return an unbounded retryBudget and pin the loop forever.
+  // Unbounded mode (Phase 5 / Integration D): ceiling 1000, but
+  // permanent errors bail immediately and AbortSignal short-circuits the
+  // sleep — so in practice the loop only burns attempts on transient
+  // classes the upstream is actively healing from.
+  const ABSOLUTE_CEILING = unbounded ? 1000 : 10;
   for (let attempt = 1; attempt <= ABSOLUTE_CEILING; attempt++) {
     if (signal?.aborted) {
       throw new CodesignError('Generation aborted by user', ERROR_CODES.PROVIDER_ABORTED);
@@ -315,12 +338,49 @@ export async function withBackoff<T>(fn: () => Promise<T>, opts: BackoffOptions 
     } catch (err) {
       lastError = err;
       const decision = classify(err);
-      if (shouldStop(decision, attempt, maxRetries)) {
-        if (decision.reason === 'aborted') {
-          throw new CodesignError('Generation aborted by user', ERROR_CODES.PROVIDER_ABORTED, {
-            cause: err,
-          });
+      if (decision.reason === 'aborted') {
+        throw new CodesignError('Generation aborted by user', ERROR_CODES.PROVIDER_ABORTED, {
+          cause: err,
+        });
+      }
+      // Unbounded path: defer the stop decision to Phase 5 primitives.
+      // Permanent errors still bail; transient classes keep retrying
+      // with capped exponential backoff.
+      if (unbounded) {
+        if (!decision.retry) throw err;
+        const status = extractStatus(err);
+        const errorType = err instanceof Error ? extractAnthropicErrorType(err.message) : undefined;
+        const messageStr = err instanceof Error ? err.message : '';
+        const cls = classifyErrorPhase5({
+          ...(typeof status === 'number' ? { status } : {}),
+          ...(errorType !== undefined ? { errorType } : {}),
+          message: messageStr,
+        });
+        if (!shouldRetryUntilCancelled(cls)) {
+          // Phase 5 classifier disagrees — treat as permanent. (Auth-
+          // expired falls through here too; the refresh queue handles
+          // that path separately.)
+          throw err;
         }
+        const baseRaw =
+          decision.retryAfterMs ??
+          bufferedRetryDelay(attempt, {
+            baseMs: baseDelayMs,
+            capMs: unboundedCapMs,
+          });
+        const info: RetryReason = {
+          attempt,
+          totalAttempts: ABSOLUTE_CEILING,
+          delayMs: baseRaw,
+          reason: decision.reason,
+        };
+        if (decision.retryAfterMs !== undefined) info.retryAfterMs = decision.retryAfterMs;
+        opts.onRetry?.(info);
+        await sleepWithAbort(info.delayMs, signal);
+        continue;
+      }
+      // Bounded path (legacy + tests).
+      if (shouldStop(decision, attempt, maxRetries)) {
         throw err;
       }
       const cap = Math.max(maxRetries, decision.retryBudget ?? 0);
@@ -332,6 +392,17 @@ export async function withBackoff<T>(fn: () => Promise<T>, opts: BackoffOptions 
   throw lastError instanceof Error
     ? lastError
     : new CodesignError('withBackoff exhausted', ERROR_CODES.PROVIDER_RETRY_EXHAUSTED);
+}
+
+/** Sniff the Anthropic error-type tag from a JSON-shaped error message
+ *  string. Used by the unbounded retry classifier to recognise
+ *  `overloaded_error` even when the upstream returned a 200 with body
+ *  carrying a JSON error envelope (some gateways do this). */
+function extractAnthropicErrorType(message: string): string | undefined {
+  const m = message.match(
+    /"type"\s*:\s*"(error)"\s*,\s*"error"\s*:\s*\{[^}]*"type"\s*:\s*"([^"]+)"/,
+  );
+  return m?.[2];
 }
 
 export async function completeWithRetry(

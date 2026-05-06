@@ -4,8 +4,33 @@ import { FileText, Pause } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { useCodesignStore } from '../../store';
 import { AssistantText } from './AssistantText';
+import { ContinuationPendingRow } from './ContinuationPendingRow';
+import { ReasoningSummaryPill } from './ReasoningSummaryPill';
 import { UserMessage } from './UserMessage';
-import { InlineTodoList, WorkingCard } from './WorkingCard';
+import { InlineTodoList, TodoSnapshotCollapsed, WorkingCard } from './WorkingCard';
+
+/** Integration F — store-connected wrapper around `ContinuationPendingRow`.
+ *  Pulls `continueRun` and `isGenerating` from the store so the row
+ *  can drive the actual resume flow. Kept as a thin shim because the
+ *  pure renderer component lives in its own file (testable in isolation
+ *  via the formatContinuationLabel pure-fn tests). */
+function ContinuationPendingRowConnected({
+  payload,
+}: {
+  payload: import('@open-codesign/shared').ChatContinuationPendingPayload;
+}) {
+  const continueRun = useCodesignStore((s) => s.continueRun);
+  const isGenerating = useCodesignStore((s) => s.isGenerating);
+  return (
+    <ContinuationPendingRow
+      payload={payload}
+      onContinue={() => {
+        if (isGenerating) return;
+        void continueRun();
+      }}
+    />
+  );
+}
 
 /** Visual marker between messages from different in-design sessions
  *  (Improver1 follow-up — "new conversation" feature). Older rows
@@ -126,19 +151,82 @@ export function isInterToolNarration(messages: readonly ChatMessageRow[], index:
   if (!msg || msg.kind !== 'assistant_text') return false;
   const text = (msg.payload as { text?: string } | undefined)?.text ?? '';
   if (text.length > MAX_NARRATION_CHARS) return false;
-  let toolCallSeen = false;
+  // Walk forward until the FIRST non-text non-user boundary. The kind of
+  // that boundary decides:
+  //   - tool_call           → mid-stream "Now I'll …" intent line → DROP
+  //   - artifact_delivered  → final delivery boundary             → KEEP
+  //   - error               → context for a failure               → KEEP
+  //   - user                → end of turn with no further action  → KEEP
+  //   - end of stream       → live tail                           → KEEP
+  // This is stricter than "any tool_call exists somewhere before
+  // artifact_delivered" — that older form falsely kept every mid-stream
+  // intent line in any run that produced an artifact (FPS run session 7,
+  // 2026-05-06: 38 tool_calls and 15 short intent lines all leaked through
+  // because seq 488 artifact_delivered terminated the walk).
   for (let j = index + 1; j < messages.length; j += 1) {
     const next = messages[j];
     if (!next) break;
-    if (next.kind === 'user') break;
-    if (next.kind === 'tool_call') {
-      toolCallSeen = true;
-      continue;
-    }
+    if (next.kind === 'user') return false;
     if (next.kind === 'assistant_text') continue;
+    if (next.kind === 'tool_call') return true;
     return false;
   }
-  return toolCallSeen;
+  return false;
+}
+
+/** Phase 1 — render plan for a chat's `set_todos` snapshots.
+ *
+ *  A long run typically fires `set_todos` 3-5 times (planning → mid-progress
+ *  → final). Rendering each as a full `<InlineTodoList>` puts the 0/N
+ *  planning snapshot at the TOP of the user's eye-line, anchoring the
+ *  perception that "no todos got done" even when the latest snapshot is
+ *  N/N. Run trace 2026-05-06 design ba2adf62 session 7: 0/28 → 14/28 →
+ *  28/28 — the user reported "started from scratch with no todos done"
+ *  because the 0/28 card was the first one they saw.
+ *
+ *  The plan returns:
+ *    - collapsedSeqs: which set_todos rows render as one-line history pills
+ *    - inlineLatestSeq: the chronological-position latest (when not generating)
+ *    - hoistedLatestSeq: the latest, hoisted to a sticky banner (when generating)
+ *
+ *  When `pendingToolCalls` carries a set_todos, the pending-tool render path
+ *  owns the live snapshot; all persisted snapshots are then historical. */
+export interface TodoSnapshotPlan {
+  collapsedSeqs: ReadonlySet<number>;
+  inlineLatestSeq: number | null;
+  hoistedLatestSeq: number | null;
+}
+export function planTodoSnapshots(
+  messages: readonly ChatMessageRow[],
+  hasPendingTodos: boolean,
+  isGenerating: boolean,
+): TodoSnapshotPlan {
+  const todoSeqs: number[] = [];
+  for (const m of messages) {
+    if (
+      m.kind === 'tool_call' &&
+      (m.payload as ChatToolCallPayload | undefined)?.toolName === 'set_todos'
+    ) {
+      todoSeqs.push(m.seq);
+    }
+  }
+  if (todoSeqs.length === 0) {
+    return { collapsedSeqs: new Set(), inlineLatestSeq: null, hoistedLatestSeq: null };
+  }
+  if (hasPendingTodos) {
+    return {
+      collapsedSeqs: new Set(todoSeqs),
+      inlineLatestSeq: null,
+      hoistedLatestSeq: null,
+    };
+  }
+  const latest = todoSeqs[todoSeqs.length - 1] as number;
+  const collapsedSeqs = new Set(todoSeqs);
+  collapsedSeqs.delete(latest);
+  if (isGenerating) {
+    return { collapsedSeqs, inlineLatestSeq: null, hoistedLatestSeq: latest };
+  }
+  return { collapsedSeqs, inlineLatestSeq: latest, hoistedLatestSeq: null };
 }
 
 /**
@@ -211,24 +299,21 @@ export function ChatMessageList({
     bucket = null;
   };
 
-  // Pre-compute which set_todos rows are "latest" so the InlineTodoList
-  // can apply the in-progress inference only to the actual most-recent
-  // checklist (older lists are historical and shouldn't pulse). The latest
-  // is whichever set_todos appears last across pendingToolCalls (newer
-  // wins) OR persisted messages.
-  let latestPersistedTodosSeq = -1;
-  if (!pendingToolCalls?.some((c) => c.toolName === 'set_todos')) {
+  // Phase 1 — pre-compute which set_todos rows render as full vs collapsed
+  // vs hoisted (sticky). The pure helper drives both the in-place rendering
+  // below AND the sticky-top banner injected just before the items map.
+  const hasPendingTodos = Boolean(pendingToolCalls?.some((c) => c.toolName === 'set_todos'));
+  const todoPlan = planTodoSnapshots(messages, hasPendingTodos, Boolean(isGenerating));
+  const hoistedLatestCall: ChatToolCallPayload | null = (() => {
+    if (todoPlan.hoistedLatestSeq === null) return null;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const m = messages[i];
-      if (
-        m?.kind === 'tool_call' &&
-        (m.payload as ChatToolCallPayload | undefined)?.toolName === 'set_todos'
-      ) {
-        latestPersistedTodosSeq = m.seq;
-        break;
+      if (m?.seq === todoPlan.hoistedLatestSeq && m.kind === 'tool_call') {
+        return (m.payload as ChatToolCallPayload | undefined) ?? null;
       }
     }
-  }
+    return null;
+  })();
 
   // Track session_id transitions so we can inject a "Previous conversation"
   // divider above each new session. Rows older than the in-design new-session
@@ -258,12 +343,23 @@ export function ChatMessageList({
       // WorkingCard would pull the todos to the bottom of the cluster).
       if (call.toolName === 'set_todos') {
         flush();
+        if (todoPlan.hoistedLatestSeq === msg.seq) {
+          // Hoisted to the sticky banner above — skip in-place render.
+          continue;
+        }
+        if (todoPlan.collapsedSeqs.has(msg.seq)) {
+          items.push({
+            key: `todos-${msg.seq}`,
+            node: <TodoSnapshotCollapsed call={call} />,
+          });
+          continue;
+        }
         items.push({
           key: `todos-${msg.seq}`,
           node: (
             <InlineTodoList
               call={call}
-              isLatest={msg.seq === latestPersistedTodosSeq}
+              isLatest={msg.seq === todoPlan.inlineLatestSeq}
               isGenerating={Boolean(isGenerating)}
             />
           ),
@@ -403,6 +499,31 @@ export function ChatMessageList({
           </div>
         ),
       });
+    } else if (msg.kind === 'continuation_pending') {
+      // Phase 4 — first-class continuation marker. Renders a non-modal
+      // Run-paused panel with a Continue button. Integration F wires
+      // onContinue to the store action that asks main to rebuild the
+      // continuation prompt and dispatches it through sendPrompt.
+      const p = (msg.payload ?? null) as
+        | import('@open-codesign/shared').ChatContinuationPendingPayload
+        | null;
+      if (!p) continue;
+      items.push({
+        key: `cp-${msg.seq}`,
+        node: <ContinuationPendingRowConnected payload={p} />,
+      });
+    } else if (msg.kind === 'reasoning_summary') {
+      // Phase 2 — adaptive-thinking rollup persisted at burst → tool/text
+      // transitions. Renders as a compact, click-to-expand pill so the
+      // chat stays scannable while preserving the full reasoning trace.
+      const p = (msg.payload ?? null) as
+        | import('@open-codesign/shared').ChatReasoningSummaryPayload
+        | null;
+      if (!p) continue;
+      items.push({
+        key: `rs-${msg.seq}`,
+        node: <ReasoningSummaryPill payload={p} />,
+      });
     } else if (msg.kind === 'checkpoint') {
       // Backlog-3 §5 — checkpoint row with Resume CTA. Payload carries
       // turn count + elapsed + last assistant text preview.
@@ -426,6 +547,16 @@ export function ChatMessageList({
 
   return (
     <div ref={scrollRef} className="space-y-[var(--space-5)]">
+      {hoistedLatestCall ? (
+        <div
+          key="todos-sticky"
+          data-testid="todos-sticky-latest"
+          className="chat-todo-sticky bg-[var(--color-background-primary)]/95 backdrop-blur-[2px] border-b border-[var(--color-border-subtle)] -mx-[var(--space-3)] px-[var(--space-3)] py-[var(--space-2)]"
+          style={{ position: 'sticky', top: 0, zIndex: 5 }}
+        >
+          <InlineTodoList call={hoistedLatestCall} isLatest isGenerating />
+        </div>
+      ) : null}
       {items.map((item) => (
         <div key={item.key}>{item.node}</div>
       ))}

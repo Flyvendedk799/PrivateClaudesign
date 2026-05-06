@@ -5,13 +5,17 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   type AgentEvent,
+  CONTINUATION_THRESHOLDS,
   type CoreLogger,
   type GenerateImageAssetRequest,
   type GenerateImageAssetResult,
   applyComment,
+  buildContinuationPrompt,
+  classifyArtifactType,
   generate,
   generateTitle,
   generateViaAgent,
+  shouldPauseForContinuation,
 } from '@open-codesign/core';
 // Backlog-3 §8 — DESIGN_SKILLS (~204KB) and FRAME_TEMPLATES (~48KB) seed
 // the per-generation virtual fs but are never read until the first run
@@ -61,6 +65,8 @@ import {
   type GameEngine,
   GeneratePayload,
   GeneratePayloadV1,
+  computeImpliedCost,
+  estimateContextUsedPct,
 } from '@open-codesign/shared';
 import { computeFingerprint } from '@open-codesign/shared/fingerprint';
 import type BetterSqlite3 from 'better-sqlite3';
@@ -70,7 +76,7 @@ import type { AgentStreamEvent } from '../preload/index';
 import { registerAppMenu } from './app-menu';
 import { showBootDialog, writeBootErrorSync } from './boot-fallback';
 import { registerChatMessagesIpc, registerChatMessagesUnavailableIpc } from './chat-messages-ipc';
-import { ensureFreshClaudeCodeToken } from './claude-code-token-refresh';
+import { queueClaudeCodeRefresh, setRefreshQueueWindow } from './claude-code-refresh-queue';
 import {
   CHATGPT_CODEX_PROVIDER_ID,
   getCodexTokenStore,
@@ -145,16 +151,19 @@ import { withRun } from './runContext';
 import { resolveUseAgentRuntime } from './runtime-flag';
 import { registerSkillsIpc, registerSkillsUnavailableIpc } from './skills-ipc';
 import {
+  appendChatMessage,
   getBudget,
   getDesign,
   getDesignUsageTotals,
   listChatMessages,
   listDailyUsage,
+  listDesignFiles,
   listUserSkills,
   normalizeDesignFilePath,
   pruneDiagnosticEvents,
   recordDiagnosticEvent,
   recordRunUsage,
+  recordToolDuration,
   safeInitSnapshotsDb,
   upsertBudget,
   upsertDesignFile,
@@ -244,11 +253,17 @@ function createWindow(): void {
   });
 
   mainWindow.on('ready-to-show', () => mainWindow?.show());
+  // Integration C — wire the BrowserWindow into the auth-refresh queue
+  // so its lifecycle hooks (started / succeeded / failed) can emit IPC
+  // events the renderer turns into a "Refreshing Claude Code credential…"
+  // toast. Re-pointed on 'closed' so a stale window ref never gets used.
+  setRefreshQueueWindow(mainWindow);
   // Null the reference on close so stale IPC sends from async emitters
   // (autoUpdater, long-running generate runs) become clean no-ops rather
   // than throwing "Object has been destroyed" on a discarded webContents.
   mainWindow.on('closed', () => {
     mainWindow = null;
+    setRefreshQueueWindow(null);
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
@@ -1376,6 +1391,11 @@ function registerIpcHandlers(db: Database | null): void {
         if (event.type === 'message_update') {
           const ame = event.assistantMessageEvent;
           if (ame.type === 'text_delta' && typeof ame.delta === 'string') {
+            // Integration E — accumulate output bytes for the
+            // continuation-pause threshold check at turn_end. Bytes
+            // ≈ 4 chars per token is the standard ballpark; we
+            // refine when run_usage lands the real count.
+            cumulativeOutputBytes.set(id, (cumulativeOutputBytes.get(id) ?? 0) + ame.delta.length);
             sendEvent({ ...baseCtx, type: 'text_delta', delta: ame.delta });
           } else if (ame.type === 'toolcall_start') {
             // The model has started forming a tool call. Extract the tool
@@ -1454,6 +1474,24 @@ function registerIpcHandlers(db: Database | null): void {
           const startedAt = toolStartedAt.get(event.toolCallId) ?? Date.now();
           toolStartedAt.delete(event.toolCallId);
           const durationMs = Date.now() - startedAt;
+          // Integration G — accumulate the result bytes so the
+          // contextUsedPct estimator can include them. Each tool
+          // result lands in pi-agent-core's conversation history and
+          // becomes next-turn input on re-replay. JSON.stringify is a
+          // good ballpark for the wire size; a thrown serializer
+          // (circular ref, BigInt) just falls through silently.
+          try {
+            const resultStr = JSON.stringify(event.result ?? null);
+            const resultBytes = typeof resultStr === 'string' ? resultStr.length : 0;
+            cumulativeToolResultBytes.set(
+              id,
+              (cumulativeToolResultBytes.get(id) ?? 0) + resultBytes,
+            );
+          } catch {
+            /* non-serializable result — skip the byte estimate, run
+             * continues unaffected. The continuation threshold's
+             * other inputs (output bytes, wall-clock) still fire. */
+          }
           // Per-tool latency telemetry — emits one log line per tool call so
           // post-hoc analysis (`grep agent.tool_duration`) can spot slow
           // tools without requiring SQLite queries against chat_messages.
@@ -1462,6 +1500,27 @@ function registerIpcHandlers(db: Database | null): void {
             tool: event.toolName,
             ms: durationMs,
           });
+          // Phase 3 — promote tool-duration telemetry to durable storage so
+          // post-hoc analysis survives an app restart. Telemetry must never
+          // break a run, hence the swallow.
+          if (db !== null) {
+            try {
+              recordToolDuration(db, {
+                generationId: id,
+                designId,
+                toolName: event.toolName ?? 'unknown',
+                ...(typeof event.toolCallId === 'string' ? { toolCallId: event.toolCallId } : {}),
+                durationMs,
+                status: event.isError === true ? 'error' : 'done',
+              });
+            } catch (toolDurErr) {
+              logIpc.warn('run_tool_duration.persist.fail', {
+                generationId: id,
+                tool: event.toolName,
+                message: toolDurErr instanceof Error ? toolDurErr.message : String(toolDurErr),
+              });
+            }
+          }
           // Track the slowest single tool of the run so the run_summary
           // surfaces it. Only `done` (BrowserWindow load) and
           // `render_preview` (also BrowserWindow) routinely cross 500 ms;
@@ -1547,6 +1606,57 @@ function registerIpcHandlers(db: Database | null): void {
           // delivered via fs_updated / artifact_delivered, not the chat text.
           const finalText = rawText.replace(/<artifact[\s\S]*?<\/artifact>/g, '').trim();
           sendEvent({ ...baseCtx, type: 'turn_end', finalText });
+          // Integration E — evaluate the continuation thresholds at
+          // each safe boundary. When one trips, set the hint that the
+          // agent's turn_end subscriber polls via getContinuationHint.
+          // The actual abort happens inside the agent via that poll;
+          // this just publishes the decision.
+          if (!continuationHints.has(id)) {
+            const startedAt = generationStartedAt.get(id) ?? Date.now();
+            const outputBytes = cumulativeOutputBytes.get(id) ?? 0;
+            const toolResultBytes = cumulativeToolResultBytes.get(id) ?? 0;
+            const initialBytes = initialPromptBytes.get(id) ?? 0;
+            // 4 chars per token is the standard ballpark. We never
+            // *cap* the model — this is purely a "should pause" signal.
+            const outputTokens = Math.ceil(outputBytes / 4);
+            const wallClockMs = Date.now() - startedAt;
+            // Integration G — context-used estimate now drives the
+            // `context_threshold` rule. Sums the initial prompt + the
+            // rolling output and tool-result counters (everything that
+            // becomes next-turn input via pi-agent-core's re-replay).
+            const contextUsedPct = estimateContextUsedPct(
+              {
+                initialPromptBytes: initialBytes,
+                outputBytes,
+                toolResultBytes,
+              },
+              input.model.modelId,
+            );
+            const decision = shouldPauseForContinuation({
+              contextUsedPct,
+              outputTokens,
+              wallClockMs,
+              modelEmittedPause: false,
+            });
+            if (decision.pause && decision.reason !== undefined) {
+              continuationHints.set(id, decision.reason);
+              logIpc.info('continuation.pause_signaled', {
+                generationId: id,
+                reason: decision.reason,
+                outputTokens,
+                wallClockMs,
+                contextUsedPct: Number(contextUsedPct.toFixed(3)),
+                threshold:
+                  decision.reason === 'context_threshold'
+                    ? CONTINUATION_THRESHOLDS.contextUsedPct
+                    : decision.reason === 'output_budget'
+                      ? CONTINUATION_THRESHOLDS.outputTokens
+                      : decision.reason === 'wall_clock'
+                        ? CONTINUATION_THRESHOLDS.wallClockMs
+                        : null,
+              });
+            }
+          }
           return;
         }
         if (event.type === 'agent_end') {
@@ -1580,6 +1690,32 @@ function registerIpcHandlers(db: Database | null): void {
    *  subscriber so cancellation lands at a safe boundary instead of
    *  mid-stream. */
   const checkpointHints = new Map<string, boolean>();
+
+  /** Integration E — continuation hints per generationId. Polled by the
+   *  agent's turn_end subscriber via `getContinuationHint`; set by the
+   *  per-turn cumulative-state inspection below when
+   *  `shouldPauseForContinuation` trips. Carries the reason so the
+   *  post-run handler writes a `continuation_pending` row with the
+   *  right cause. */
+  const continuationHints = new Map<string, import('@open-codesign/core').ContinuationReason>();
+  /** Per-generation cumulative output tokens. Approximated from
+   *  text_delta lengths; refined when run_usage lands the final count.
+   *  Drives the `output_budget` continuation threshold. */
+  const cumulativeOutputBytes = new Map<string, number>();
+  /** Integration G — per-generation cumulative tool_result bytes (the
+   *  JSON the model receives back from each tool execution). Each
+   *  result lands in the conversation history and becomes next-turn
+   *  input on pi-agent-core's full re-replay. Feeds the
+   *  estimateContextUsedPct alongside output bytes. */
+  const cumulativeToolResultBytes = new Map<string, number>();
+  /** Integration G — per-generation snapshot of the initial prompt +
+   *  replayed history bytes at chunk_start. Together with the rolling
+   *  output and tool-result counters this approximates the on-wire
+   *  context size at any turn boundary, which feeds the
+   *  `context_threshold` continuation rule. */
+  const initialPromptBytes = new Map<string, number>();
+  /** Per-generation start timestamp for the wall-clock threshold. */
+  const generationStartedAt = new Map<string, number>();
 
   /** Promise-level dedup so an accidental double-IPC of the same generation
    *  collapses to one provider call. See generate-dedup.ts for the strategy. */
@@ -1737,7 +1873,7 @@ function registerIpcHandlers(db: Database | null): void {
         // OAuth refresh for `claude-code-imported`: runs before the key
         // resolver so the now-fresh token gets read out of the cached
         // config. No-op for every other provider.
-        await ensureFreshClaudeCodeToken(active.model.provider);
+        await queueClaudeCodeRefresh(active.model.provider);
         apiKey = await resolveApiKeyForActive(active.model.provider, allowKeyless);
       } catch (err) {
         inFlight.delete(id);
@@ -1816,8 +1952,84 @@ function registerIpcHandlers(db: Database | null): void {
         baseUrl: baseUrl ?? '<default>',
       });
 
+      // Integration B — pre-flight artifact-type classifier. Runs the
+      // user's prompt through a keyword-scored guess; logs the result
+      // and emits a low-priority diagnostic_event when confidence is
+      // very low so post-hoc analysis can correlate "wrong artifact
+      // shape" failures with weak briefs. Skipped for game-mode runs
+      // (the game pipeline has its own genre-spec gate). Synchronous
+      // pure call, never throws, never blocks generation.
+      if (payload.artifactMode !== 'game' && payload.history.length === 0) {
+        try {
+          const classify = classifyArtifactType(payload.prompt);
+          logIpc.info('preflight.artifact_type', {
+            generationId: id,
+            type: classify.type,
+            confidence: Number(classify.confidence.toFixed(2)),
+            top3: classify.candidates
+              .slice(0, 3)
+              .map((c) => `${c.type}=${c.score}`)
+              .join(','),
+          });
+          if (classify.confidence < 0.3 && db !== null) {
+            try {
+              recordDiagnosticEvent(db, {
+                level: 'info',
+                code: 'PREFLIGHT_LOW_CONFIDENCE',
+                scope: 'generate',
+                runId: id,
+                fingerprint: `preflight-low-confidence-${classify.type}`,
+                message: `Artifact-type classifier confidence ${classify.confidence.toFixed(2)} (top: ${classify.type}). Brief may be ambiguous.`,
+                stack: undefined,
+                transient: false,
+                context: {
+                  classifierGuess: classify.type,
+                  confidence: classify.confidence,
+                  top3: classify.candidates.slice(0, 3),
+                  generationId: id,
+                },
+              });
+            } catch (diagErr) {
+              logIpc.warn('preflight.diag.persist.fail', {
+                generationId: id,
+                message: diagErr instanceof Error ? diagErr.message : String(diagErr),
+              });
+            }
+          }
+        } catch (preflightErr) {
+          // Pre-flight is advisory — never break a run.
+          logIpc.warn('preflight.classifier.fail', {
+            generationId: id,
+            message: preflightErr instanceof Error ? preflightErr.message : String(preflightErr),
+          });
+        }
+      }
+
       const t0 = Date.now();
+      generationStartedAt.set(id, t0);
+      cumulativeOutputBytes.set(id, 0);
+      cumulativeToolResultBytes.set(id, 0);
+      // Integration G — snapshot the initial on-wire context size as
+      // an approximation: prompt bytes + sum of every prior message's
+      // text length + a small system-prompt allowance. The system
+      // prompt itself is composed by core later; we estimate
+      // conservatively at 8 KB so the threshold check doesn't
+      // under-count headroom. Not exact — pi-agent-core composes the
+      // final prompt — but close enough to drive the 0.8-pause rule.
+      const SYSTEM_PROMPT_ESTIMATE_BYTES = 8 * 1024;
+      let initialBytes = SYSTEM_PROMPT_ESTIMATE_BYTES + payload.prompt.length;
+      for (const msg of payload.history) {
+        if (typeof msg.content === 'string') initialBytes += msg.content.length;
+      }
+      initialPromptBytes.set(id, initialBytes);
       let clearTimeoutGuard: () => void = () => {};
+      // Phase 3 — chunk counter, set up as a variable so Phase 4's
+      // continuation work can increment it on each pause/resume cycle
+      // without requiring further telemetry plumbing. Starts at 1 (one
+      // chunk per run is the current default; the variable is captured
+      // by `recordRunUsage` below). Re-marked as `let` for Integration E
+      // (the continuation pause needs to bump it).
+      const chunkCount = 1;
       // Single-session default. Production trace 2026-04-27 demonstrated
       // that chunked execution + history-reload-between-chunks is the
       // wrong abstraction for design generation: it forces re-planning,
@@ -1884,6 +2096,10 @@ function registerIpcHandlers(db: Database | null): void {
             // Backlog-3 §5 — checkpoint-cancel poll wired to the
             // per-generationId hint Map.
             getCheckpointHint: () => checkpointHints.get(id) === true,
+            // Integration E — continuation-pause poll wired to the
+            // per-generationId hint Map. Returns a reason when the
+            // turn_end threshold check has tripped, null otherwise.
+            getContinuationHint: () => continuationHints.get(id) ?? null,
             // Improver1 §6 — wire auto-verify on by default. The
             // Backlog-3 §7 logic gates internally on
             // VERIFY_MIN_TURN=8 and caps at 3 fires per run, so
@@ -1949,6 +2165,18 @@ function registerIpcHandlers(db: Database | null): void {
         });
         if (db !== null) {
           try {
+            // Phase 3 — implied cost computed from the same token shape
+            // we already capture. Lets the budget UI surface a meaningful
+            // number for subscription-provider runs (where `costUsd` is 0).
+            const impliedCostUsd = computeImpliedCost(
+              {
+                inputTokens: finalResult.inputTokens,
+                outputTokens: finalResult.outputTokens,
+                cachedInputTokens: finalResult.cachedInputTokens,
+                cacheCreationInputTokens: finalResult.cacheCreationInputTokens,
+              },
+              active.model.modelId,
+            );
             recordRunUsage(db, {
               generationId: id,
               designId: payload.designId ?? null,
@@ -1957,7 +2185,8 @@ function registerIpcHandlers(db: Database | null): void {
               cachedInputTokens: finalResult.cachedInputTokens,
               cacheCreationInputTokens: finalResult.cacheCreationInputTokens,
               costUsd: finalResult.costUsd,
-              totalChunks: 1,
+              impliedCostUsd,
+              totalChunks: chunkCount,
               totalMs: Date.now() - t0,
               provider: active.model.provider,
               modelId: active.model.modelId,
@@ -1969,6 +2198,56 @@ function registerIpcHandlers(db: Database | null): void {
             });
           }
         }
+        // Integration E — when the continuation hint tripped during
+        // this run, persist a `continuation_pending` chat row so the
+        // renderer can show the Run-paused panel and offer a Continue
+        // button. The hint is consumed here so a subsequent retry of
+        // the same generationId starts fresh.
+        const continuationReason = continuationHints.get(id);
+        if (continuationReason !== undefined && payload.designId !== undefined && db !== null) {
+          try {
+            const wallClockMs = Date.now() - (generationStartedAt.get(id) ?? t0);
+            // Integration G — recompute the exact contextUsedPct at row-
+            // write time so the persisted payload reflects the final
+            // cumulative state, not whatever the trigger turn saw.
+            const contextUsedPctFinal = estimateContextUsedPct(
+              {
+                initialPromptBytes: initialPromptBytes.get(id) ?? 0,
+                outputBytes: cumulativeOutputBytes.get(id) ?? 0,
+                toolResultBytes: cumulativeToolResultBytes.get(id) ?? 0,
+              },
+              active.model.modelId,
+            );
+            appendChatMessage(db, {
+              designId: payload.designId,
+              kind: 'continuation_pending',
+              payload: {
+                reason: continuationReason,
+                decisionRecap: finalResult.message ?? '',
+                outputTokens: finalResult.outputTokens,
+                contextUsedPct: contextUsedPctFinal,
+                wallClockMs,
+              },
+            });
+            logIpc.info('continuation.row_persisted', {
+              generationId: id,
+              reason: continuationReason,
+              wallClockMs,
+              outputTokens: finalResult.outputTokens,
+            });
+          } catch (cpErr) {
+            logIpc.warn('continuation.persist.fail', {
+              generationId: id,
+              message: cpErr instanceof Error ? cpErr.message : String(cpErr),
+            });
+          }
+        }
+        // Drain the hint maps regardless of whether we wrote a row.
+        continuationHints.delete(id);
+        cumulativeOutputBytes.delete(id);
+        cumulativeToolResultBytes.delete(id);
+        initialPromptBytes.delete(id);
+        generationStartedAt.delete(id);
         return finalResult;
       } catch (err) {
         // Attach upstream metadata to the thrown err so the renderer's
@@ -2037,6 +2316,14 @@ function registerIpcHandlers(db: Database | null): void {
       // into a subsequent run with the same id (shouldn't happen
       // given GenerationId is unique-per-attempt, but belt-and-braces).
       checkpointHints.delete(id);
+      // Integration E — drain continuation hint + cumulative state on
+      // the failure path too. The success path inside the IPC handler
+      // already drains; this catches the abort / error short-circuit.
+      continuationHints.delete(id);
+      cumulativeOutputBytes.delete(id);
+      cumulativeToolResultBytes.delete(id);
+      initialPromptBytes.delete(id);
+      generationStartedAt.delete(id);
     };
     wrapped.then(cleanupDedup, cleanupDedup);
     return wrapped;
@@ -2066,7 +2353,7 @@ function registerIpcHandlers(db: Database | null): void {
       const allowKeyless = active.allowKeyless;
       let apiKey: string;
       try {
-        await ensureFreshClaudeCodeToken(active.model.provider);
+        await queueClaudeCodeRefresh(active.model.provider);
         apiKey = await resolveApiKeyForActive(active.model.provider, allowKeyless);
       } catch (err) {
         inFlight.delete(id);
@@ -2307,6 +2594,93 @@ function registerIpcHandlers(db: Database | null): void {
     return { queued: true };
   });
 
+  // Integration F — Continue IPC. The renderer's ContinuationPendingRow
+  // calls this with the designId of a paused run; we reconstruct the
+  // continuation prompt (latest set_todos + decisionRecap from the
+  // continuation_pending row + current FS state) and return it to the
+  // renderer, which then dispatches the existing `sendPrompt` flow.
+  // This is by-design lighter than re-entering generate inline — it
+  // reuses 100% of the existing dispatch path so cancellation, dedup,
+  // and telemetry all work identically to a manual prompt.
+  ipcMain.handle('codesign:v1:continue', async (_e, raw: unknown) => {
+    const obj = raw as { designId?: unknown } | null;
+    const designId = obj?.designId;
+    if (typeof designId !== 'string' || designId.length === 0) {
+      throw new CodesignError('continue expects { designId: string }', 'IPC_BAD_INPUT');
+    }
+    if (db === null) {
+      throw new CodesignError('database unavailable', 'DB_UNAVAILABLE');
+    }
+    // Pull the chat history once. The latest continuation_pending row
+    // carries the decision recap; the latest set_todos snapshot is the
+    // plan to resume from; the original brief is the first user
+    // message. All come from the same query.
+    const messages = listChatMessages(db, designId);
+    type Continuation = import('@open-codesign/shared').ChatContinuationPendingPayload;
+    type SetTodosArgs = { items?: ReadonlyArray<{ text?: string; checked?: boolean }> };
+    let latestContinuation: Continuation | null = null;
+    let latestTodos: { items: ReadonlyArray<{ text: string; checked: boolean }> } | null = null;
+    let originalBrief = '';
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i];
+      if (!m) continue;
+      if (latestContinuation === null && m.kind === 'continuation_pending') {
+        latestContinuation = m.payload as Continuation;
+      } else if (
+        latestTodos === null &&
+        m.kind === 'tool_call' &&
+        (m.payload as { toolName?: string } | undefined)?.toolName === 'set_todos'
+      ) {
+        const args = (m.payload as { args?: SetTodosArgs } | undefined)?.args;
+        if (args?.items) {
+          latestTodos = {
+            items: args.items.map((it) => ({
+              text: typeof it.text === 'string' ? it.text : '',
+              checked: it.checked === true,
+            })),
+          };
+        }
+      }
+    }
+    for (const m of messages) {
+      if (m.kind === 'user') {
+        originalBrief = (m.payload as { text?: string }).text ?? '';
+        break;
+      }
+    }
+    if (latestContinuation === null) {
+      throw new CodesignError(
+        'no continuation_pending row found for this design',
+        'CONTINUATION_NOT_FOUND',
+      );
+    }
+    // FS state: the design's current files. Defensive — read may fail
+    // when the design has no workspace yet.
+    let fsState: Array<{ path: string; bytes: number }> = [];
+    try {
+      const designFiles = listDesignFiles(db, designId);
+      fsState = designFiles.map((f) => ({ path: f.path, bytes: f.content.length }));
+    } catch (fsErr) {
+      logIpc.warn('continuation.fs_state.fail', {
+        designId,
+        message: fsErr instanceof Error ? fsErr.message : String(fsErr),
+      });
+    }
+    const prompt = buildContinuationPrompt({
+      todos: latestTodos,
+      decisionRecap: latestContinuation.decisionRecap,
+      fsState,
+      originalUserPrompt: originalBrief,
+    });
+    logIpc.info('continuation.prompt_built', {
+      designId,
+      promptLen: prompt.length,
+      hasTodos: latestTodos !== null,
+      fsFileCount: fsState.length,
+    });
+    return { prompt };
+  });
+
   ipcMain.handle('codesign:apply-comment', async (event, raw: unknown) => {
     const payload = ApplyCommentPayload.parse(raw);
     const runId = crypto.randomUUID();
@@ -2328,7 +2702,7 @@ function registerIpcHandlers(db: Database | null): void {
       const hint = payload.model ?? { provider: cfg.provider, modelId: cfg.modelPrimary };
       const active = resolveActiveModel(cfg, hint);
       const allowKeyless = active.allowKeyless;
-      await ensureFreshClaudeCodeToken(active.model.provider);
+      await queueClaudeCodeRefresh(active.model.provider);
       const apiKey = await resolveApiKeyForActive(active.model.provider, allowKeyless);
       const baseUrl = active.baseUrl ?? undefined;
       const promptContext = await preparePromptContext({
@@ -2434,7 +2808,7 @@ function registerIpcHandlers(db: Database | null): void {
         modelId: cfg.activeModel,
       });
       const allowKeyless = active.allowKeyless;
-      await ensureFreshClaudeCodeToken(active.model.provider);
+      await queueClaudeCodeRefresh(active.model.provider);
       const apiKey = await resolveApiKeyForActive(active.model.provider, allowKeyless);
       const baseUrl = active.baseUrl ?? undefined;
       const titleLogger: CoreLogger = {

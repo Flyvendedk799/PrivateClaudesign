@@ -573,6 +573,13 @@ interface CodesignState {
    *  immediately. UI surface: the "Wrap up" button next to the Stop
    *  button in the prompt input. No-op if nothing's generating. */
   requestWrapUp: () => Promise<void>;
+  /** Integration F — resume a paused run via the Continue button on a
+   *  `continuation_pending` chat row. Asks main to reconstruct the
+   *  continuation prompt (latest set_todos + recap + FS state) and
+   *  dispatches it via sendPrompt so cancellation, dedup, telemetry,
+   *  and the auth-refresh queue all behave identically to a manual
+   *  prompt. */
+  continueRun: () => Promise<void>;
   /**
    * Start a fresh conversation in the active design. Bumps the
    * design's session_id pointer so subsequent prompts ship an empty
@@ -2605,6 +2612,40 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       prompt:
         '[resume] Continue from the last checkpoint. Pick up where you left off — review the prior tool transcript, identify any unfinished items, and proceed.',
     });
+  },
+
+  async continueRun() {
+    if (get().isGenerating) return;
+    const designId = get().currentDesignId;
+    if (designId === null) return;
+    const api = window.codesign;
+    if (!api?.continueDesign) {
+      get().pushToast({
+        variant: 'error',
+        title: 'Continue unavailable',
+        description: 'IPC bridge missing. Restart the app.',
+      });
+      return;
+    }
+    try {
+      const { prompt } = await api.continueDesign(designId);
+      if (typeof prompt !== 'string' || prompt.length === 0) {
+        get().pushToast({
+          variant: 'error',
+          title: 'No paused run found',
+          description: 'Could not reconstruct a continuation prompt for this design.',
+        });
+        return;
+      }
+      await get().sendPrompt({ prompt });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : tr('errors.unknown');
+      get().pushToast({
+        variant: 'error',
+        title: 'Continue failed',
+        description: msg,
+      });
+    }
   },
 
   async requestWrapUp() {
