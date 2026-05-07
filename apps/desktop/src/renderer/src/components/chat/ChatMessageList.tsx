@@ -5,6 +5,7 @@ import { useEffect, useRef } from 'react';
 import { useCodesignStore } from '../../store';
 import { AssistantText } from './AssistantText';
 import { ContinuationPendingRow } from './ContinuationPendingRow';
+import { NarrationCollapsedPill } from './NarrationCollapsedPill';
 import { ReasoningSummaryPill } from './ReasoningSummaryPill';
 import { UserMessage } from './UserMessage';
 import { InlineTodoList, TodoSnapshotCollapsed, WorkingCard } from './WorkingCard';
@@ -410,12 +411,22 @@ export function ChatMessageList({
         ),
       });
     } else if (msg.kind === 'assistant_text') {
-      // plan0305 P2.1 — drop short transitional narration that's
-      // sandwiched between tool_calls. The deliverable summary at the
-      // end of a turn always survives (it's longer than the cutoff
-      // and is followed by artifact_delivered, not another tool_call).
-      if (isInterToolNarration(messages, mi)) continue;
+      // plan0305 P2.1 — short transitional narration sandwiched between
+      // tool_calls used to be dropped outright. Plan 2026-05-08 P4 keeps
+      // the predicate (we still want a clean default chat) but renders
+      // the recognised rows as a collapsed pill so a curious user can
+      // expand to see what the model wrote between calls. The
+      // deliverable summary at the end of a turn still falls through to
+      // the AssistantText branch because isInterToolNarration() returns
+      // false for it (followed by artifact_delivered, not tool_call).
       const p = msg.payload as { text?: string };
+      if (isInterToolNarration(messages, mi)) {
+        items.push({
+          key: `n-${msg.seq}`,
+          node: <NarrationCollapsedPill text={p?.text ?? ''} />,
+        });
+        continue;
+      }
       const isLast = msg === messages[messages.length - 1];
       const streaming = Boolean(isGenerating) && isLast;
       items.push({
