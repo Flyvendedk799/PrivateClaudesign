@@ -1659,7 +1659,11 @@ describe('AGENT_WORKFLOW anti-narration directives (plan0305 P1.1)', () => {
     expect(agentPrompt).toContain('ANY assistant text between tool calls');
     expect(agentPrompt).toContain('Now let me');
     expect(agentPrompt).toContain('Let me try');
-    expect(agentPrompt).toContain('correct number of inter-tool text bubbles is **zero**');
+    // 2026-05-08: phrasing scoped to "inside a build" — same intent (zero
+    // mid-build text bubbles), but no longer asserts the rule unconditionally.
+    expect(agentPrompt).toContain(
+      'correct number of inter-tool text bubbles inside a build is **zero**',
+    );
   });
 });
 
