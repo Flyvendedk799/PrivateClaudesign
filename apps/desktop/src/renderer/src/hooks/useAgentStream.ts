@@ -12,9 +12,37 @@
  * marks any still-pending row as 'done' so the WorkingCard never sticks.
  */
 
+import type { ChatReasoningSummaryPayload } from '@open-codesign/shared';
 import { useEffect, useRef } from 'react';
 import type { AgentStreamEvent } from '../../../preload/index';
 import { useCodesignStore } from '../store';
+
+/** Plan 2026-05-08 P3 — pure builder for the `reasoning_summary` chat row
+ *  payload. Extracted from `rollupThinkingIfPending` so the payload shape
+ *  can be unit-tested without standing up a React hook + IPC stream.
+ *
+ *  Contract: durationMs is clamped at 0 (clock skew can produce negatives
+ *  on resume after sleep); tokenEstimate is `chars/4` rounded up (Claude's
+ *  rough English ratio); finalisedAt is the ISO timestamp of `now`. The
+ *  toolName is omitted entirely when not provided rather than written as
+ *  an empty string — the renderer's pill formatter relies on the field
+ *  being absent to suppress the trailing tool tag. */
+export function buildReasoningSummaryPayload(
+  fullText: string,
+  thinkingStartedAt: number,
+  now: number,
+  toolName?: string,
+): ChatReasoningSummaryPayload {
+  const durationMs = Math.max(0, now - thinkingStartedAt);
+  const tokenEstimate = Math.ceil(fullText.length / 4);
+  return {
+    fullText,
+    durationMs,
+    tokenEstimate,
+    ...(toolName && toolName.length > 0 ? { toolName } : {}),
+    finalisedAt: new Date(now).toISOString(),
+  };
+}
 
 interface PendingPersist {
   /** Resolves to the persisted row's seq, or null if the append failed. */
@@ -277,8 +305,8 @@ export function useAgentStream(): void {
       const fullText = cur.thinkingBuffer;
       if (fullText.length === 0) return;
       const startedAt = cur.thinkingStartedAt ?? Date.now();
-      const durationMs = Math.max(0, Date.now() - startedAt);
-      const tokenEstimate = Math.ceil(fullText.length / 4);
+      const now = Date.now();
+      const payload = buildReasoningSummaryPayload(fullText, startedAt, now, toolName);
       cur.thinkingRolledUp = true;
       // 2026-05-07 — log the rollup attempt + any failure so the next
       // "no reasoning_summary rows in DB" investigation can pinpoint
@@ -288,20 +316,14 @@ export function useAgentStream(): void {
         designId: cur.designId,
         generationId: cur.generationId,
         chars: fullText.length,
-        durationMs,
-        tokenEstimate,
+        durationMs: payload.durationMs,
+        tokenEstimate: payload.tokenEstimate,
         ...(toolName ? { toolName } : {}),
       });
       appendChatMessage({
         designId: cur.designId,
         kind: 'reasoning_summary',
-        payload: {
-          fullText,
-          durationMs,
-          tokenEstimate,
-          ...(toolName ? { toolName } : {}),
-          finalisedAt: new Date().toISOString(),
-        },
+        payload,
       }).catch((err) => {
         // TODO: replace with rendererLogger once renderer-logger lands
         console.error('[agent] reasoning_summary.persist.fail', {
