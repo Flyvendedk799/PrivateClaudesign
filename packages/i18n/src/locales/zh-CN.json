@@ -194,6 +194,7 @@
         "trigger": "添加上下文"
       },
       "thinking": "正在思考",
+      "workingLabel": "处理中…",
       "streamingLabel": "助手正在回复",
       "tokensLine": "约 {{count}} tokens",
       "designCostTooltip": "本设计共 {{runs}} 次运行的 API 费用合计",
@@ -689,6 +690,7 @@
     "transientRetryBody": "在任何工作落地之前，服务提供商的流被切断。正在自动重发相同提示。",
     "duplicatePromptTitle": "重复提示——已跳过",
     "duplicatePromptBody": "您刚刚提交了相同的文本。请修改提示或等待之前的运行完成。",
+    "resumingFromCheckpoint": "正在从上一个检查点继续。",
     "oauthExpiringTitle": "授权令牌即将过期",
     "oauthExpiringBody": "服务提供商的 OAuth 令牌将在 {{minutes}} 分钟后过期。长时间运行可能会被中断——如有可能请到设置中重新导入。",
     "oauthExpiredTitle": "授权令牌已过期",
@@ -1245,6 +1247,7 @@
     "PROVIDER_UPSTREAM_ERROR": "provider 返回未知错误，详情见日志。",
     "PROVIDER_GATEWAY_INCOMPATIBLE": "网关对 Messages API 返回 “not implemented”。请到设置中把 wire 切换为 openai-chat，或更换支持 Anthropic Messages API 的网关。",
     "PROVIDER_ABORTED": "生成已取消。",
+    "STREAM_INTERRUPTED": "模型的流在完成前被中断。已保存进度——点击“继续”以恢复。",
     "PROVIDER_RETRY_EXHAUSTED": "多次重试后 provider 仍然失败，请检查网络后重试。",
     "CLAUDE_CODE_OAUTH_ONLY": "你的 Claude Code 使用的是 Anthropic 订阅（Pro/Max），第三方应用无法复用订阅额度——请到 console.anthropic.com 生成 API key 后填入。",
     "CODEX_TOKEN_PARSE_FAILED": "本地 ChatGPT 登录凭证已损坏，请到设置中重新登录。",

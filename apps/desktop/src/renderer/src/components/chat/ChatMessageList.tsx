@@ -124,6 +124,27 @@ interface RenderItem {
 }
 
 /**
+ * 2026-05-07 long-thinking fix — when consecutive tool_calls span more
+ * than this gap of wall-clock idle time, flush the current WorkingCard
+ * and start a new one. Without this a 30-call run that drifted across
+ * a stream-stall renders as a single undifferentiated brick. Read at
+ * call time so tests can mock without rebuilding the module.
+ */
+export const TOOL_BUCKET_GAP_MS = 30_000;
+
+export function shouldSplitBucket(
+  prevStartedAt: string | undefined,
+  currentStartedAt: string | undefined,
+  gapMs: number = TOOL_BUCKET_GAP_MS,
+): boolean {
+  if (typeof prevStartedAt !== 'string' || typeof currentStartedAt !== 'string') return false;
+  const prev = Date.parse(prevStartedAt);
+  const cur = Date.parse(currentStartedAt);
+  if (!Number.isFinite(prev) || !Number.isFinite(cur)) return false;
+  return cur - prev > gapMs;
+}
+
+/**
  * plan0305 P2.1 — belt-and-braces filter for inter-tool narration that
  * the model emitted as plain assistant_text instead of as part of a tool
  * call (e.g. "Now adding the keyframes…", "Good, let me try…"). These
@@ -366,6 +387,10 @@ export function ChatMessageList({
         });
         continue;
       }
+      if (bucket && bucket.calls.length > 0) {
+        const prev = bucket.calls[bucket.calls.length - 1];
+        if (shouldSplitBucket(prev?.startedAt, call.startedAt)) flush();
+      }
       if (!bucket) bucket = { calls: [], firstSeq: msg.seq };
       bucket.calls.push(call);
       continue;
@@ -598,6 +623,10 @@ export function ChatMessageList({
                 );
                 continue;
               }
+              if (pendingBucket.length > 0) {
+                const prev = pendingBucket[pendingBucket.length - 1];
+                if (shouldSplitBucket(prev?.startedAt, c.startedAt)) flushPending(i);
+              }
               pendingBucket.push(c);
             }
             flushPending(pendingToolCalls.length);
@@ -682,16 +711,24 @@ export function ChatMessageList({
         );
       })()}
       {(() => {
-        // Live thoughts panel. Two modes:
-        //  (a) `streamingThinking` is non-empty → render Claude's
+        // Live thoughts / status panel.
+        //  (a) Tools are in flight (`pendingToolCalls` non-empty OR a tool
+        //      draft is composing) → render nothing here. The WorkingCard
+        //      below + the streamingToolDraft pill already show motion;
+        //      adding a "Thinking…" header on top mislabels tool work as
+        //      reasoning. Fix for the 2026-05-07 long-thinking complaint.
+        //  (b) `streamingThinking` is non-empty → render Claude's
         //      summarized reasoning live, italicized and fading in. The
         //      panel naturally clears when text_delta or tool_call_start
         //      land (handled by the agent stream hook).
-        //  (b) Generating but nothing streamed yet AND last message is
-        //      the user's prompt → fall back to the dot animation so the
-        //      gap between submit and first event isn't silent.
+        //  (c) Generating but nothing streamed yet AND last message is
+        //      the user's prompt → fall back to a "Working…" dot animation
+        //      so the gap between submit and first event isn't silent.
         if (!isGenerating) return null;
         if (streamingText && streamingText.length > 0) return null;
+        const hasPendingTools = pendingToolCalls && pendingToolCalls.length > 0;
+        const hasToolDraft = streamingToolDraft !== null && streamingToolDraft !== undefined;
+        if (hasPendingTools || hasToolDraft) return null;
         const hasThoughts = streamingThinking && streamingThinking.length > 0;
         if (hasThoughts) {
           return (
@@ -720,7 +757,7 @@ export function ChatMessageList({
         if (last?.kind !== 'user') return null;
         return (
           <div
-            key="thinking-placeholder"
+            key="working-placeholder"
             className="inline-flex items-center gap-[var(--space-2)] rounded-2xl rounded-bl-md bg-[var(--color-surface)] border border-[var(--color-border-muted)] px-[var(--space-3)] py-[var(--space-2)] text-[12px] text-[var(--color-text-muted)]"
             aria-live="polite"
           >
@@ -731,7 +768,7 @@ export function ChatMessageList({
             <span className="codesign-stream-dot" style={{ animationDelay: '300ms' }}>
               ·
             </span>
-            <span className="ml-[var(--space-1)]">{t('sidebar.chat.thinking')}</span>
+            <span className="ml-[var(--space-1)]">{t('sidebar.chat.workingLabel')}</span>
           </div>
         );
       })()}

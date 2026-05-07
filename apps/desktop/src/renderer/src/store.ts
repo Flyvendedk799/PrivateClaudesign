@@ -636,6 +636,16 @@ interface CodesignState {
      *  so a genuinely broken request can't loop forever. (B1 — see
      *  applyGenerateError for the trigger.) */
     _autoRetried?: boolean | undefined;
+    /** Internal: set by `continueRun` after eagerly loading chat history.
+     *  Bypasses the in-line `buildHistoryFromChat` call so resume is
+     *  self-sufficient even when the renderer's `chatMessages` slice was
+     *  cleared by an error path. (2026-05-07 fix.) */
+    _historyOverride?: ChatMessage[] | undefined;
+    /** Internal: set by the free-text continue rerouter to bypass the
+     *  duplicate-prompt guard. The literal word "continue" appears
+     *  legitimately as the rerouted call's user-visible prompt and would
+     *  otherwise be deduped against the prior identical row. */
+    _bypassDedup?: boolean | undefined;
   }) => Promise<void>;
   /** Pending short-prompt submission queued behind the prompt-assist
    *  interstitial. The dialog reads this; when null, the dialog is closed.
@@ -1437,9 +1447,50 @@ async function buildHistoryFromChat(designId: string | null): Promise<ChatMessag
         : Promise.resolve({ sessionId: 0 }),
     ]);
     return buildHistoryFromChatRows(rows, { sessionId: current.sessionId });
-  } catch {
+  } catch (err) {
+    // 2026-05-07 — silent `[]` fallback masked a resume-without-history
+    // bug for an unknown duration. Log + record a diagnostic so future
+    // failures surface in the connection panel + bug reports. The empty
+    // history is still returned (the alternative is blocking sendPrompt
+    // entirely, which is worse) but the user sees a one-shot toast.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[store] buildHistoryFromChat.fail', { designId, message });
+    try {
+      const recordEvent = (
+        window.codesign as unknown as {
+          diagnostics?: { record?: (event: { code: string; message: string }) => void };
+        }
+      ).diagnostics?.record;
+      recordEvent?.({ code: 'BUILD_HISTORY_FAILED', message });
+    } catch {
+      /* diagnostics unavailable — log path above is sufficient */
+    }
     return [];
   }
+}
+
+/** 2026-05-07 — recognise free-text resume verbs ("continue", "resume",
+ *  "keep going", "proceed", "go on"). Trimmed and case-insensitive,
+ *  optional trailing punctuation. Anything else (including "tell me
+ *  more about X") is NOT a resume intent. Exported for unit tests. */
+export function isFreeTextResumeIntent(prompt: string): boolean {
+  return /^(continue|resume|keep going|proceed|go on)[\.!?]?$/i.test(prompt.trim());
+}
+
+/** 2026-05-07 — true when the design has a `continuation_pending` row
+ *  newer than any subsequent `user` row (i.e. resume hasn't already
+ *  consumed it). Drives the free-text rerouter. Exported for tests. */
+export function hasFreshContinuationPending(
+  chatMessages: ReadonlyArray<ChatMessageRow>,
+  designId: string,
+): boolean {
+  for (let i = chatMessages.length - 1; i >= 0; i -= 1) {
+    const row = chatMessages[i];
+    if (!row || row.designId !== designId) continue;
+    if (row.kind === 'continuation_pending') return true;
+    if (row.kind === 'user') return false;
+  }
+  return false;
 }
 
 async function persistDesignState(
@@ -2298,6 +2349,33 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     });
     if (get().isGenerating) return;
 
+    // 2026-05-07 — when the user types a literal resume verb ("continue"
+    // / "resume" / "keep going") AND a continuation_pending row exists
+    // newer than any subsequent user message, route through the
+    // structured continue flow instead of sending the bare verb as a
+    // fresh prompt. Without this rerouter the agent receives only "continue"
+    // with empty history and re-discovers the project from scratch,
+    // typically dropping objectives that were in the original plan.
+    if (
+      !input.silent &&
+      input._autoRetried !== true &&
+      input._historyOverride === undefined &&
+      isFreeTextResumeIntent(input.prompt) &&
+      !input.skipPromptAssist
+    ) {
+      const designId = get().currentDesignId;
+      if (designId !== null && hasFreshContinuationPending(get().chatMessages, designId)) {
+        get().pushToast({
+          variant: 'info',
+          title: tr('notifications.resumingFromCheckpoint', {
+            defaultValue: 'Resuming from the last checkpoint.',
+          }),
+        });
+        await get().continueRun();
+        return;
+      }
+    }
+
     // Gameimprove §4 — drop near-duplicate adjacent submissions. The
     // BRAWL ARENA trace had the same brief at seq 0 AND seq 2 (full
     // wasted agent run). Auto-retry from a transient failure shouldn't
@@ -2305,7 +2383,12 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     // Skip for silent submissions (auto-polish) and the resolvePromptAssist
     // resume path — those legitimately re-call sendPrompt with the same
     // payload after the dialog cycle.
-    if (!input.silent && input._autoRetried !== true && !input.skipPromptAssist) {
+    if (
+      !input.silent &&
+      input._autoRetried !== true &&
+      !input.skipPromptAssist &&
+      input._bypassDedup !== true
+    ) {
       const designId = get().currentDesignId;
       if (designId !== null) {
         const currentSessionId = get().currentChatSessionId;
@@ -2520,7 +2603,12 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     // chat_messages is the single source of truth for agent history. Fixes
     // the race where a broken session + "继续" made the agent see a stale or
     // empty history from a legacy mirror and drift off-task.
-    const fullHistory = await buildHistoryFromChat(designIdAtStart);
+    // 2026-05-07 — `_historyOverride` is set by the resume flow to
+    // bypass the IPC roundtrip; otherwise we load fresh from disk.
+    const fullHistory =
+      input._historyOverride !== undefined
+        ? input._historyOverride
+        : await buildHistoryFromChat(designIdAtStart);
     const history = capHistoryToTurnBoundary(fullHistory, HISTORY_CAP);
     const isFirstPrompt = fullHistory.length === 0;
     // Iteration cue — only set when there's already prior history AND the
@@ -2841,7 +2929,14 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       return;
     }
     try {
-      const { prompt } = await api.continueDesign(designId);
+      // 2026-05-07 — eagerly load chat history so resume is self-sufficient
+      // even when an error path cleared `chatMessages` from in-memory
+      // state. Run the IPC and the history-build in parallel; both come
+      // from the same on-disk source so they can't drift.
+      const [{ prompt }, history] = await Promise.all([
+        api.continueDesign(designId),
+        buildHistoryFromChat(designId),
+      ]);
       if (typeof prompt !== 'string' || prompt.length === 0) {
         get().pushToast({
           variant: 'error',
@@ -2850,7 +2945,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         });
         return;
       }
-      await get().sendPrompt({ prompt });
+      await get().sendPrompt({ prompt, _historyOverride: history });
     } catch (err) {
       const msg = err instanceof Error ? err.message : tr('errors.unknown');
       get().pushToast({

@@ -280,7 +280,19 @@ export function useAgentStream(): void {
       const durationMs = Math.max(0, Date.now() - startedAt);
       const tokenEstimate = Math.ceil(fullText.length / 4);
       cur.thinkingRolledUp = true;
-      void appendChatMessage({
+      // 2026-05-07 — log the rollup attempt + any failure so the next
+      // "no reasoning_summary rows in DB" investigation can pinpoint
+      // whether the model is silent or the writer is silently failing.
+      // TODO: replace with rendererLogger once renderer-logger lands
+      console.debug('[agent] reasoning_summary.rollup', {
+        designId: cur.designId,
+        generationId: cur.generationId,
+        chars: fullText.length,
+        durationMs,
+        tokenEstimate,
+        ...(toolName ? { toolName } : {}),
+      });
+      appendChatMessage({
         designId: cur.designId,
         kind: 'reasoning_summary',
         payload: {
@@ -290,6 +302,12 @@ export function useAgentStream(): void {
           ...(toolName ? { toolName } : {}),
           finalisedAt: new Date().toISOString(),
         },
+      }).catch((err) => {
+        // TODO: replace with rendererLogger once renderer-logger lands
+        console.error('[agent] reasoning_summary.persist.fail', {
+          designId: cur.designId,
+          message: err instanceof Error ? err.message : String(err),
+        });
       });
     };
 

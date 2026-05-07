@@ -1,8 +1,9 @@
-import { CancelGenerationPayloadV1, CodesignError } from '@open-codesign/shared';
+import { CancelGenerationPayloadV1, CodesignError, ERROR_CODES } from '@open-codesign/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   armGenerationTimeout,
   cancelGenerationRequest,
+  classifyAbortError,
   extractGenerationTimeoutError,
   requestCheckpointAbort,
 } from './generation-ipc';
@@ -310,5 +311,45 @@ describe('CancelGenerationPayloadV1 — Backlog-3 §5 asCheckpoint', () => {
         asCheckpoint: 'yes',
       }),
     ).toThrow();
+  });
+});
+
+describe('classifyAbortError — 2026-05-07 STREAM_INTERRUPTED path', () => {
+  function abortedSignal(reason?: unknown): AbortSignal {
+    const c = new AbortController();
+    if (reason !== undefined) c.abort(reason);
+    else c.abort();
+    return c.signal;
+  }
+
+  it('forwards GENERATION_TIMEOUT first when both could match', () => {
+    const reason = new CodesignError('timed out', ERROR_CODES.GENERATION_TIMEOUT);
+    const got = classifyAbortError(new Error('Request was aborted.'), abortedSignal(reason));
+    expect(got?.code).toBe(ERROR_CODES.GENERATION_TIMEOUT);
+  });
+
+  it('returns STREAM_INTERRUPTED for an SDK-rethrown abort with no signal marker', () => {
+    const got = classifyAbortError(new Error('Request was aborted.'), abortedSignal());
+    expect(got?.code).toBe(ERROR_CODES.STREAM_INTERRUPTED);
+  });
+
+  it('returns STREAM_INTERRUPTED for the IPC-wrapped variant', () => {
+    const got = classifyAbortError(
+      new Error(
+        "Error invoking remote method 'codesign:v1:generate': CodesignError: Request was aborted.",
+      ),
+      abortedSignal(),
+    );
+    expect(got?.code).toBe(ERROR_CODES.STREAM_INTERRUPTED);
+  });
+
+  it('returns null when the error message is unrelated', () => {
+    expect(classifyAbortError(new Error('Invalid API key'), abortedSignal())).toBeNull();
+    expect(classifyAbortError('Some random string', abortedSignal())).toBeNull();
+  });
+
+  it('returns null when err is undefined / null', () => {
+    expect(classifyAbortError(undefined, abortedSignal())).toBeNull();
+    expect(classifyAbortError(null, abortedSignal())).toBeNull();
   });
 });

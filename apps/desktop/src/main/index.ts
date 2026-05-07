@@ -62,6 +62,7 @@ import {
   BRAND,
   CancelGenerationPayloadV1,
   CodesignError,
+  ERROR_CODES,
   type GameEngine,
   GeneratePayload,
   GeneratePayloadV1,
@@ -73,6 +74,7 @@ import type BetterSqlite3 from 'better-sqlite3';
 import type { BrowserWindow as ElectronBrowserWindow } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import type { AgentStreamEvent } from '../preload/index';
+import { buildAbortContinuationRecap } from './abort-continuation';
 import { registerAppMenu } from './app-menu';
 import { showBootDialog, writeBootErrorSync } from './boot-fallback';
 import { registerChatMessagesIpc, registerChatMessagesUnavailableIpc } from './chat-messages-ipc';
@@ -118,6 +120,7 @@ import { findInFlightDuplicate, generateDedupKey, hashContentKey } from './gener
 import {
   armGenerationTimeout,
   cancelGenerationRequest,
+  classifyAbortError,
   extractGenerationTimeoutError,
   requestCheckpointAbort,
 } from './generation-ipc';
@@ -2359,15 +2362,22 @@ function registerIpcHandlers(db: Database | null): void {
               },
               active.model.modelId,
             );
+            const recapForPlanned = buildAbortContinuationRecap(db, payload.designId);
             appendChatMessage(db, {
               designId: payload.designId,
               kind: 'continuation_pending',
               payload: {
                 reason: continuationReason,
-                decisionRecap: finalResult.message ?? '',
+                decisionRecap: finalResult.message ?? recapForPlanned.decisionRecap,
                 outputTokens: finalResult.outputTokens,
                 contextUsedPct: contextUsedPctFinal,
                 wallClockMs,
+                ...(recapForPlanned.todoSnapshotSeq !== undefined
+                  ? { todoSnapshotSeq: recapForPlanned.todoSnapshotSeq }
+                  : {}),
+                ...(recapForPlanned.lastUserBrief !== undefined
+                  ? { lastUserBrief: recapForPlanned.lastUserBrief }
+                  : {}),
               },
             });
             logIpc.info('continuation.row_persisted', {
@@ -2375,6 +2385,7 @@ function registerIpcHandlers(db: Database | null): void {
               reason: continuationReason,
               wallClockMs,
               outputTokens: finalResult.outputTokens,
+              hasBrief: recapForPlanned.lastUserBrief !== undefined,
             });
           } catch (cpErr) {
             logIpc.warn('continuation.persist.fail', {
@@ -2420,11 +2431,67 @@ function registerIpcHandlers(db: Database | null): void {
           }
         }
         // The SDK catches our AbortController and rethrows a generic
-        // `'Request was aborted.'` that drops signal.reason. Prefer the
-        // CodesignError we stashed on the signal so the user sees the
-        // configured timeout + Settings path instead of an opaque message.
-        const timeoutErr = extractGenerationTimeoutError(controller.signal);
-        const rethrow = timeoutErr ?? err;
+        // `'Request was aborted.'` that drops signal.reason. Prefer our
+        // own classification so the user sees the configured timeout
+        // (Settings path) for armed-timeout aborts, or STREAM_INTERRUPTED
+        // (with the Resume CTA) for unplanned upstream stream cuts.
+        const classifiedErr = classifyAbortError(err, controller.signal);
+        const rethrow = classifiedErr ?? err;
+        // 2026-05-07 — when an unplanned mid-work abort happens after the
+        // model has already produced tool_calls, persist a continuation
+        // marker so the renderer can offer a one-click Resume. We only
+        // write this if no continuation_pending row already exists for
+        // the run (the soft-cancel path above writes its own).
+        const isStreamInterruption =
+          rethrow instanceof CodesignError && rethrow.code === ERROR_CODES.STREAM_INTERRUPTED;
+        if (
+          isStreamInterruption &&
+          payload.designId !== undefined &&
+          db !== null &&
+          !continuationHints.has(id)
+        ) {
+          try {
+            const recap = buildAbortContinuationRecap(db, payload.designId);
+            const wallClockMs = Date.now() - (generationStartedAt.get(id) ?? t0);
+            const contextUsedPctFinal = estimateContextUsedPct(
+              {
+                initialPromptBytes: initialPromptBytes.get(id) ?? 0,
+                outputBytes: cumulativeOutputBytes.get(id) ?? 0,
+                toolResultBytes: cumulativeToolResultBytes.get(id) ?? 0,
+              },
+              active.model.modelId,
+            );
+            appendChatMessage(db, {
+              designId: payload.designId,
+              kind: 'continuation_pending',
+              payload: {
+                reason: 'unplanned_abort',
+                decisionRecap: recap.decisionRecap,
+                outputTokens: 0,
+                contextUsedPct: contextUsedPctFinal,
+                wallClockMs,
+                ...(recap.todoSnapshotSeq !== undefined
+                  ? { todoSnapshotSeq: recap.todoSnapshotSeq }
+                  : {}),
+                ...(recap.lastUserBrief !== undefined
+                  ? { lastUserBrief: recap.lastUserBrief }
+                  : {}),
+              },
+            });
+            logIpc.info('continuation.row_persisted', {
+              generationId: id,
+              reason: 'unplanned_abort',
+              wallClockMs,
+              hasTodos: recap.todoSnapshotSeq !== undefined,
+              hasBrief: recap.lastUserBrief !== undefined,
+            });
+          } catch (cpErr) {
+            logIpc.warn('continuation.persist.fail', {
+              generationId: id,
+              message: cpErr instanceof Error ? cpErr.message : String(cpErr),
+            });
+          }
+        }
         logIpc.error('generate.fail', {
           generationId: id,
           ms: Date.now() - t0,
@@ -2795,6 +2862,18 @@ function registerIpcHandlers(db: Database | null): void {
         'CONTINUATION_NOT_FOUND',
       );
     }
+    // 2026-05-07 — when the row carries a `lastUserBrief`, prefer it
+    // over the design's first-ever user message. Long-running designs
+    // accumulate multiple briefs; resume should reflect the *current*
+    // objective, not whatever started the design weeks ago.
+    const continuationWithBrief = latestContinuation as typeof latestContinuation & {
+      lastUserBrief?: string;
+    };
+    const briefForPrompt =
+      typeof continuationWithBrief.lastUserBrief === 'string' &&
+      continuationWithBrief.lastUserBrief.trim().length > 0
+        ? continuationWithBrief.lastUserBrief
+        : originalBrief;
     // FS state: the design's current files. Defensive — read may fail
     // when the design has no workspace yet.
     let fsState: Array<{ path: string; bytes: number }> = [];
@@ -2811,13 +2890,14 @@ function registerIpcHandlers(db: Database | null): void {
       todos: latestTodos,
       decisionRecap: latestContinuation.decisionRecap,
       fsState,
-      originalUserPrompt: originalBrief,
+      originalUserPrompt: briefForPrompt,
     });
     logIpc.info('continuation.prompt_built', {
       designId,
       promptLen: prompt.length,
       hasTodos: latestTodos !== null,
       fsFileCount: fsState.length,
+      usedLastUserBrief: briefForPrompt !== originalBrief,
     });
     return { prompt };
   });

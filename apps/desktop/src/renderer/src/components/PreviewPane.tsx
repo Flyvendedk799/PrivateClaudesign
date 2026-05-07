@@ -175,6 +175,8 @@ import { resolveDesignFilesSrc, resolveGamePreviewSrc, resolveGameSrc } from '..
 
 export { resolveDesignFilesSrc, resolveGamePreviewSrc, resolveGameSrc };
 
+const DEFAULT_GAME_PREVIEW_MODE: GamePreviewMode = { mode: 'game' };
+
 interface PreviewSlotProps {
   designId: string;
   html: string;
@@ -752,8 +754,8 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
   const activeMotionTab = useCodesignStore((s) => s.activeMotionTab);
   const gamePreviewMode = useCodesignStore((s) =>
     currentDesignId !== null
-      ? (s.gamePreviewModeByDesign[currentDesignId] ?? { mode: 'game' as const })
-      : ({ mode: 'game' as const } as GamePreviewMode),
+      ? (s.gamePreviewModeByDesign[currentDesignId] ?? DEFAULT_GAME_PREVIEW_MODE)
+      : DEFAULT_GAME_PREVIEW_MODE,
   );
   const snapshotComments = currentSnapshotId
     ? comments.filter((c) => c.snapshotId === currentSnapshotId)

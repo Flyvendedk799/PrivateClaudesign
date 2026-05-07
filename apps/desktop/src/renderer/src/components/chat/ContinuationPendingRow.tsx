@@ -20,6 +20,7 @@ const REASON_LABEL: Record<ChatContinuationPendingPayload['reason'], string> = {
   wall_clock: 'Wall-clock 10 min',
   model_requested: 'Model requested pause',
   manual: 'You paused the run',
+  unplanned_abort: 'Stream interrupted',
 };
 
 export function formatContinuationLabel(payload: ChatContinuationPendingPayload): string {

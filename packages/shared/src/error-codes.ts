@@ -28,6 +28,7 @@ export const ERROR_CODES = {
   PROVIDER_UPSTREAM_ERROR: 'PROVIDER_UPSTREAM_ERROR',
   PROVIDER_GATEWAY_INCOMPATIBLE: 'PROVIDER_GATEWAY_INCOMPATIBLE',
   PROVIDER_ABORTED: 'PROVIDER_ABORTED',
+  STREAM_INTERRUPTED: 'STREAM_INTERRUPTED',
   PROVIDER_RETRY_EXHAUSTED: 'PROVIDER_RETRY_EXHAUSTED',
   PROVIDER_OVERLOADED: 'PROVIDER_OVERLOADED',
   PROVIDER_RATE_LIMITED: 'PROVIDER_RATE_LIMITED',
@@ -190,6 +191,12 @@ export const ERROR_CODE_DESCRIPTIONS: Record<CodesignErrorCode, ErrorCodeDescrip
   PROVIDER_ABORTED: {
     userFacing: 'Generation was cancelled.',
     userFacingKey: 'err.PROVIDER_ABORTED',
+    category: 'generation',
+  },
+  STREAM_INTERRUPTED: {
+    userFacing:
+      "The model's stream was interrupted before it finished. Your work was saved — click Resume to continue.",
+    userFacingKey: 'err.STREAM_INTERRUPTED',
     category: 'generation',
   },
   PROVIDER_RETRY_EXHAUSTED: {

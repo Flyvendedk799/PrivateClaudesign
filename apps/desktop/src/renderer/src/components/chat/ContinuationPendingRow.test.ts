@@ -36,6 +36,7 @@ describe('formatContinuationLabel (Phase 4)', () => {
       'wall_clock',
       'model_requested',
       'manual',
+      'unplanned_abort',
     ];
     for (const reason of reasons) {
       const out = formatContinuationLabel({ ...base, reason });

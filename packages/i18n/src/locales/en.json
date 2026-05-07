@@ -194,6 +194,7 @@
         "trigger": "Add context"
       },
       "thinking": "Thinking",
+      "workingLabel": "Working…",
       "streamingLabel": "Assistant is typing",
       "tokensLine": "~{{count}} tokens",
       "designCostTooltip": "Total API cost across {{runs}} run(s) on this design",
@@ -700,6 +701,7 @@
     "transientRetryBody": "The provider's stream was cut before any work landed. Reissuing the same prompt automatically.",
     "duplicatePromptTitle": "Identical prompt — skipped",
     "duplicatePromptBody": "You just submitted the same text. Edit the prompt or wait for the previous run to finish.",
+    "resumingFromCheckpoint": "Resuming from the last checkpoint.",
     "oauthExpiringTitle": "Auth token expiring soon",
     "oauthExpiringBody": "Your provider's OAuth token expires in {{minutes}} min. Long runs may be cut short — re-import in Settings if you can.",
     "oauthExpiredTitle": "Auth token has expired",
@@ -1260,6 +1262,7 @@
     "PROVIDER_UPSTREAM_ERROR": "The provider returned an unexpected error. Details are in the log.",
     "PROVIDER_GATEWAY_INCOMPATIBLE": "Your gateway returned 'not implemented' for the Messages API. Try switching wire to openai-chat in Settings, or use a gateway that supports the Anthropic Messages API.",
     "PROVIDER_ABORTED": "Generation was cancelled.",
+    "STREAM_INTERRUPTED": "The model's stream was interrupted before it finished. Your work was saved — click Resume to continue.",
     "PROVIDER_RETRY_EXHAUSTED": "The provider failed after several retries. Check your connection and try again.",
     "CLAUDE_CODE_OAUTH_ONLY": "Your Claude Code login uses an Anthropic subscription (Pro/Max). Third-party apps cannot reuse the subscription quota — generate an API key at console.anthropic.com and use it here.",
     "CODEX_TOKEN_PARSE_FAILED": "Local ChatGPT login is corrupted. Please re-login in Settings.",

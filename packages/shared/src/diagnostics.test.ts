@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { diagnose, diagnoseGenerateFailure } from './diagnostics';
+import { diagnose, diagnoseGenerateFailure, looksLikeTruncatedStream } from './diagnostics';
 
 const baseCtx = {
   provider: 'openai',
@@ -308,5 +308,31 @@ describe('diagnoseGenerateFailure', () => {
       });
       expect(result[0]?.cause).toBe('diagnostics.cause.relayStreamingBug');
     });
+  });
+});
+
+describe('looksLikeTruncatedStream', () => {
+  it('matches the SDK-rethrown "Request was aborted." string', () => {
+    expect(looksLikeTruncatedStream('Request was aborted.')).toBe(true);
+  });
+
+  it('matches the IPC-wrapped variant carrying CodesignError prefix', () => {
+    expect(
+      looksLikeTruncatedStream(
+        "Error invoking remote method 'codesign:v1:generate': CodesignError: Request was aborted.",
+      ),
+    ).toBe(true);
+  });
+
+  it('matches stream/closed/terminated/ECONNRESET variants', () => {
+    expect(looksLikeTruncatedStream('stream ended unexpectedly')).toBe(true);
+    expect(looksLikeTruncatedStream('Premature close')).toBe(true);
+    expect(looksLikeTruncatedStream('socket terminated')).toBe(true);
+    expect(looksLikeTruncatedStream('connect ECONNRESET')).toBe(true);
+  });
+
+  it('does not match unrelated provider errors', () => {
+    expect(looksLikeTruncatedStream('Invalid API key')).toBe(false);
+    expect(looksLikeTruncatedStream('Rate limit exceeded')).toBe(false);
   });
 });

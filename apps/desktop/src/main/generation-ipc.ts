@@ -124,3 +124,29 @@ export function extractGenerationTimeoutError(signal: AbortSignal): CodesignErro
   }
   return null;
 }
+
+/**
+ * 2026-05-07 — when the SDK rethrows a generic `'Request was aborted.'` and
+ * the signal carries no marker we own (i.e. neither GENERATION_TIMEOUT nor a
+ * user-initiated cancel through `cancelGenerationRequest`), the abort came
+ * from outside our pipeline — most often the upstream Anthropic stream or a
+ * network proxy closing a long connection. The renderer treats this as a
+ * recoverable interruption (Resume CTA) instead of a hard provider error.
+ *
+ * Returns a `CodesignError` with code `STREAM_INTERRUPTED` for that case,
+ * `null` otherwise. Always prefer `extractGenerationTimeoutError` when both
+ * could fire — that one carries the user-actionable Settings path message.
+ */
+export function classifyAbortError(err: unknown, signal: AbortSignal): CodesignError | null {
+  const timeout = extractGenerationTimeoutError(signal);
+  if (timeout) return timeout;
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  if (!/request was aborted/i.test(message)) return null;
+  // signal.reason being a non-Codesign value indicates a SDK-internal abort
+  // path (not a user action and not our timeout). Either way, we surface the
+  // recoverable code.
+  return new CodesignError(
+    'The model stream was interrupted before completion.',
+    ERROR_CODES.STREAM_INTERRUPTED,
+  );
+}

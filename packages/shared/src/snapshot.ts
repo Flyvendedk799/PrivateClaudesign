@@ -218,8 +218,15 @@ export interface ChatReasoningSummaryPayload {
  *  the cache-miss tail). */
 export interface ChatContinuationPendingPayload {
   /** Why the run paused. Drives the "Continue" CTA copy and the recap
-   *  prompt template. */
-  reason: 'context_threshold' | 'output_budget' | 'wall_clock' | 'model_requested' | 'manual';
+   *  prompt template. `unplanned_abort` is added 2026-05-07 for stream
+   *  interruptions that did not go through the soft-cancel path. */
+  reason:
+    | 'context_threshold'
+    | 'output_budget'
+    | 'wall_clock'
+    | 'model_requested'
+    | 'manual'
+    | 'unplanned_abort';
   /** Latest set_todos seq at pause time, if one exists. The continuation
    *  prompt embeds that snapshot verbatim. */
   todoSnapshotSeq?: number;
@@ -229,6 +236,13 @@ export interface ChatContinuationPendingPayload {
   outputTokens: number;
   contextUsedPct: number;
   wallClockMs: number;
+  /** 2026-05-07 — the user's most recent task-defining brief at the
+   *  cut point. The continuation prompt prefers this over the design's
+   *  first-ever user message because long-running designs accumulate
+   *  multiple briefs and resume should reflect the *current* objective.
+   *  Optional for backwards compatibility with rows written before
+   *  this field existed. */
+  lastUserBrief?: string;
 }
 
 // ---------------------------------------------------------------------------
