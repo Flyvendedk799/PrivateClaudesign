@@ -116,6 +116,43 @@ describe('composeSystemPrompt — promptAssist injection (backlog-1 #9)', () => 
   });
 });
 
+describe('AGENT_WORKFLOW conversation-mode scoping (plan 2026-05-08 P1)', () => {
+  // The 2026-05-07 trace showed the model second-guessing itself on chat
+  // follow-ups ("I must call a tool — wait, no, I can reply with prose").
+  // Root cause: AGENT_WORKFLOW had unconditional "no assistant text" rules
+  // that didn't carve out conversational follow-ups. These tests lock the
+  // fix in: the prompt scopes the rules to active build runs and adds a
+  // Conversation mode section that explicitly permits plain text.
+  it('scopes the no-assistant-text rule to active artifact runs', () => {
+    const out = composeSystemPrompt({ mode: 'create', agentMode: true });
+    // Phase 1 wording — the rule applies between the first set_todos of a
+    // run and the matching `done` call, NOT to every assistant turn.
+    expect(out).toMatch(/between the first `set_todos`[\s\S]*and[\s\S]*`done`/i);
+  });
+
+  it('does NOT contain the unscoped "assistant text is not rendered" phrasing', () => {
+    const out = composeSystemPrompt({ mode: 'create', agentMode: true });
+    // The old line falsely claimed assistant text was unrendered. Removing
+    // it (or rephrasing) is the load-bearing fix — leaving the absolute
+    // wording in place re-introduces the second-guessing behavior.
+    expect(out).not.toContain('assistant text is not rendered to the user');
+  });
+
+  it('contains an explicit Conversation mode carve-out section', () => {
+    const out = composeSystemPrompt({ mode: 'create', agentMode: true });
+    expect(out).toContain('## Conversation mode');
+    // Section must clearly grant permission to reply with plain text for
+    // non-build follow-ups; otherwise the carve-out is just decoration.
+    expect(out).toMatch(/reply (?:as|with) plain (?:assistant )?text/i);
+  });
+
+  it('keeps the in-build no-text rule intact (still a hard rule during builds)', () => {
+    const out = composeSystemPrompt({ mode: 'create', agentMode: true });
+    // The fix scopes, it doesn't remove. Mid-build prose is still banned.
+    expect(out).toMatch(/no assistant text|emit no assistant text|do not emit assistant text/i);
+  });
+});
+
 describe('composeSystemPrompt — motion-mode (motion-graphics-plan §3)', () => {
   it('composes the motion-builder layered prompt when artifactType=motion', () => {
     const out = composeSystemPrompt({ mode: 'create', artifactType: 'motion' });
