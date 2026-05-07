@@ -3,6 +3,8 @@ import {
   BookOpen,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Eye,
   FileEdit,
   FilePlus,
@@ -160,11 +162,21 @@ interface ToolRow {
    *  (str_replace) or content (create/insert). undefined for everything
    *  else so the toggle silently doesn't render. */
   diffPayload?: { kind: 'str_replace' | 'insert' | 'create'; oldText: string; newText: string };
+  /** Plan 2026-05-08 P2 — added/removed line counts for at-a-glance edit
+   *  size. Computed from `diffPayload` via `lineDiff` (context: 0). Only
+   *  present when `diffPayload` is — keeps the "+12 / −3" badge purely
+   *  associated with edits, never appearing on view/read_url/etc. */
+  diffStats?: { added: number; removed: number };
   /** Backlog-3 §4 — toolCallId so the row can subscribe to the
    *  per-toolCallId streaming partial-result entry. Only set on rows
    *  that originated from a real `pending` tool call (i.e. live
    *  during a run). */
   toolCallId?: string;
+  /** Plan 2026-05-08 P2 — original call payload preserved for the
+   *  expanded-detail panel. Lets a non-diff row still show its args
+   *  (path, view_range, url, viewport, …) on expansion without
+   *  re-plumbing every `iconAndLabel`/`detailOf` consumer. */
+  rawArgs?: Record<string, unknown>;
 }
 
 function extractTodos(call: ChatToolCallPayload): TodoItem[] {
@@ -208,6 +220,38 @@ function isTextEditorTool(call: ChatToolCallPayload): boolean {
 function pathOf(call: ChatToolCallPayload): string | null {
   const p = call.args?.['path'];
   return typeof p === 'string' ? p : null;
+}
+
+/** Plan 2026-05-08 P2 — count added/removed lines for a diff payload.
+ *  Uses `lineDiff` with context: 0 + a very large maxLines so the totals
+ *  reflect the full edit, not the truncated visible diff. Mirrors the
+ *  view that VS Code / Cursor / Codex render next to file paths.
+ *
+ *  Edge cases: a `create` arrives with empty oldText and `lineDiff`
+ *  treats the empty string as a single removed line (split('\n') →
+ *  ['']); we explicitly zero that side so the badge reads "+N" rather
+ *  than the misleading "+N / −1". Symmetric for delete-style edits.
+ *
+ *  Note: `lineDiff` is a prefix/suffix-anchored shape, not a true LCS
+ *  diff, so an edit that breaks the trailing anchor (a new last line)
+ *  inflates both sides — matching what the inline DiffBlock shows. */
+function computeDiffStats(oldText: string, newText: string): { added: number; removed: number } {
+  if (oldText.length === 0) {
+    const added = newText.length === 0 ? 0 : newText.split('\n').length;
+    return { added, removed: 0 };
+  }
+  if (newText.length === 0) {
+    const removed = oldText.split('\n').length;
+    return { added: 0, removed };
+  }
+  const lines = lineDiff(oldText, newText, { context: 0, maxLines: 100_000 });
+  let added = 0;
+  let removed = 0;
+  for (const l of lines) {
+    if (l.kind === 'add') added += 1;
+    else if (l.kind === 'remove') removed += 1;
+  }
+  return { added, removed };
 }
 
 /** Phase 5 — extract old/new pair from a text-editor call so the row can
@@ -312,12 +356,19 @@ export function buildRows(calls: ChatToolCallPayload[]): ToolRow[] {
         else if (call.status === 'error') last.status = 'error';
         else if (last.status !== 'running' && last.status !== 'error') last.status = 'done';
         const dp = extractDiffPayload(call);
-        if (dp) last.diffPayload = dp;
+        if (dp) {
+          last.diffPayload = dp;
+          last.diffStats = computeDiffStats(dp.oldText, dp.newText);
+        }
+        last.rawArgs = (call.args ?? {}) as Record<string, unknown>;
         continue;
       }
     }
 
     const diffPayload = extractDiffPayload(call);
+    const diffStats = diffPayload
+      ? computeDiffStats(diffPayload.oldText, diffPayload.newText)
+      : undefined;
     rows.push({
       key: `c-${i}`,
       Icon,
@@ -326,7 +377,9 @@ export function buildRows(calls: ChatToolCallPayload[]): ToolRow[] {
       status: call.status,
       narrative: summarizeToolCall(call),
       ...(diffPayload ? { diffPayload } : {}),
+      ...(diffStats ? { diffStats } : {}),
       ...(call.toolCallId !== undefined ? { toolCallId: call.toolCallId } : {}),
+      rawArgs: (call.args ?? {}) as Record<string, unknown>,
     });
     if (isFileEdit) lastEditIdx = rows.length - 1;
   }
@@ -470,44 +523,132 @@ function ToolRowView({ row }: { row: ToolRow }) {
   // see what's actually happening. Format: "raw_tool_name · /path".
   const tooltip = [row.label, row.detail].filter(Boolean).join(' · ');
   const primary = row.narrative ?? row.label;
-  const [diffOpen, setDiffOpen] = useState(false);
+
+  // Plan 2026-05-08 P2 — every persisted tool row is now a clickable
+  // disclosure: chevron on the right, click anywhere on the row to reveal
+  // the diff (for edits) or the raw args (for everything else). Replaces
+  // the old "Diff" toggle button so non-edit rows are also inspectable.
+  // A row with no diff and no args falls back to a non-interactive div.
+  const [expanded, setExpanded] = useState(false);
   const hasDiff = row.diffPayload !== undefined;
+  const hasArgs = row.rawArgs !== undefined && Object.keys(row.rawArgs).length > 0;
+  const isExpandable = hasDiff || hasArgs;
+
+  const head = (
+    <>
+      {row.status === 'running' ? (
+        <span className="relative inline-flex w-[14px] h-[14px] items-center justify-center shrink-0">
+          <span className="absolute inline-block w-[7px] h-[7px] rounded-full bg-[var(--color-accent)] animate-pulse" />
+          <span className="absolute inline-block w-[12px] h-[12px] rounded-full border border-[var(--color-accent)]/30 animate-ping" />
+        </span>
+      ) : row.status === 'error' ? (
+        <Icon className="w-[14px] h-[14px] shrink-0 text-[var(--color-error)]" aria-hidden />
+      ) : (
+        <Icon className="w-[14px] h-[14px] shrink-0 text-[var(--color-text-muted)]" aria-hidden />
+      )}
+      <span className="text-[var(--color-text-primary)]">{primary}</span>
+      {detailText ? (
+        <span className="font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-muted)] truncate">
+          {detailText}
+        </span>
+      ) : null}
+      {row.diffStats ? (
+        <span
+          className="tabular-nums text-[11px] shrink-0"
+          data-testid="tool-row-diff-stats"
+          aria-label={`${row.diffStats.added} added, ${row.diffStats.removed} removed`}
+        >
+          <span className="text-[var(--color-success,#16a34a)]">+{row.diffStats.added}</span>
+          <span className="text-[var(--color-text-muted)] mx-[1px]">/</span>
+          <span className="text-[var(--color-danger,#dc2626)]">−{row.diffStats.removed}</span>
+        </span>
+      ) : null}
+      {isExpandable ? (
+        expanded ? (
+          <ChevronDown
+            className="ml-auto w-[12px] h-[12px] shrink-0 text-[var(--color-text-muted)]"
+            aria-hidden
+          />
+        ) : (
+          <ChevronRight
+            className="ml-auto w-[12px] h-[12px] shrink-0 text-[var(--color-text-muted)]"
+            aria-hidden
+          />
+        )
+      ) : null}
+    </>
+  );
 
   return (
-    <div className="text-[12.5px] py-[1px]">
-      <div className="flex items-center gap-[6px]" title={tooltip || row.label}>
-        {row.status === 'running' ? (
-          <span className="relative inline-flex w-[14px] h-[14px] items-center justify-center shrink-0">
-            <span className="absolute inline-block w-[7px] h-[7px] rounded-full bg-[var(--color-accent)] animate-pulse" />
-            <span className="absolute inline-block w-[12px] h-[12px] rounded-full border border-[var(--color-accent)]/30 animate-ping" />
-          </span>
-        ) : row.status === 'error' ? (
-          <Icon className="w-[14px] h-[14px] shrink-0 text-[var(--color-error)]" aria-hidden />
-        ) : (
-          <Icon className="w-[14px] h-[14px] shrink-0 text-[var(--color-text-muted)]" aria-hidden />
-        )}
-        <span className="text-[var(--color-text-primary)]">{primary}</span>
-        {detailText ? (
-          <span className="font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-muted)] truncate">
-            {detailText}
-          </span>
-        ) : null}
-        {hasDiff ? (
-          <button
-            type="button"
-            onClick={() => setDiffOpen((v) => !v)}
-            className="ml-auto rounded-[var(--radius-sm)] border border-[var(--color-border-subtle)] bg-[var(--color-background-secondary)] px-[6px] py-[1px] text-[11px] text-[var(--color-text-muted)] hover:bg-[var(--color-background-tertiary)]"
-            aria-expanded={diffOpen}
-            title="Show / hide diff"
-          >
-            {diffOpen ? 'Hide diff' : 'Diff'}
-          </button>
-        ) : null}
-      </div>
-      {hasDiff && diffOpen && row.diffPayload ? <DiffBlock payload={row.diffPayload} /> : null}
+    <div
+      className="text-[12.5px] py-[1px]"
+      data-testid="tool-row"
+      data-expanded={expanded ? 'true' : 'false'}
+    >
+      {isExpandable ? (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded ? 'true' : 'false'}
+          className="w-full flex items-center gap-[6px] text-left rounded-[var(--radius-sm)] -mx-[2px] px-[2px] hover:bg-[var(--color-background-secondary)]/60"
+          title={tooltip || row.label}
+        >
+          {head}
+        </button>
+      ) : (
+        <div className="flex items-center gap-[6px]" title={tooltip || row.label}>
+          {head}
+        </div>
+      )}
+      {expanded && hasDiff && row.diffPayload ? (
+        <div data-testid="tool-row-detail">
+          <DiffBlock payload={row.diffPayload} />
+        </div>
+      ) : null}
+      {expanded && !hasDiff && hasArgs && row.rawArgs ? (
+        <div data-testid="tool-row-detail">
+          <ArgsView args={row.rawArgs} />
+        </div>
+      ) : null}
       {partial !== null ? <ToolProgressStrip partial={partial} /> : null}
     </div>
   );
+}
+
+/** Plan 2026-05-08 P2 — pretty-prints non-diff tool args inside the
+ *  expanded panel of a `ToolRowView`. One line per key; long string
+ *  values truncate at 400 chars; nested objects render as compact
+ *  JSON. Sized to disappear into the chat density (mono 11 px) so
+ *  it reads as a power-user affordance, not a primary surface. */
+function ArgsView({ args }: { args: Record<string, unknown> }) {
+  const entries = Object.entries(args);
+  if (entries.length === 0) return null;
+  return (
+    <div className="mt-[var(--space-1)] ml-[20px] rounded-[var(--radius-sm)] border border-[var(--color-border-subtle)] bg-[var(--color-background)] px-[var(--space-2)] py-[6px] font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[11px] text-[var(--color-text-muted)] leading-[1.55] max-h-[220px] overflow-y-auto">
+      {entries.map(([k, v]) => (
+        <div key={k} className="flex gap-[6px]">
+          <span className="text-[var(--color-text-secondary)] shrink-0">{k}:</span>
+          <span className="break-all whitespace-pre-wrap">{formatArgValue(v)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function formatArgValue(v: unknown): string {
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === 'string') {
+    return v.length > 400 ? `${v.slice(0, 400)}…` : v;
+  }
+  if (typeof v === 'object') {
+    try {
+      const json = JSON.stringify(v);
+      return json.length > 400 ? `${json.slice(0, 400)}…` : json;
+    } catch {
+      return String(v);
+    }
+  }
+  return String(v);
 }
 
 /** Backlog-3 §4 — compact strip below a running tool row. Shows

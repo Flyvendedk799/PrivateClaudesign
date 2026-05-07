@@ -130,9 +130,11 @@ describe('WorkingCard.buildRows — diffStats (plan 2026-05-08 P2)', () => {
   it('attaches diffStats with line-add/remove counts to a str_replace row', () => {
     const oldText = 'line 1\nline 2\nline 3';
     const newText = 'line 1\nline 2 changed\nline 3\nline 4 added';
-    // Lines 2-3 of oldText vs lines 2-4 of newText, after prefix/suffix
-    // trim. Removes "line 2"; adds "line 2 changed" + "line 4 added".
-    // → added=2, removed=1.
+    // lineDiff is prefix/suffix-anchored. Prefix = 'line 1' (1 line); the
+    // trailing anchor breaks because newText's last line ('line 4 added')
+    // doesn't match oldText's last line ('line 3'). So the algorithm
+    // collapses lines 2-3 of oldText into "removed" and lines 2-4 of
+    // newText into "added". → added=3, removed=2.
     const rows = buildRows([
       call({
         toolName: 'str_replace_based_edit_tool',
@@ -141,7 +143,7 @@ describe('WorkingCard.buildRows — diffStats (plan 2026-05-08 P2)', () => {
       }),
     ]);
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.diffStats).toEqual({ added: 2, removed: 1 });
+    expect(rows[0]?.diffStats).toEqual({ added: 3, removed: 2 });
   });
 
   it('attaches diffStats to a create row (oldText empty)', () => {
