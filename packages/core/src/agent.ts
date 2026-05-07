@@ -75,6 +75,13 @@ import { makeAssertGameInvariantsTool } from './tools/assert-game-invariants.js'
 import { createCameraGuard } from './tools/camera-pin.js';
 // gameplan §A5 — game-builder tools (registered when deps.gameMode is set).
 import { type ChooseEngineFn, makeChooseEngineTool } from './tools/choose-engine.js';
+// motion-graphics-plan §3 — motion-builder tools (registered when
+// deps.motionMode is set).
+import {
+  type ChooseMotionStyleFn,
+  type MotionStyleName,
+  makeChooseRemotionStyleTool,
+} from './tools/choose-remotion-style.js';
 import { makeDeclareTweakSchemaTool } from './tools/declare-tweak-schema.js';
 import {
   makeListDesignSkillsTool,
@@ -88,15 +95,36 @@ import {
   runArtifactChecks,
 } from './tools/done.js';
 import { createEditBudget } from './tools/edit-budget.js';
+// game-artifacts §5 — sprite/animation registry tools (registered when
+// deps.gameMode.artifactRegistry is set).
+import {
+  type GameArtifactRegistryDeps,
+  makeBindAnimationToSpriteTool,
+  makeCreateGameArtifactTool,
+  makeInspectGameArtifactTool,
+  makeListGameArtifactsTool,
+  makeResolveGameArtifactRefTool,
+  makeUpdateGameArtifactTool,
+  makeValidateGameArtifactsTool,
+} from './tools/game-artifacts.js';
 import { makeGenerateAudioAssetTool } from './tools/generate-audio-asset.js';
 import {
   type GenerateImageAssetFn,
   makeGenerateImageAssetTool,
 } from './tools/generate-image-asset.js';
 import { makeListFilesTool } from './tools/list-files.js';
+import {
+  type MotionCompositionRegistryDeps,
+  makeListCompositionsTool,
+  makeRegisterCompositionTool,
+} from './tools/motion-compositions.js';
 import { type Playtester, makePlaytestGameTool } from './tools/playtest-game.js';
 import { makeReadDesignSystemTool } from './tools/read-design-system.js';
 import { makeReadUrlTool } from './tools/read-url.js';
+import {
+  type MotionRenderStillFn,
+  makeRenderMotionPreviewTool,
+} from './tools/render-motion-preview.js';
 import { type RenderPreviewer, makeRenderPreviewTool } from './tools/render-preview.js';
 import { makeSetTodosTool } from './tools/set-todos.js';
 import { type TextEditorFsCallbacks, makeTextEditorTool } from './tools/text-editor.js';
@@ -105,6 +133,11 @@ import {
   type ValidateGameSceneFn,
   makeValidateGameSceneTool,
 } from './tools/validate-game-scene.js';
+import {
+  type ValidateMotionCompositionFn,
+  makeValidateMotionCompositionTool,
+} from './tools/validate-motion-composition.js';
+import { makeViewSkillRuleTool } from './tools/view-skill-rule.js';
 
 /** Local mirror of the assistant message shape that pi-agent-core emits (via
  *  pi-ai). Declared here so this file does not take a direct dependency on
@@ -361,7 +394,13 @@ function buildPiModel(
 async function collectSkills(
   log: CoreLogger,
   providerId: string,
-): Promise<{ blobs: string[]; warnings: string[] }> {
+): Promise<{
+  blobs: string[];
+  warnings: string[];
+  /** motion-graphics-plan §0.3 — raw skill list passed to
+   *  `view_skill_rule` so folder-format rule subpages are fetchable. */
+  loaded: import('@open-codesign/shared').LoadedSkill[];
+}> {
   const start = Date.now();
   try {
     const { loadBuiltinSkills } = await import('./skills/loader.js');
@@ -372,12 +411,12 @@ async function collectSkills(
       ms: Date.now() - start,
       skills: blobs.length,
     });
-    return { blobs, warnings: [] };
+    return { blobs, warnings: [], loaded: active };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const errorClass = err instanceof Error ? err.constructor.name : typeof err;
     log.warn('[generate] step=load_skills.fail', { errorClass, message });
-    return { blobs: [], warnings: [`Builtin skills unavailable: ${message}`] };
+    return { blobs: [], warnings: [`Builtin skills unavailable: ${message}`], loaded: [] };
   }
 }
 
@@ -855,6 +894,40 @@ export interface GenerateViaAgentDeps {
    */
   userSkills?: ReadonlyArray<readonly [name: string, source: string]> | undefined;
   /**
+   * motion-graphics-plan §0.3 — fully-loaded skills (built-in + user +
+   * project) so folder-format skills can expose their `rules/*.md`
+   * subpages via `view_skill_rule`. The tool is registered globally
+   * but no-ops on flat skills (rules array is empty). Optional —
+   * callers that haven't migrated to passing the full LoadedSkill set
+   * still work; view_skill_rule then reports "skill not found" until
+   * they wire it.
+   */
+  skills?: ReadonlyArray<import('@open-codesign/shared').LoadedSkill> | undefined;
+  /**
+   * motion-graphics-plan §1.1 — when present, the run is in motion-builder
+   * mode. The default toolset gains `choose_remotion_style`,
+   * `validate_motion_composition`, `render_motion_preview` (when `fs` is
+   * also set), plus the optional registry tools when `compositionRegistry`
+   * is wired. `read_design_system` and `view_frame` are dropped (they
+   * don't apply to Remotion compositions).
+   */
+  motionMode?:
+    | {
+        /** Persists the agent's `choose_remotion_style` decision. */
+        setStyle: ChooseMotionStyleFn;
+        /** Returns the style pinned for this run (latest
+         *  `choose_remotion_style` value, or the user's pre-pick). */
+        getCurrentStyle(): MotionStyleName | null;
+        /** Host-driven validator: regex pre-filter + bundle dry-run. */
+        validate: ValidateMotionCompositionFn;
+        /** Host-driven still-frame renderer (Remotion `renderStill`). */
+        renderStill?: MotionRenderStillFn | undefined;
+        /** Composition registry CRUD callbacks. When set the toolset gains
+         *  `register_composition` + `list_compositions`. */
+        compositionRegistry?: MotionCompositionRegistryDeps | undefined;
+      }
+    | undefined;
+  /**
    * gameplan §A5 — when present, the run is in game-builder mode. The
    * default toolset gains `choose_engine` (always) and `validate_game_scene`
    * (when `fs` is also set). `read_design_system` and `view_frame` are
@@ -879,6 +952,12 @@ export interface GenerateViaAgentDeps {
          *  drives synthetic events and reads `window.__game.debug.snapshot()`
          *  between them. Headless / vitest runs simply omit it. */
         playtester?: Playtester | undefined;
+        /** game-artifacts §5 — sprite/animation registry callbacks. When
+         *  provided, the agent gains list/inspect/resolve/create/update/
+         *  bind/validate tools so it can manage artifacts as first-class
+         *  objects rather than ad-hoc filenames. Host implementation lives
+         *  in apps/desktop/src/main/game-artifacts-db.ts. */
+        artifactRegistry?: GameArtifactRegistryDeps | undefined;
       }
     | undefined;
 }
@@ -927,13 +1006,19 @@ export async function generateViaAgent(
   log.info('[generate] step=build_request', ctx);
   const buildStart = Date.now();
   const skillResult = input.systemPrompt
-    ? { blobs: [] as string[], warnings: [] as string[] }
+    ? {
+        blobs: [] as string[],
+        warnings: [] as string[],
+        loaded: [] as import('@open-codesign/shared').LoadedSkill[],
+      }
     : await collectSkills(log, input.model.provider);
-  // gameplan §A6 — game-mode runs flip composeSystemPrompt to compose the
-  // game-builder layered prompt (game-workflow + engine guide + game-anti-slop
-  // + multi-file guide). Engine optionality is handled inside composeGame —
-  // when undefined, the prompt instructs the agent to call choose_engine.
+  // gameplan §A6 / motion-graphics-plan §3 — game- and motion-mode runs
+  // flip composeSystemPrompt to compose their respective layered prompts.
+  // Engine/style optionality is handled inside composeGame/composeMotion
+  // — when undefined, the prompt instructs the agent to call
+  // choose_engine / choose_remotion_style first.
   const isGameRun = input.artifactType === 'game';
+  const isMotionRun = input.artifactType === 'motion';
   const systemPrompt =
     input.systemPrompt ??
     composeSystemPrompt({
@@ -943,6 +1028,8 @@ export async function generateViaAgent(
       ...(skillResult.blobs.length > 0 ? { skills: skillResult.blobs } : {}),
       ...(isGameRun ? { artifactType: 'game' as const } : {}),
       ...(isGameRun && input.engine !== undefined ? { engine: input.engine } : {}),
+      ...(isMotionRun ? { artifactType: 'motion' as const } : {}),
+      ...(isMotionRun && input.motionStyle !== undefined ? { motionStyle: input.motionStyle } : {}),
     });
 
   const userContent = buildUserPromptWithContext(
@@ -962,6 +1049,7 @@ export async function generateViaAgent(
   //   - text_editor + list_files + done (when fs callbacks are provided)
   const defaultTools: AgentTool<TSchema, unknown>[] = [];
   const isGameMode = deps.gameMode !== undefined;
+  const isMotionMode = deps.motionMode !== undefined;
   defaultTools.push(makeSetTodosTool() as unknown as AgentTool<TSchema, unknown>);
   defaultTools.push(makeReadUrlTool() as unknown as AgentTool<TSchema, unknown>);
   // Design library — both `list_design_skills` + `view_*` lookup tools.
@@ -972,10 +1060,11 @@ export async function generateViaAgent(
   defaultTools.push(
     makeViewDesignSkillTool(deps.userSkills) as unknown as AgentTool<TSchema, unknown>,
   );
-  // gameplan §A5 — view_frame and read_design_system are design-mode-only.
-  // The game-mode toolset omits them (their guidance does not apply to
-  // canvas/WebGL/Python/.gd projects). Keep them on the design path.
-  if (!isGameMode) {
+  // gameplan §A5 / motion-graphics-plan §3 — view_frame and
+  // read_design_system are design-mode-only. The game- and motion-mode
+  // toolsets omit them (their guidance does not apply to canvas/WebGL/
+  // Python/.gd projects or to Remotion compositions). Keep on design.
+  if (!isGameMode && !isMotionMode) {
     defaultTools.push(makeViewFrameTool() as unknown as AgentTool<TSchema, unknown>);
     defaultTools.push(
       makeReadDesignSystemTool(() => input.designSystem ?? null) as unknown as AgentTool<
@@ -984,12 +1073,68 @@ export async function generateViaAgent(
       >,
     );
   }
+  // view_skill_rule is registered globally so flat-skill runs see a
+  // harmless no-op tool definition (the executor returns "no rules" when
+  // the named skill has none). Keeps the prompt-cache prefix stable
+  // across folder-skill / flat-skill mixes. We prefer the caller-passed
+  // `deps.skills` (lets tests inject) but fall back to the in-process
+  // loaded skill list collected above.
+  defaultTools.push(
+    makeViewSkillRuleTool(deps.skills ?? skillResult.loaded) as unknown as AgentTool<
+      TSchema,
+      unknown
+    >,
+  );
   // gameplan §A5 — choose_engine ships always for game-mode runs (no fs
   // dependency). The agent's first call in a game run; persists the
   // engine choice through the host-supplied setter.
   if (isGameMode && deps.gameMode !== undefined) {
     defaultTools.push(
       makeChooseEngineTool(deps.gameMode.setEngine) as unknown as AgentTool<TSchema, unknown>,
+    );
+  }
+  // motion-graphics-plan §3 — choose_remotion_style is the agent's first
+  // call in a motion-mode run. Always registered for motion-mode; no fs
+  // dependency. The host-supplied setter pins the style for the run.
+  if (isMotionMode && deps.motionMode !== undefined) {
+    defaultTools.push(
+      makeChooseRemotionStyleTool(deps.motionMode.setStyle) as unknown as AgentTool<
+        TSchema,
+        unknown
+      >,
+    );
+  }
+  if (isMotionMode && deps.motionMode?.compositionRegistry !== undefined) {
+    const reg = deps.motionMode.compositionRegistry;
+    defaultTools.push(makeRegisterCompositionTool(reg) as unknown as AgentTool<TSchema, unknown>);
+    defaultTools.push(makeListCompositionsTool(reg) as unknown as AgentTool<TSchema, unknown>);
+  }
+  // game-artifacts §5 — register sprite/animation registry tools when the
+  // host wired artifactRegistry deps (apps/desktop wires it; vitest /
+  // headless paths can opt out by not setting it). Only available in
+  // game-mode runs.
+  if (isGameMode && deps.gameMode?.artifactRegistry !== undefined) {
+    const registry = deps.gameMode.artifactRegistry;
+    defaultTools.push(
+      makeListGameArtifactsTool(registry) as unknown as AgentTool<TSchema, unknown>,
+    );
+    defaultTools.push(
+      makeInspectGameArtifactTool(registry) as unknown as AgentTool<TSchema, unknown>,
+    );
+    defaultTools.push(
+      makeResolveGameArtifactRefTool(registry) as unknown as AgentTool<TSchema, unknown>,
+    );
+    defaultTools.push(
+      makeCreateGameArtifactTool(registry) as unknown as AgentTool<TSchema, unknown>,
+    );
+    defaultTools.push(
+      makeUpdateGameArtifactTool(registry) as unknown as AgentTool<TSchema, unknown>,
+    );
+    defaultTools.push(
+      makeBindAnimationToSpriteTool(registry) as unknown as AgentTool<TSchema, unknown>,
+    );
+    defaultTools.push(
+      makeValidateGameArtifactsTool(registry) as unknown as AgentTool<TSchema, unknown>,
     );
   }
   if (deps.fs) {
@@ -1046,6 +1191,27 @@ export async function generateViaAgent(
           validate: deps.gameMode.validate,
         }) as unknown as AgentTool<TSchema, unknown>,
       );
+    }
+    // motion-graphics-plan §3 — validate_motion_composition + (optional)
+    // render_motion_preview. Both need fs to read src/Root.tsx +
+    // companion files; render_motion_preview also needs the host's
+    // Remotion `renderStill` shim, which is omitted in vitest/headless.
+    if (isMotionMode && deps.motionMode !== undefined) {
+      defaultTools.push(
+        makeValidateMotionCompositionTool({
+          fs: deps.fs,
+          getCurrentStyle: deps.motionMode.getCurrentStyle,
+          validate: deps.motionMode.validate,
+        }) as unknown as AgentTool<TSchema, unknown>,
+      );
+      if (deps.motionMode.renderStill !== undefined) {
+        defaultTools.push(
+          makeRenderMotionPreviewTool(deps.fs, deps.motionMode.renderStill) as unknown as AgentTool<
+            TSchema,
+            unknown
+          >,
+        );
+      }
     }
     // gameplan §E1 — generate_audio_asset only registers in game mode.
     // The bundled audio bank is keyword-routed retrieval; no provider

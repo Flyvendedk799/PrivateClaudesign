@@ -14,12 +14,30 @@ import type { ChatMessage, LoadedSkill } from '@open-codesign/shared';
 // ---------------------------------------------------------------------------
 
 /**
+ * motion-graphics-plan §0.3 — surface a one-line listing of `rules/*.md`
+ * subpages so the model knows what's fetchable via `view_skill_rule`.
+ * Returns the empty string for flat-format skills (no rules) so the
+ * legacy prompt blob stays byte-identical for those cases.
+ */
+function ruleListing(skill: LoadedSkill): string {
+  const rules = skill.rules ?? [];
+  if (rules.length === 0) return '';
+  const list = rules.map((r) => `- ${r.path}`).join('\n');
+  return [
+    '',
+    '',
+    `Available rule subpages (call \`view_skill_rule({ skillId: "${skill.id}", rulePath })\` to fetch):`,
+    list,
+  ].join('\n');
+}
+
+/**
  * Serialise the bodies of all enabled skills into a single block of text,
  * separated by a markdown hr so the model can distinguish skill boundaries.
  */
 export function buildSkillBlock(skills: LoadedSkill[]): string {
   return skills
-    .map((s) => `## Skill: ${s.frontmatter.name}\n\n${s.body.trim()}`)
+    .map((s) => `## Skill: ${s.frontmatter.name}\n\n${s.body.trim()}${ruleListing(s)}`)
     .join('\n\n---\n\n');
 }
 
@@ -136,5 +154,7 @@ export function injectSkillsIntoMessages(
  * removed.
  */
 export function formatSkillsForPrompt(skills: LoadedSkill[]): string[] {
-  return sortCanonical(skills).map((s) => `## Skill: ${s.frontmatter.name}\n\n${s.body.trim()}`);
+  return sortCanonical(skills).map(
+    (s) => `## Skill: ${s.frontmatter.name}\n\n${s.body.trim()}${ruleListing(s)}`,
+  );
 }

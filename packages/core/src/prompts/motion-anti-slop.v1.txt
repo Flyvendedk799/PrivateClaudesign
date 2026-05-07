@@ -1,0 +1,41 @@
+# Motion anti-slop (forbidden patterns)
+
+Every item below is a hard fail in production motion runs. The validator catches some via bundle errors; the rest are caught only by you reading your own code before `done`.
+
+## Determinism
+
+- **`Math.random()` anywhere in a composition.** Renders look different every frame, the preview never matches the final render. Use `random("some-seed")` from `'remotion'` — the seed is a stable string so runs are reproducible.
+- **`Date.now()` / `new Date()` inside a composition body.** Same problem: the value changes between renders. If you need a date, hardcode it or pass it via `inputProps`.
+- **`setTimeout` / `setInterval` / `requestAnimationFrame` for animation.** Remotion is frame-driven. These run off-clock and never land on the captured frame.
+
+## Animation libraries
+
+- **`framer-motion`, `react-spring`, `gsap`, `lottie-web` (without the `@remotion/lottie` wrapper).** Each one tries to drive its own clock; mixing it with Remotion's frame stream produces garbled output AND breaks the bundler's tree-shake.
+- **CSS `@keyframes` / CSS `transition`.** Off-clock, won't render at the captured frame. Use `interpolate(useCurrentFrame(), ...)` instead.
+
+## Frame timing
+
+- **Forgetting `useVideoConfig()`.** Hardcoding `30` for fps means a composition you author at 30fps breaks when the user changes the project to 60fps. Always pull `fps` from `useVideoConfig()`.
+- **`durationInFrames: 0` or negative.** Bundler accepts it, player shows blank. If you don't know the duration yet, default to `fps * 5` (a 5-second clip at the chosen fps).
+- **Missing `extrapolateLeft: 'clamp'` / `extrapolateRight: 'clamp'` on `interpolate()`.** Without `clamp` the value runs off the easing function past the input range and produces NaN — content disappears at the end of the composition.
+
+## Sequencing
+
+- **No `<Sequence>` wrapper for multi-scene compositions.** Without it, every scene starts at frame 0 and they overlap on frame 1. Each scene needs `<Sequence from={...} durationInFrames={...}>`.
+- **`<Sequence>` with `from` past `durationInFrames`.** The scene exists in source but is invisible in the player. Audit the math: `from + durationInFrames` should equal the next scene's `from`.
+
+## Static assets
+
+- **Hotlinked CDN assets.** `<Img src="https://example.com/hero.png">` works in dev but breaks in renders that don't have network. Always `staticFile('hero.png')` against a file in `public/`.
+- **Forgetting `loadFont` for custom fonts.** Without it, the first frames render in the system fallback before the custom font swaps in.
+
+## Sizing
+
+- **Hardcoded pixel sizes that don't scale with composition `width`/`height`.** A composition meant for both 1920×1080 and 1080×1920 (mobile) needs sizes derived from `useVideoConfig()`. Pull `width` from `useVideoConfig()` and size proportionally.
+- **`width: 100vw` / `height: 100vh`.** Inside a Remotion composition the viewport is the composition canvas; viewport units rarely behave the way you expect. Use `'100%'` inside an `<AbsoluteFill>` instead.
+
+## Visual taste (motion graphics specifically)
+
+- **All-default-system-font kinetic text.** Type IS the design in motion graphics. Pick one display font (Inter Display, Bebas Neue, Cooper Black for retro, Outfit for modern) loaded via `@remotion/google-fonts`.
+- **Linear interpolation everywhere.** Default linear easing reads as "I forgot to think about motion." Use `spring()` for entrances, `Easing.bezier(0.4, 0, 0.2, 1)` for exits, and reserve linear for things that genuinely should be linear (counters, progress bars).
+- **Single composition that does everything.** Even a 5-second motion clip benefits from at least 2 `<Sequence>` blocks (intro + outro). One-shot blocks read as a tech demo, not a designed clip.

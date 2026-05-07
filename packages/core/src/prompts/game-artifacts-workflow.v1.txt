@@ -1,0 +1,80 @@
+# Game artifacts workflow (mandatory for `artifactType: 'game'`)
+
+Game projects keep sprites and animations as **first-class artifacts** in a
+project registry, not as ad-hoc filenames. The host exposes a `<game_artifact_context>`
+block in the user's message and a set of agent tools (`list_game_artifacts`,
+`inspect_game_artifact`, `resolve_game_artifact_ref`, `create_game_artifact`,
+`update_game_artifact`, `bind_animation_to_sprite`, `validate_game_artifacts`)
+to manage them.
+
+## Identity rules
+
+- Sprite and animation records have a stable `id`, `slug`, and `prompt_alias`
+  (`@sprite:hero-knight`, `@animation:heavy-attack`). Refer to artifacts by
+  these — never by raw file path or display name.
+- `update_game_artifact` preserves id, slug, and alias unless the user asks
+  for a rename. Refining "the selected sprite" must NOT mint a new artifact.
+- Every artifact has a `primaryFilePath` plus zero or more `fileRefs`. When
+  editing game code, read the path from the registry, not from your memory
+  of what the prompt said.
+
+## Animation rules
+
+- An animation MUST have at least one bound sprite at creation time. Issue
+  `create_game_artifact(kind='animation', …)` and `bind_animation_to_sprite`
+  in the same step sequence.
+- One animation can bind to many sprites and one sprite can host many
+  animations. To "apply this walk cycle to the mage too", call
+  `bind_animation_to_sprite` with the existing animation id and the new
+  sprite id; do not duplicate the clip.
+- Bindings carry compatibility status (`compatible` / `needs_retarget` /
+  `broken`). When metadata divergence is large (different rig hash, frame
+  layout), pass `bindingStatus: 'needs_retarget'` and include retarget
+  metadata.
+
+## Selection-aware references
+
+The user can drive prompts with phrases like "make this sprite bulkier",
+"refine the selected sprite", "give it an idle animation", or
+"apply this walk cycle to the mage too". The `<game_artifact_context>` block
+already names the selected sprite, animation, and animation target. Resolve:
+
+1. Explicit `@sprite:` / `@animation:` aliases win.
+2. In the Sprites tab, "this", "selected", "it", "current sprite" → selected sprite.
+3. In the Animations tab, "this animation" → selected animation; "this sprite",
+   "target", "current target" → animation target sprite.
+4. If the prompt asks to create or refine an animation and no target sprite
+   resolves, BLOCK and ask the user to select one — do NOT guess.
+5. If a plain name matches multiple artifacts, call `resolve_game_artifact_ref`
+   and surface the ambiguity. Do not guess.
+
+## Authoring sequence
+
+When creating sprites or animations:
+
+1. Write any binary/text assets into `design_files` under
+   `assets/sprites/<slug>/…` or `assets/animations/<slug>/…` using
+   `text_editor.create`.
+2. Call `create_game_artifact` with the file refs you just wrote. The slug
+   comes from the human name; the host appends `-2` etc. on collision.
+3. For animations, immediately call `bind_animation_to_sprite` with the
+   target sprite id from the context block.
+4. Update game code (`index.html`, `main.py`, `Main.tscn`, etc.) to load
+   from the artifact's primary file path. The agent context block already
+   carries that path; do not improvise.
+5. Before `done`, call `validate_game_artifacts` so cross-cutting checks
+   (every animation has a binding, every binding points to existing
+   sprites, every artifact has at least one file ref) catch missed wires.
+
+## What to avoid
+
+- Authoring assets/sprites/<slug>/… files without a matching
+  `create_game_artifact` row. The Sprites tab will show the directory but
+  the registry will treat it as orphaned (it gets indexed at snapshot
+  time, but explicit registration carries richer metadata).
+- Renaming the file without `update_game_artifact`. The registry's
+  `primaryFilePath` will go stale and the iframe preview breaks.
+- Creating an animation without binding it. The Animations tab refuses to
+  preview an unbound animation.
+- Skipping the registry and reading "user mentioned hero knight" as a free
+  reference. `resolve_game_artifact_ref('hero knight')` is the contract.

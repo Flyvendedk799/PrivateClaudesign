@@ -32,7 +32,7 @@
  */
 import type { DoneError } from './done.js';
 
-export type HeuristicArtifactType = 'design' | 'game';
+export type HeuristicArtifactType = 'design' | 'game' | 'motion';
 
 const PLACEHOLDER_PATTERNS: Array<{ re: RegExp; label: string; gameSuppress?: boolean }> = [
   { re: /\bLorem ipsum\b/i, label: 'Lorem ipsum text' },
@@ -57,7 +57,11 @@ export function scanContentQuality(
 ): DoneError[] {
   const out: DoneError[] = [];
   for (const { re, label, gameSuppress } of PLACEHOLDER_PATTERNS) {
-    if (options.artifactType === 'game' && gameSuppress === true) continue;
+    if (
+      (options.artifactType === 'game' || options.artifactType === 'motion') &&
+      gameSuppress === true
+    )
+      continue;
     const m = re.exec(src);
     if (m === null) continue;
     const lineno = src.slice(0, m.index).split('\n').length;
@@ -391,17 +395,22 @@ export function runHeuristics(
   options: { artifactType?: HeuristicArtifactType } = {},
 ): DoneError[] {
   const isGame = options.artifactType === 'game';
-  const fatalA11y = isGame
+  const isMotion = options.artifactType === 'motion';
+  // Motion compositions don't have HTML semantic landmarks (they render
+  // React inside Remotion's frame stream); skip the same a11y / heading /
+  // responsive checks we already skip for game.
+  const skipHtmlSemantic = isGame || isMotion;
+  const fatalA11y = skipHtmlSemantic
     ? scanA11yFatal(src).filter((e) => e.source !== 'a11y.no_main_landmark')
     : scanA11yFatal(src);
   return [
     ...scanContentQuality(src, options),
     ...scanInteractivity(src),
     ...fatalA11y,
-    ...scanA11yAdvisory(src),
-    ...(isGame ? [] : scanHeadingHierarchy(src)),
-    ...(isGame ? [] : scanResponsiveSignals(src)),
-    ...scanDarkModeSupport(src),
+    ...(skipHtmlSemantic ? [] : scanA11yAdvisory(src)),
+    ...(skipHtmlSemantic ? [] : scanHeadingHierarchy(src)),
+    ...(skipHtmlSemantic ? [] : scanResponsiveSignals(src)),
+    ...(isMotion ? [] : scanDarkModeSupport(src)),
     ...scanLocalRefs(src, knownFiles),
   ];
 }

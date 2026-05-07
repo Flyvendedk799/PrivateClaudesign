@@ -1,7 +1,8 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CodesignError, ERROR_CODES } from '@open-codesign/shared';
+import type { LoadedSkillRule } from '@open-codesign/shared';
 import { type LoadedSkill, SkillFrontmatterV1 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -205,49 +206,31 @@ export async function loadSkillsFromDir(
   const errors: string[] = [];
 
   for (const entry of entries) {
-    if (extname(entry) !== '.md') continue;
-    const filePath = join(dir, entry);
-    const id = basename(entry, '.md');
+    const fullPath = join(dir, entry);
 
-    let raw: string;
+    if (extname(entry) === '.md') {
+      // Existing flat-skill path — preserved byte-for-byte. Adding the
+      // folder-skill branch below MUST NOT change anything that lands
+      // here. (motion-graphics-plan §0.3 byte-identical contract.)
+      const id = basename(entry, '.md');
+      const flatSkill = await loadFlatSkill({ filePath: fullPath, id, source, errors });
+      if (flatSkill !== null) skills.push(flatSkill);
+      continue;
+    }
+
+    // Folder-format detection — only triggers on directories that
+    // contain a SKILL.md. Anything else is silently ignored, matching
+    // the pre-existing skip behavior for non-.md entries.
+    let isDir = false;
     try {
-      raw = await readFile(filePath, 'utf-8');
-    } catch (err) {
-      errors.push(
-        `Could not read ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      continue;
+      isDir = (await stat(fullPath)).isDirectory();
+    } catch {
+      isDir = false;
     }
+    if (!isDir) continue;
 
-    let parsed: ParsedMd;
-    try {
-      parsed = parseFrontmatter(raw);
-    } catch (err) {
-      errors.push(
-        `Could not parse frontmatter in ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      continue;
-    }
-
-    // Merge: use filename as name fallback
-    const raw_fm = {
-      name: id,
-      ...parsed.frontmatter,
-    };
-
-    const result = SkillFrontmatterV1.safeParse(raw_fm);
-    if (!result.success) {
-      const issues = result.error.issues.map((i) => i.message).join('; ');
-      errors.push(`Invalid frontmatter in ${filePath}: ${issues}`);
-      continue;
-    }
-
-    skills.push({
-      id,
-      source,
-      frontmatter: result.data,
-      body: parsed.body.trim(),
-    });
+    const folderSkill = await loadFolderSkill({ dir: fullPath, source, errors });
+    if (folderSkill !== null) skills.push(folderSkill);
   }
 
   if (errors.length > 0) {
@@ -258,6 +241,114 @@ export async function loadSkillsFromDir(
   }
 
   return skills;
+}
+
+interface FlatLoadInput {
+  filePath: string;
+  id: string;
+  source: LoadedSkill['source'];
+  errors: string[];
+}
+
+async function loadFlatSkill(input: FlatLoadInput): Promise<LoadedSkill | null> {
+  let raw: string;
+  try {
+    raw = await readFile(input.filePath, 'utf-8');
+  } catch (err) {
+    input.errors.push(
+      `Could not read ${input.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+  let parsed: ParsedMd;
+  try {
+    parsed = parseFrontmatter(raw);
+  } catch (err) {
+    input.errors.push(
+      `Could not parse frontmatter in ${input.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+  const raw_fm = { name: input.id, ...parsed.frontmatter };
+  const result = SkillFrontmatterV1.safeParse(raw_fm);
+  if (!result.success) {
+    const issues = result.error.issues.map((i) => i.message).join('; ');
+    input.errors.push(`Invalid frontmatter in ${input.filePath}: ${issues}`);
+    return null;
+  }
+  return {
+    id: input.id,
+    source: input.source,
+    frontmatter: result.data,
+    body: parsed.body.trim(),
+  };
+}
+
+interface FolderLoadInput {
+  dir: string;
+  source: LoadedSkill['source'];
+  errors: string[];
+}
+
+async function loadFolderSkill(input: FolderLoadInput): Promise<LoadedSkill | null> {
+  const skillMdPath = join(input.dir, 'SKILL.md');
+  let body: string;
+  try {
+    body = await readFile(skillMdPath, 'utf-8');
+  } catch {
+    // Directory without SKILL.md — silently skip (matches the old
+    // "non-.md entries are ignored" behavior bit-for-bit).
+    return null;
+  }
+  let parsed: ParsedMd;
+  try {
+    parsed = parseFrontmatter(body);
+  } catch (err) {
+    input.errors.push(
+      `Could not parse frontmatter in ${skillMdPath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+  const id = basename(input.dir);
+  const raw_fm = { name: id, ...parsed.frontmatter };
+  const result = SkillFrontmatterV1.safeParse(raw_fm);
+  if (!result.success) {
+    const issues = result.error.issues.map((i) => i.message).join('; ');
+    input.errors.push(`Invalid frontmatter in ${skillMdPath}: ${issues}`);
+    return null;
+  }
+  const rules = await loadRules(input.dir);
+  return {
+    id,
+    source: input.source,
+    frontmatter: result.data,
+    body: parsed.body.trim(),
+    rules,
+  };
+}
+
+async function loadRules(skillDir: string): Promise<LoadedSkillRule[]> {
+  const rulesDir = join(skillDir, 'rules');
+  let entries: string[];
+  try {
+    entries = await readdir(rulesDir);
+  } catch {
+    return [];
+  }
+  const rules: LoadedSkillRule[] = [];
+  for (const entry of entries) {
+    if (extname(entry) !== '.md') continue;
+    const fullPath = join(rulesDir, entry);
+    let content: string;
+    try {
+      content = await readFile(fullPath, 'utf-8');
+    } catch {
+      continue;
+    }
+    rules.push({ path: `rules/${entry}`, content });
+  }
+  rules.sort((a, b) => a.path.localeCompare(b.path));
+  return rules;
 }
 
 export interface LoadAllSkillsOptions {

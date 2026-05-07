@@ -129,7 +129,9 @@ export function DesignCardPreview({ design }: DesignCardPreviewProps) {
   const [html, setHtml] = useState<string | null>(() =>
     readCache(cacheKey(design.id, design.updatedAt)),
   );
-  const [artifactType, setArtifactType] = useState<'html' | 'react' | 'svg' | 'game' | null>(null);
+  const [artifactType, setArtifactType] = useState<
+    'html' | 'react' | 'svg' | 'game' | 'motion' | null
+  >(null);
   const [failed, setFailed] = useState(false);
   const [visible, setVisible] = useState(false);
   const [scale, setScale] = useState(0.22);

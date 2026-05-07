@@ -115,3 +115,29 @@ describe('composeSystemPrompt — promptAssist injection (backlog-1 #9)', () => 
     expect(prompt).toContain('<device>mobile</device>');
   });
 });
+
+describe('composeSystemPrompt — motion-mode (motion-graphics-plan §3)', () => {
+  it('composes the motion-builder layered prompt when artifactType=motion', () => {
+    const out = composeSystemPrompt({ mode: 'create', artifactType: 'motion' });
+    expect(out).toContain('Motion graphics workflow');
+    expect(out).toContain('Remotion composition guide');
+    expect(out).toContain('Motion anti-slop');
+    // Motion is React-via-Remotion — design-mode workflow is excluded.
+    expect(out).not.toContain('# Design workflow');
+  });
+
+  it('surfaces a style pin preamble when motionStyle is set', () => {
+    const out = composeSystemPrompt({
+      mode: 'create',
+      artifactType: 'motion',
+      motionStyle: 'kinetic-text',
+    });
+    expect(out).toContain('Motion style pin');
+    expect(out).toContain('`kinetic-text`');
+  });
+
+  it('omits the style pin preamble when motionStyle is undefined', () => {
+    const out = composeSystemPrompt({ mode: 'create', artifactType: 'motion' });
+    expect(out).not.toContain('Motion style pin');
+  });
+});

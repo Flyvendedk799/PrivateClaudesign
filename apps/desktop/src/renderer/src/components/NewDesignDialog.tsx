@@ -1,10 +1,29 @@
 import { useT } from '@open-codesign/i18n';
-import { Boxes, FolderOpen, Gamepad2, Joystick, Sparkles } from 'lucide-react';
+import { Boxes, Film, FolderOpen, Gamepad2, Joystick, Sparkles } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import type { MotionStyle } from '../store';
 import { useCodesignStore } from '../store';
 
-type Mode = 'design' | 'game';
+type Mode = 'design' | 'game' | 'motion';
 type Engine = 'auto' | 'three' | 'phaser' | 'pygame' | 'godot';
+type StylePick = 'auto' | MotionStyle;
+
+const STYLE_OPTIONS: ReadonlyArray<{
+  value: StylePick;
+  label: string;
+  blurb: string;
+}> = [
+  { value: 'auto', label: 'Auto', blurb: 'Let the agent pick based on the brief' },
+  { value: '2d', label: '2D', blurb: 'Illustration / shapes / vector animation' },
+  {
+    value: 'kinetic-text',
+    label: 'Kinetic text',
+    blurb: 'Animated headlines, lyric video, intros',
+  },
+  { value: 'data-viz', label: 'Data viz', blurb: 'Animated chart reveal / dashboard motion' },
+  { value: '3d', label: '3D', blurb: 'Three.js / React Three Fiber inside Remotion' },
+  { value: 'mixed', label: 'Mixed', blurb: 'Combination of the above' },
+];
 
 const ENGINE_OPTIONS: ReadonlyArray<{
   value: Engine;
@@ -45,15 +64,16 @@ export function NewDesignDialog() {
   const createNewDesign = useCodesignStore((s) => s.createNewDesign);
   const setView = useCodesignStore((s) => s.setView);
   const lastPickedMode = useCodesignStore((s) => s.lastPickedMode);
-  const setPendingGameSelection = useCodesignStore((s) => s.setPendingGameSelection);
+  const setPendingArtifactSelection = useCodesignStore((s) => s.setPendingArtifactSelection);
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
   const [creating, setCreating] = useState(false);
-  // gameplan §A6 — dialog opens to the user's last-picked mode (Q2: c).
-  // Hydrated from preferences.json via store.lastPickedMode at boot.
+  // gameplan §A6 + motion-graphics-plan §0.2 — dialog opens to the user's
+  // last-picked mode. Hydrated from preferences.json via store.lastPickedMode.
   const [mode, setMode] = useState<Mode>(lastPickedMode);
   const [engine, setEngine] = useState<Engine>('auto');
+  const [style, setStyle] = useState<StylePick>('auto');
 
   useEffect(() => {
     if (open) setMode(lastPickedMode);
@@ -75,10 +95,15 @@ export function NewDesignDialog() {
   async function handleCreate(withPath: string | null) {
     setCreating(true);
     try {
-      // gameplan §A6 — stage the mode/engine into the store BEFORE creating
-      // the design so the next generate payload picks it up. 'auto' engine
-      // becomes null → agent's first tool call is choose_engine.
-      setPendingGameSelection(mode, mode === 'game' && engine !== 'auto' ? engine : null);
+      // gameplan §A6 + motion-graphics-plan §0.2 — stage mode/engine/style
+      // into the store BEFORE creating the design so the next generate
+      // payload picks them up. 'auto' engine/style becomes null → agent's
+      // first tool call is choose_engine / choose_remotion_style.
+      setPendingArtifactSelection({
+        mode,
+        engine: mode === 'game' && engine !== 'auto' ? engine : null,
+        motionStyle: mode === 'motion' && style !== 'auto' ? style : null,
+      });
       const design = await createNewDesign(withPath);
       close();
       setSelectedPath(null);
@@ -90,6 +115,7 @@ export function NewDesignDialog() {
 
   const busy = picking || creating;
   const isGame = mode === 'game';
+  const isMotion = mode === 'motion';
 
   return (
     <div
@@ -123,19 +149,19 @@ export function NewDesignDialog() {
           </p>
         </div>
 
-        {/* gameplan §A6 — Mode toggle (Design / Game). */}
+        {/* gameplan §A6 + motion-graphics-plan §0.2 — Mode toggle (Design / Game / Motion). */}
         <div
           role="tablist"
           aria-label="Artifact mode"
-          className="grid grid-cols-2 gap-1 p-1 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)]"
+          className="grid grid-cols-3 gap-1 p-1 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)]"
         >
           <button
             type="button"
             role="tab"
-            aria-selected={!isGame}
+            aria-selected={!isGame && !isMotion}
             onClick={() => setMode('design')}
             className={`flex items-center justify-center gap-2 h-9 rounded-[var(--radius-sm)] text-[var(--text-sm)] font-medium transition-colors ${
-              !isGame
+              !isGame && !isMotion
                 ? 'bg-[var(--color-background)] text-[var(--color-text-primary)] shadow-sm'
                 : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
             }`}
@@ -157,9 +183,61 @@ export function NewDesignDialog() {
             <Gamepad2 className="size-4" />
             Game
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={isMotion}
+            onClick={() => setMode('motion')}
+            className={`flex items-center justify-center gap-2 h-9 rounded-[var(--radius-sm)] text-[var(--text-sm)] font-medium transition-colors ${
+              isMotion
+                ? 'bg-[var(--color-background)] text-[var(--color-text-primary)] shadow-sm'
+                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+            }`}
+          >
+            <Film className="size-4" />
+            Motion
+          </button>
         </div>
 
-        {isGame ? (
+        {isMotion ? (
+          <div className="space-y-2">
+            <p className="text-[var(--text-xs)] text-[var(--color-text-secondary)]">Style</p>
+            <div className="space-y-1.5">
+              {STYLE_OPTIONS.map((opt) => (
+                <label
+                  key={opt.value}
+                  className={`flex items-start gap-2 p-2.5 rounded-[var(--radius-md)] border cursor-pointer transition-colors ${
+                    style === opt.value
+                      ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10'
+                      : 'border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="motion-style"
+                    value={opt.value}
+                    checked={style === opt.value}
+                    onChange={() => setStyle(opt.value)}
+                    className="mt-0.5"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 text-[var(--text-sm)] font-medium text-[var(--color-text-primary)]">
+                      {opt.value === 'auto' ? (
+                        <Boxes className="size-3.5" />
+                      ) : (
+                        <Film className="size-3.5" />
+                      )}
+                      {opt.label}
+                    </div>
+                    <div className="text-[var(--text-xs)] text-[var(--color-text-secondary)] mt-0.5">
+                      {opt.blurb}
+                    </div>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+        ) : isGame ? (
           <div className="space-y-2">
             <p className="text-[var(--text-xs)] text-[var(--color-text-secondary)]">Engine</p>
             <div className="space-y-1.5">

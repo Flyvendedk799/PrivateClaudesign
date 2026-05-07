@@ -266,7 +266,7 @@ const MAX_TOTAL_DONE_CALLS = 6;
  *  silent palette / radius / shadow swaps surface as a row the agent
  *  can choose to acknowledge or fix. Pure — no side effects. */
 export interface RunArtifactChecksOptions {
-  artifactType?: 'design' | 'game' | undefined;
+  artifactType?: 'design' | 'game' | 'motion' | undefined;
   /** Content from the last successful verify of the same path, or
    *  null on the first verify of a run. */
   previousContent?: string | null;
@@ -276,7 +276,7 @@ export async function runArtifactChecks(
   fs: TextEditorFsCallbacks,
   runtimeVerify: DoneRuntimeVerifier | undefined,
   path: string,
-  artifactTypeOrOptions?: 'design' | 'game' | RunArtifactChecksOptions,
+  artifactTypeOrOptions?: 'design' | 'game' | 'motion' | RunArtifactChecksOptions,
 ): Promise<{ found: boolean; content?: string; errors: DoneError[] }> {
   const opts: RunArtifactChecksOptions =
     typeof artifactTypeOrOptions === 'string'
@@ -308,11 +308,12 @@ export async function runArtifactChecks(
     ...runHeuristics(file.content, knownFiles, artifactType === undefined ? {} : { artifactType }),
   ];
   // Phase 6 backport — silent theme-token swap detection. Only runs in
-  // design mode (game artifacts have their own engine-specific theme
-  // story); only fires when a previous snapshot is supplied so the very
-  // first verify of a run is silent.
+  // design mode (game / motion artifacts have their own theme stories);
+  // only fires when a previous snapshot is supplied so the very first
+  // verify of a run is silent.
   if (
     artifactType !== 'game' &&
+    artifactType !== 'motion' &&
     typeof previousContent === 'string' &&
     previousContent.length > 0
   ) {
@@ -330,7 +331,7 @@ export async function runArtifactChecks(
   // as a single advisory row carrying the step count; the runtime
   // executes the plan via Playwright when the host opts in (lazy-loaded
   // per the §5 hard constraint). Skipped for game artifacts.
-  if (artifactType !== 'game') {
+  if (artifactType !== 'game' && artifactType !== 'motion') {
     const playtestPlan = planPlaytest(file.content);
     if (playtestPlan.shouldPlaytest) {
       const summary = playtestPlan.steps
@@ -380,7 +381,7 @@ export function makeVerifyArtifactTool(
   fs: TextEditorFsCallbacks,
   runtimeVerify?: DoneRuntimeVerifier,
   editBudget?: EditBudget,
-  artifactType?: 'design' | 'game',
+  artifactType?: 'design' | 'game' | 'motion',
 ): AgentTool<typeof VerifyParams, VerifyDetails> {
   // Phase 4 — content-hash memoization. Repeat verifies with no edit
   // hit the cache and skip the 200–800 ms re-parse. Per-instance state
@@ -484,7 +485,7 @@ export function makeDoneTool(
   fs: TextEditorFsCallbacks,
   runtimeVerify?: DoneRuntimeVerifier,
   logger: CoreLogger = NOOP_LOGGER,
-  artifactType?: 'design' | 'game',
+  artifactType?: 'design' | 'game' | 'motion',
 ): AgentTool<typeof DoneParams, DoneDetails> {
   // Per-tool-instance state. `makeDoneTool` is called once per `Agent`
   // construction (see generateViaAgent), so these counters are naturally

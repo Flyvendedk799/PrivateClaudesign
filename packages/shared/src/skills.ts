@@ -17,11 +17,25 @@ export const SkillFrontmatterV1 = z.object({
 
 export type SkillFrontmatterV1 = z.infer<typeof SkillFrontmatterV1>;
 
+export interface LoadedSkillRule {
+  /** Path the model references when calling `view_skill_rule`. Always
+   *  POSIX-relative to the skill folder, e.g. `rules/timing.md`. */
+  path: string;
+  /** Full markdown body of the rule file. */
+  content: string;
+}
+
 export interface LoadedSkill {
-  /** File slug — filename minus extension (e.g. "frontend-design-anti-slop"). */
+  /** File slug — filename minus extension (e.g. "frontend-design-anti-slop")
+   *  for flat skills, or the folder name for folder-format skills. */
   id: string;
   source: 'builtin' | 'user' | 'project';
   frontmatter: SkillFrontmatterV1;
   /** Markdown body after the closing --- delimiter. */
   body: string;
+  /** motion-graphics-plan §0.3 — rule subpages discovered for folder-format
+   *  skills (anything in `<skill-dir>/rules/*.md`). Empty array for flat
+   *  `.md` skills. The agent can fetch any of these by path via
+   *  `view_skill_rule`. */
+  rules?: LoadedSkillRule[];
 }

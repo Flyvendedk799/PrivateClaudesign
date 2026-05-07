@@ -20,6 +20,11 @@ import type BetterSqlite3 from 'better-sqlite3';
 import type { BrowserWindow } from 'electron';
 import { bindWorkspace, checkWorkspaceFolderExists, openWorkspaceFolder } from './design-workspace';
 import { dialog, ipcMain } from './electron-runtime';
+import {
+  restoreGameArtifactsFromSnapshot,
+  snapshotGameArtifactsForSnapshot,
+} from './game-artifacts-db';
+import { indexGameArtifactsFromFiles, regenerateArtifactsRegistry } from './game-artifacts-import';
 import { getLogger } from './logger';
 import {
   createDesign,
@@ -144,7 +149,7 @@ function parseSnapshotCreateInput(raw: unknown): SnapshotCreateInput {
   if (r['prompt'] !== null && typeof r['prompt'] !== 'string') {
     throw new CodesignError('prompt must be a string or null', 'IPC_BAD_INPUT');
   }
-  const validArtifactTypes = ['html', 'react', 'svg'] as const;
+  const validArtifactTypes = ['html', 'react', 'svg', 'game'] as const;
   if (!validArtifactTypes.includes(r['artifactType'] as (typeof validArtifactTypes)[number])) {
     throw new CodesignError(
       `artifactType must be one of: ${validArtifactTypes.join(', ')}`,
@@ -158,13 +163,32 @@ function parseSnapshotCreateInput(raw: unknown): SnapshotCreateInput {
     throw new CodesignError('message must be a string if provided', 'IPC_BAD_INPUT');
   }
 
-  const base = {
+  const validEngines = ['three', 'phaser', 'pygame', 'godot'] as const;
+  let engine: 'three' | 'phaser' | 'pygame' | 'godot' | null = null;
+  if (r['engine'] !== undefined && r['engine'] !== null) {
+    if (
+      typeof r['engine'] !== 'string' ||
+      !validEngines.includes(r['engine'] as (typeof validEngines)[number])
+    ) {
+      throw new CodesignError(
+        `engine must be one of: ${validEngines.join(', ')} (or null)`,
+        'IPC_BAD_INPUT',
+      );
+    }
+    engine = r['engine'] as (typeof validEngines)[number];
+  }
+  const engineVersion =
+    typeof r['engineVersion'] === 'string' ? (r['engineVersion'] as string) : null;
+
+  const base: SnapshotCreateInput = {
     designId: r['designId'] as string,
     parentId: r['parentId'] as string | null,
     type: r['type'] as SnapshotCreateInput['type'],
     prompt: r['prompt'] as string | null,
     artifactType: r['artifactType'] as SnapshotCreateInput['artifactType'],
     artifactSource: r['artifactSource'] as string,
+    engine,
+    engineVersion,
   };
   if (typeof r['message'] === 'string') {
     return { ...base, message: r['message'] };
@@ -253,6 +277,26 @@ export function registerSnapshotsIpc(db: Database): void {
         );
       }
     }
+    // game-artifacts §4 — for game-mode snapshots, opportunistically
+    // promote any `assets/sprites/*` / `assets/animations/*` directories
+    // the agent just authored into artifact rows BEFORE we capture the
+    // snapshot, then regenerate the registry file. Idempotent and cheap
+    // for design-mode (no assets dirs → no-op).
+    let indexed = { spritesAdded: 0, animationsAdded: 0 };
+    if (input.artifactType === 'game') {
+      try {
+        indexed = runDb('create.index-artifacts', () =>
+          indexGameArtifactsFromFiles(db, input.designId),
+        );
+        runDb('create.regenerate-registry', () => regenerateArtifactsRegistry(db, input.designId));
+      } catch (err) {
+        logger.warn('snapshot.index_artifacts.fail', {
+          designId: input.designId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     const snapshot = runDb('create', () => createSnapshot(db, input));
     // Multi-file artifacts — copy the design's live `design_files`
     // tree into `design_snapshot_files` so a future restore can rewind
@@ -263,11 +307,22 @@ export function registerSnapshotsIpc(db: Database): void {
     const filesCount = runDb('create.snapshot-files', () =>
       snapshotDesignFiles(db, snapshot.id, input.designId),
     );
+    // game-artifacts §10 — capture the registry rows + bindings against
+    // the new snapshot so restoring this snapshot later resurrects the
+    // sprite/animation tabs as they were. Cheap (no rows for design-mode
+    // designs) and idempotent.
+    const artifactCount = runDb('create.snapshot-artifacts', () =>
+      snapshotGameArtifactsForSnapshot(db, snapshot.id, input.designId),
+    );
     logger.info('snapshot.created', {
       id: snapshot.id,
       type: input.type,
       designId: input.designId,
       filesSnapshot: filesCount,
+      artifactsIndexedSprites: indexed.spritesAdded,
+      artifactsIndexedAnimations: indexed.animationsAdded,
+      artifactsSnapshot: artifactCount.artifacts,
+      bindingsSnapshot: artifactCount.bindings,
     });
     return snapshot;
   });

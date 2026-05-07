@@ -38,6 +38,7 @@ import {
   type UserSkillUpdateInput,
 } from '@open-codesign/shared';
 import type BetterSqlite3 from 'better-sqlite3';
+import { copyGameArtifactsBetweenDesigns } from './game-artifacts-db';
 import { getLogger } from './logger';
 
 // better-sqlite3 is a native module — require() instead of import.
@@ -111,7 +112,7 @@ export function applySchema(db: Database): void {
       parent_id      TEXT REFERENCES design_snapshots(id) ON DELETE SET NULL,
       type           TEXT NOT NULL CHECK(type IN ('initial','edit','fork')),
       prompt         TEXT,
-      artifact_type  TEXT NOT NULL CHECK(artifact_type IN ('html','react','svg','game')),
+      artifact_type  TEXT NOT NULL CHECK(artifact_type IN ('html','react','svg','game','motion')),
       artifact_source TEXT NOT NULL,
       created_at     TEXT NOT NULL,
       message        TEXT
@@ -596,6 +597,54 @@ function applyAdditiveMigrations(db: Database): void {
     );
   }
 
+  // motion-graphics-plan §1 — relax design_snapshots.artifact_type CHECK
+  // to admit 'motion'. Same pattern as the 'game' relaxation above; new
+  // installs already have the new constraint via the CREATE TABLE above
+  // and skip this branch.
+  const snapshotsCheckMotion = db
+    .prepare('SELECT value FROM db_meta WHERE key = ?')
+    .get('snapshots_artifact_type_motion_v1') as { value?: string } | undefined;
+  if (snapshotsCheckMotion === undefined) {
+    const sqlRow = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='design_snapshots'")
+      .get() as { sql?: string } | undefined;
+    const needsRebuild = !!sqlRow?.sql && !sqlRow.sql.includes("'motion'");
+    if (needsRebuild) {
+      const rebuild = db.transaction(() => {
+        db.exec(`
+          CREATE TABLE design_snapshots_new (
+            id              TEXT PRIMARY KEY,
+            schema_version  INTEGER NOT NULL DEFAULT 1,
+            design_id       TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+            parent_id       TEXT REFERENCES design_snapshots_new(id) ON DELETE SET NULL,
+            type            TEXT NOT NULL CHECK(type IN ('initial','edit','fork')),
+            prompt          TEXT,
+            artifact_type   TEXT NOT NULL CHECK(artifact_type IN ('html','react','svg','game','motion')),
+            artifact_source TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            message         TEXT,
+            engine          TEXT,
+            engine_version  TEXT
+          );
+          INSERT INTO design_snapshots_new
+            SELECT id, schema_version, design_id, parent_id, type, prompt,
+                   artifact_type, artifact_source, created_at, message,
+                   engine, engine_version
+              FROM design_snapshots;
+          DROP TABLE design_snapshots;
+          ALTER TABLE design_snapshots_new RENAME TO design_snapshots;
+          CREATE INDEX IF NOT EXISTS idx_snapshots_design_created
+            ON design_snapshots(design_id, created_at DESC);
+        `);
+      });
+      rebuild();
+    }
+    db.prepare('INSERT INTO db_meta (key, value) VALUES (?, ?)').run(
+      'snapshots_artifact_type_motion_v1',
+      new Date().toISOString(),
+    );
+  }
+
   // design_snapshot_files: snapshot of the multi-file game project bundle so
   // restore can recover the whole tree, not just one HTML blob. Same shape
   // proposed by the prior opengameplan; reused for all four engines.
@@ -618,6 +667,173 @@ function applyAdditiveMigrations(db: Database): void {
     `);
     db.prepare('INSERT INTO db_meta (key, value) VALUES (?, ?)').run(
       'snapshot_files_v1',
+      new Date().toISOString(),
+    );
+  }
+
+  // game-artifacts §1 — sprite/animation registry per design with stable
+  // identity, prompt aliases, file refs, and many-to-many bindings. Schema
+  // is additive; gated by the v1 db_meta marker so we only create tables
+  // once. Snapshot tables ride along in the same marker — they are
+  // logically one schema unit (artifact rows + binding rows + their
+  // captured-at-snapshot copies).
+  const gameArtifactsV1 = db
+    .prepare('SELECT value FROM db_meta WHERE key = ?')
+    .get('game_artifacts_v1') as { value?: string } | undefined;
+  if (gameArtifactsV1 === undefined) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS game_artifacts (
+        id                 TEXT PRIMARY KEY,
+        schema_version     INTEGER NOT NULL DEFAULT 1,
+        design_id          TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+        kind               TEXT NOT NULL CHECK(kind IN ('sprite','animation')),
+        name               TEXT NOT NULL,
+        slug               TEXT NOT NULL,
+        prompt_alias       TEXT NOT NULL,
+        status             TEXT NOT NULL DEFAULT 'ready'
+                              CHECK(status IN ('ready','generating','error','archived')),
+        engine             TEXT CHECK(engine IN ('three','phaser','pygame','godot')),
+        primary_file_path  TEXT,
+        preview_file_path  TEXT,
+        thumbnail_path     TEXT,
+        metadata_json      TEXT NOT NULL DEFAULT '{}',
+        provenance_json    TEXT NOT NULL DEFAULT '{}',
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL,
+        UNIQUE(design_id, slug),
+        UNIQUE(design_id, prompt_alias)
+      );
+      CREATE INDEX IF NOT EXISTS idx_game_artifacts_design_kind
+        ON game_artifacts(design_id, kind, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS game_artifact_files (
+        id            TEXT PRIMARY KEY,
+        artifact_id   TEXT NOT NULL REFERENCES game_artifacts(id) ON DELETE CASCADE,
+        design_id     TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+        path          TEXT NOT NULL,
+        role          TEXT NOT NULL CHECK(role IN (
+                        'source','texture','spritesheet','atlas','model','rig',
+                        'animation','thumbnail','preview','metadata','derived'
+                      )),
+        created_at    TEXT NOT NULL,
+        UNIQUE(artifact_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_game_artifact_files_design_path
+        ON game_artifact_files(design_id, path);
+
+      CREATE TABLE IF NOT EXISTS game_animation_bindings (
+        id              TEXT PRIMARY KEY,
+        design_id       TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+        animation_id    TEXT NOT NULL REFERENCES game_artifacts(id) ON DELETE CASCADE,
+        sprite_id       TEXT NOT NULL REFERENCES game_artifacts(id) ON DELETE CASCADE,
+        binding_status  TEXT NOT NULL DEFAULT 'compatible'
+                          CHECK(binding_status IN ('compatible','needs_retarget','broken')),
+        retarget_json   TEXT NOT NULL DEFAULT '{}',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        UNIQUE(animation_id, sprite_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_game_animation_bindings_sprite
+        ON game_animation_bindings(sprite_id);
+
+      CREATE TABLE IF NOT EXISTS game_artifact_snapshots (
+        id                 TEXT PRIMARY KEY,
+        schema_version     INTEGER NOT NULL DEFAULT 1,
+        snapshot_id        TEXT NOT NULL REFERENCES design_snapshots(id) ON DELETE CASCADE,
+        artifact_id        TEXT NOT NULL,
+        design_id          TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+        kind               TEXT NOT NULL CHECK(kind IN ('sprite','animation')),
+        name               TEXT NOT NULL,
+        slug               TEXT NOT NULL,
+        prompt_alias       TEXT NOT NULL,
+        status             TEXT NOT NULL,
+        engine             TEXT,
+        primary_file_path  TEXT,
+        preview_file_path  TEXT,
+        thumbnail_path     TEXT,
+        metadata_json      TEXT NOT NULL,
+        provenance_json    TEXT NOT NULL,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_game_artifact_snapshots_snapshot
+        ON game_artifact_snapshots(snapshot_id);
+
+      CREATE TABLE IF NOT EXISTS game_artifact_file_snapshots (
+        id                    TEXT PRIMARY KEY,
+        artifact_snapshot_id  TEXT NOT NULL REFERENCES game_artifact_snapshots(id) ON DELETE CASCADE,
+        path                  TEXT NOT NULL,
+        role                  TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS game_animation_binding_snapshots (
+        id              TEXT PRIMARY KEY,
+        snapshot_id     TEXT NOT NULL REFERENCES design_snapshots(id) ON DELETE CASCADE,
+        animation_id    TEXT NOT NULL,
+        sprite_id       TEXT NOT NULL,
+        binding_status  TEXT NOT NULL,
+        retarget_json   TEXT NOT NULL,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_game_animation_binding_snapshots_snapshot
+        ON game_animation_binding_snapshots(snapshot_id);
+    `);
+    db.prepare('INSERT INTO db_meta (key, value) VALUES (?, ?)').run(
+      'game_artifacts_v1',
+      new Date().toISOString(),
+    );
+  }
+
+  // motion-graphics-plan §1 — registry of `<Composition>` rows the agent
+  // registered for a motion-mode design. One row per Remotion composition;
+  // the renderer lists these in the Compositions tab and the iframe URL
+  // pulls `compositionId` from the selection. Snapshot table mirrors
+  // game_artifact_snapshots so a snapshot restore recovers the registry.
+  const motionCompositionsV1 = db
+    .prepare('SELECT value FROM db_meta WHERE key = ?')
+    .get('motion_compositions_v1') as { value?: string } | undefined;
+  if (motionCompositionsV1 === undefined) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS motion_compositions (
+        id                  TEXT PRIMARY KEY,
+        schema_version      INTEGER NOT NULL DEFAULT 1,
+        design_id           TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+        composition_id      TEXT NOT NULL,
+        name                TEXT NOT NULL,
+        duration_in_frames  INTEGER NOT NULL,
+        fps                 INTEGER NOT NULL,
+        width               INTEGER NOT NULL,
+        height              INTEGER NOT NULL,
+        entry_file          TEXT NOT NULL,
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL,
+        UNIQUE(design_id, composition_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_motion_compositions_design
+        ON motion_compositions(design_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS motion_composition_snapshots (
+        id                  TEXT PRIMARY KEY,
+        schema_version      INTEGER NOT NULL DEFAULT 1,
+        snapshot_id         TEXT NOT NULL REFERENCES design_snapshots(id) ON DELETE CASCADE,
+        composition_row_id  TEXT NOT NULL,
+        design_id           TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+        composition_id      TEXT NOT NULL,
+        name                TEXT NOT NULL,
+        duration_in_frames  INTEGER NOT NULL,
+        fps                 INTEGER NOT NULL,
+        width               INTEGER NOT NULL,
+        height              INTEGER NOT NULL,
+        entry_file          TEXT NOT NULL,
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_motion_composition_snapshots_snapshot
+        ON motion_composition_snapshots(snapshot_id);
+    `);
+    db.prepare('INSERT INTO db_meta (key, value) VALUES (?, ?)').run(
+      'motion_compositions_v1',
       new Date().toISOString(),
     );
   }
@@ -930,6 +1146,22 @@ export function duplicateDesign(db: Database, sourceId: string, newName: string)
         s.engine_version,
       );
     }
+
+    // game-artifacts: copy the design_files tree so the duplicate stands
+    // alone (paths inside artifact rows still resolve), then mirror the
+    // artifact registry rows + bindings into the new design.
+    const sourceFiles = db
+      .prepare('SELECT path, content FROM design_files WHERE design_id = ?')
+      .all(sourceId) as Array<{ path: string; content: string }>;
+    if (sourceFiles.length > 0) {
+      const insertFile = db.prepare(
+        'INSERT INTO design_files (id, design_id, path, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      );
+      for (const f of sourceFiles) {
+        insertFile.run(crypto.randomUUID(), newId, f.path, f.content, now, now);
+      }
+    }
+    copyGameArtifactsBetweenDesigns(db, sourceId, newId);
   });
   tx();
 

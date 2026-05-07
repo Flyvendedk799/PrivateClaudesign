@@ -11,6 +11,12 @@ import type {
   Design,
   DesignSnapshot,
   ExternalConfigsDetection,
+  GameAnimationBinding,
+  GameArtifact,
+  GameArtifactCreateInput,
+  GameArtifactKind,
+  GameArtifactListResult,
+  GameArtifactUpdateInput,
   GeneratePayloadV1,
   ListEventsInput,
   ListEventsResult,
@@ -122,8 +128,9 @@ export interface Preferences {
   checkForUpdatesOnStartup: boolean;
   dismissedUpdateVersion: string;
   diagnosticsLastReadTs: number;
-  /** gameplan §A6 / Q2 — last-picked mode in the New-design dialog. */
-  lastPickedMode: 'design' | 'game';
+  /** gameplan §A6 / Q2 + motion-graphics-plan §0.2 — last-picked mode
+   *  in the New-design dialog. */
+  lastPickedMode: 'design' | 'game' | 'motion';
   /** Improver1 §6 — opt-out of mid-run auto-verify. Default false (ON). */
   incrementalVerifyDisabled: boolean;
 }
@@ -254,10 +261,24 @@ const api = {
      *  ('jsx'). 'vanilla' selects the multi-source-file guidance + the
      *  vanilla preview inliner. */
     pattern?: 'jsx' | 'vanilla';
-    /** gameplan §A6 — game-mode discriminator from the New-design dialog. */
-    artifactMode?: 'design' | 'game';
+    /** gameplan §A6 + motion-graphics-plan §0.2 — mode discriminator
+     *  from the New-design dialog. */
+    artifactMode?: 'design' | 'game' | 'motion';
     /** gameplan §A6 — engine pin (when artifactMode='game'). */
     gameEngine?: 'three' | 'phaser' | 'pygame' | 'godot';
+    /** motion-graphics-plan §1.1 — style pin (when artifactMode='motion'). */
+    motionStyle?: '2d' | '3d' | 'kinetic-text' | 'data-viz' | 'mixed';
+    /** game-artifacts §5 — selection state + alias mentions from the
+     *  active project tab; the main process resolves these into a
+     *  compact artifact context block injected into the agent's user
+     *  message. */
+    gameArtifactContext?: {
+      activeTab?: 'preview' | 'files' | 'sprites' | 'animations';
+      selectedSpriteId?: string;
+      selectedAnimationId?: string;
+      animationTargetSpriteId?: string;
+      mentionedAliases: string[];
+    };
   }) =>
     ipcRenderer.invoke('codesign:v1:generate', {
       schemaVersion: 1,
@@ -798,6 +819,83 @@ const api = {
   },
   openExternal: (url: string) =>
     ipcRenderer.invoke('codesign:v1:open-external', url) as Promise<void>,
+  gameArtifacts: {
+    list: (designId: string, opts?: { kind?: GameArtifactKind; includeArchived?: boolean }) =>
+      ipcRenderer.invoke('game-artifacts:v1:list', {
+        schemaVersion: 1,
+        designId,
+        ...(opts?.kind !== undefined ? { kind: opts.kind } : {}),
+        ...(opts?.includeArchived === true ? { includeArchived: true } : {}),
+      }) as Promise<GameArtifactListResult>,
+    get: (designId: string, artifactId: string) =>
+      ipcRenderer.invoke('game-artifacts:v1:get', {
+        schemaVersion: 1,
+        designId,
+        artifactId,
+      }) as Promise<GameArtifact | null>,
+    create: (input: GameArtifactCreateInput) =>
+      ipcRenderer.invoke('game-artifacts:v1:create', {
+        schemaVersion: 1,
+        input,
+      }) as Promise<GameArtifactListResult>,
+    update: (input: GameArtifactUpdateInput) =>
+      ipcRenderer.invoke('game-artifacts:v1:update', {
+        schemaVersion: 1,
+        input,
+      }) as Promise<GameArtifactListResult>,
+    archive: (designId: string, artifactId: string) =>
+      ipcRenderer.invoke('game-artifacts:v1:archive', {
+        schemaVersion: 1,
+        designId,
+        artifactId,
+      }) as Promise<GameArtifactListResult>,
+    listBindings: (designId: string, filter?: { spriteId?: string; animationId?: string }) =>
+      ipcRenderer.invoke('game-artifacts:v1:list-bindings', {
+        schemaVersion: 1,
+        designId,
+        ...(filter?.spriteId !== undefined ? { spriteId: filter.spriteId } : {}),
+        ...(filter?.animationId !== undefined ? { animationId: filter.animationId } : {}),
+      }) as Promise<GameAnimationBinding[]>,
+    bindAnimation: (input: {
+      designId: string;
+      animationId: string;
+      spriteId: string;
+      bindingStatus?: 'compatible' | 'needs_retarget' | 'broken';
+      retarget?: unknown;
+    }) =>
+      ipcRenderer.invoke('game-artifacts:v1:bind-animation', {
+        schemaVersion: 1,
+        ...input,
+      }) as Promise<GameArtifactListResult>,
+    unbindAnimation: (designId: string, animationId: string, spriteId: string) =>
+      ipcRenderer.invoke('game-artifacts:v1:unbind-animation', {
+        schemaVersion: 1,
+        designId,
+        animationId,
+        spriteId,
+      }) as Promise<GameArtifactListResult>,
+    resolvePromptRef: (designId: string, refText: string) =>
+      ipcRenderer.invoke('game-artifacts:v1:resolve-prompt-ref', {
+        schemaVersion: 1,
+        designId,
+        refText,
+      }) as Promise<{
+        kind?: GameArtifactKind;
+        slug?: string;
+        artifact: GameArtifact | null;
+      }>,
+    importFiles: (input: {
+      designId: string;
+      kind: GameArtifactKind;
+      files: Array<{ relativePath: string; content: string; role?: string }>;
+      targetSpriteId?: string;
+      name?: string;
+    }) =>
+      ipcRenderer.invoke('game-artifacts:v1:import-files', {
+        schemaVersion: 1,
+        ...input,
+      }) as Promise<GameArtifactListResult>,
+  },
   godot: {
     /** gameplan §D — surface the cached Godot CLI detection result. The
      *  Settings panel renders three states: ok / wrong-version / missing. */
@@ -831,6 +929,38 @@ const api = {
       const listener = (_evt: unknown, e: Parameters<typeof cb>[0]) => cb(e);
       ipcRenderer.on('codesign:v1:godot-web-build:progress', listener);
       return () => ipcRenderer.removeListener('codesign:v1:godot-web-build:progress', listener);
+    },
+  },
+  /** motion-graphics-plan §4 — registry + bundle event subscription
+   *  for motion-mode designs. */
+  motion: {
+    list: (designId: string) =>
+      ipcRenderer.invoke('motion:v1:list-compositions', { designId }) as Promise<
+        Array<{
+          id: string;
+          designId: string;
+          compositionId: string;
+          name: string;
+          durationInFrames: number;
+          fps: number;
+          width: number;
+          height: number;
+          entryFile: string;
+          createdAt: number;
+          updatedAt: number;
+        }>
+      >,
+    onBundleEvent: (
+      cb: (
+        event:
+          | { type: 'motion:bundled'; designId: string; bundleDir: string }
+          | { type: 'motion:bundle-error'; designId: string; errorText: string }
+          | { type: 'motion:composition-registered'; designId: string },
+      ) => void,
+    ) => {
+      const listener = (_evt: unknown, e: Parameters<typeof cb>[0]) => cb(e);
+      ipcRenderer.on('motion:event:v1', listener);
+      return () => ipcRenderer.removeListener('motion:event:v1', listener);
     },
   },
 };

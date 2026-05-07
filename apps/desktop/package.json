@@ -15,7 +15,8 @@
     "build:dir": "electron-vite build && electron-builder --dir",
     "release": "electron-vite build && electron-builder --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "smoke:motion": "node scripts/smoke-motion-bundler.mjs"
   },
   "dependencies": {
     "@open-codesign/artifacts": "workspace:*",
@@ -27,12 +28,16 @@
     "@open-codesign/shared": "workspace:*",
     "@open-codesign/templates": "workspace:*",
     "@open-codesign/ui": "workspace:*",
+    "@remotion/bundler": "^4.0.0",
+    "@remotion/player": "^4.0.0",
+    "@remotion/renderer": "^4.0.0",
     "better-sqlite3": "^12.9.0",
     "electron-log": "^5",
     "electron-updater": "^6.3.9",
     "lucide-react": "^1.8.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "remotion": "^4.0.0",
     "smol-toml": "^1.6.1",
     "zip-lib": "^1.0.4",
     "zustand": "^5.0.2"

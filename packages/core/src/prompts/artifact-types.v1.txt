@@ -100,6 +100,19 @@ When the brief mentions a logo placeholder, generic brand mark, or "Logo here":
 - Or render a hatched / dashed rectangle with the literal label "YOUR LOGO HERE" in caption type — explicit placeholder is better than a fake brand.
 - Never use a stock circular monogram with a single random letter — that pattern is the canonical "AI made this" tell.
 
+## Motion graphics (artifactType: motion)
+
+Motion compositions are the third top-level mode alongside `design` and `game`. The deliverable is a Remotion composition (a React component that renders frames over a known duration), NOT a static design or a playable game. The host bundles `src/Root.tsx` with `@remotion/bundler` and mounts the result via `<Player>` from `@remotion/player`.
+
+When the user asks for animated text, a logo intro, a kinetic title sequence, a data-viz reveal, an explainer clip, a product demo motion clip, or anything that's "make this move", switch to motion mode: choose style via `choose_remotion_style`, then author multi-file projects with `text_editor` + `validate_motion_composition` + `done`. The same craft bar applies — typography, palette, easing curves all matter — but the deliverable is a frame-driven Remotion composition, not a static page.
+
+Required structural beats:
+- A clear ENTRY (first ~15 % of the duration): one focal element appearing or settling into place. Not a fade-in from black; that reads as a slideshow.
+- A BODY (~70 % of the duration): the main motion / message / data reveal. The longest section by frames.
+- An EXIT (last ~15 %): something resolves — a CTA appears, the composition lands on a final frame, the loop point is visible.
+
+Density floor for motion: at minimum 2 `<Sequence>` blocks. Single-block compositions read as one-shot tech demos.
+
 ## Imagery rules
 
 - No hotlinked photos from any external host (including `placeholder.com`, `via.placeholder.com`, `placehold.it`, `unsplash.com`, `picsum.photos`). All imagery must be self-contained.

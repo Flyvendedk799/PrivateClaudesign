@@ -7,7 +7,7 @@ export const DesignSnapshotV1 = z.object({
   parentId: z.string().nullable(),
   type: z.enum(['initial', 'edit', 'fork']),
   prompt: z.string().nullable(),
-  artifactType: z.enum(['html', 'react', 'svg', 'game']),
+  artifactType: z.enum(['html', 'react', 'svg', 'game', 'motion']),
   artifactSource: z.string(),
   createdAt: z.string(),
   message: z.string().optional(),
@@ -320,7 +320,7 @@ export interface SnapshotCreateInput {
   parentId: string | null;
   type: 'initial' | 'edit' | 'fork';
   prompt: string | null;
-  artifactType: 'html' | 'react' | 'svg' | 'game';
+  artifactType: 'html' | 'react' | 'svg' | 'game' | 'motion';
   artifactSource: string;
   message?: string;
   /** Game-mode only — engine pin for the snapshot. (gameplan §6) */

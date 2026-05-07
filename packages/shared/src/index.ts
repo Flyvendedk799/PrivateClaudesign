@@ -62,8 +62,43 @@ export const DesignParam = z.discriminatedUnion('type', [
 ]);
 export type DesignParam = z.infer<typeof DesignParam>;
 
-export const ArtifactType = z.enum(['html', 'svg', 'slides', 'bundle', 'game']);
+export const ArtifactType = z.enum(['html', 'svg', 'slides', 'bundle', 'game', 'motion']);
 export type ArtifactType = z.infer<typeof ArtifactType>;
+
+/** motion-graphics-plan §1.1 — the visual flavor of a motion composition.
+ *  Drives prompt routing in the agent, mirrors `GameEngine` for game-mode.
+ *  Set via the `choose_remotion_style` tool or the New-design dialog. */
+export const MotionStyle = z.enum(['2d', '3d', 'kinetic-text', 'data-viz', 'mixed']);
+export type MotionStyle = z.infer<typeof MotionStyle>;
+
+export const MOTION_COMPOSITION_SCHEMA_VERSION = 1 as const;
+
+/** motion-graphics-plan §1.1 — registered Remotion `<Composition>` in a
+ *  motion-mode design's `src/Root.tsx`. One row per `<Composition>` tag the
+ *  agent registers; `register_composition` upserts these. */
+export const MotionCompositionV1 = z.object({
+  schemaVersion: z.literal(MOTION_COMPOSITION_SCHEMA_VERSION),
+  id: z.string().min(1),
+  designId: z.string().min(1),
+  /** The `<Composition id="...">` value — what the player references. */
+  compositionId: z.string().min(1),
+  name: z.string().min(1),
+  durationInFrames: z.number().positive(),
+  fps: z.number().positive(),
+  width: z.number().positive(),
+  height: z.number().positive(),
+  /** Path to the file that registers this composition. Almost always
+   *  `src/Root.tsx` but the agent can split. */
+  entryFile: z.string().min(1),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type MotionComposition = z.infer<typeof MotionCompositionV1>;
+
+/** Two-state preview discriminator: live composition playback (default) or
+ *  a single-frame still inspection. Mirrors `GamePreviewMode`. */
+export const MotionPreviewMode = z.enum(['composition', 'frame']);
+export type MotionPreviewMode = z.infer<typeof MotionPreviewMode>;
 
 /** Engine pin for game-mode designs. NULL on every design-mode artifact;
  *  required (set via `choose_engine` tool or the New-design dialog) on game
@@ -170,6 +205,15 @@ export type GeneratePayload = z.infer<typeof GeneratePayload>;
 /** @deprecated Use GeneratePayloadV1. */
 export type LegacyGeneratePayload = GeneratePayload;
 
+export const GameArtifactPromptContextPayload = z.object({
+  activeTab: z.enum(['preview', 'files', 'sprites', 'animations']).optional(),
+  selectedSpriteId: z.string().optional(),
+  selectedAnimationId: z.string().optional(),
+  animationTargetSpriteId: z.string().optional(),
+  mentionedAliases: z.array(z.string()).max(32).default([]),
+});
+export type GameArtifactPromptContextPayload = z.infer<typeof GameArtifactPromptContextPayload>;
+
 export const GeneratePayloadV1 = z.object({
   schemaVersion: z.literal(1),
   prompt: z.string().min(1).max(32_000),
@@ -179,6 +223,12 @@ export const GeneratePayloadV1 = z.object({
   referenceUrl: z.string().url().optional(),
   attachments: z.array(LocalInputFile).max(12).default([]),
   generationId: GenerationId,
+  /** game-artifacts §5 — the renderer's view of what the user is selecting
+   *  + any explicit alias mentions parsed out of the prompt text. The main
+   *  process resolves these against the live registry to inject a compact
+   *  artifact context block into the agent's user message. Only meaningful
+   *  for `artifactMode === 'game'`. */
+  gameArtifactContext: GameArtifactPromptContextPayload.optional(),
   /** Optional so older clients / tests that don't set it still parse.
    *  Present in the renderer path so agent stream events can route to
    *  the right design's chat bubble. */
@@ -192,15 +242,20 @@ export const GeneratePayloadV1 = z.object({
    *  most callers). `'vanilla'` = multi-source-file HTML+CSS+JS matching
    *  Claude Design exports. Forwarded to GenerateInput.pattern. */
   pattern: z.enum(['jsx', 'vanilla']).optional(),
-  /** gameplan §A6 — game-mode discriminator. When 'game', the IPC handler
-   *  routes through the game-builder agent flow (gameMode deps wired,
-   *  game-mode prompts composed via composeSystemPrompt). Defaults to
-   *  'design' for back-compat with existing clients. */
-  artifactMode: z.enum(['design', 'game']).optional(),
+  /** gameplan §A6 / motion-graphics-plan §1.1 — mode discriminator. When
+   *  'game' or 'motion' the IPC handler routes through the matching agent
+   *  flow (gameMode/motionMode deps wired, mode-specific prompts composed
+   *  via composeSystemPrompt). Defaults to 'design' for back-compat with
+   *  existing clients. */
+  artifactMode: z.enum(['design', 'game', 'motion']).optional(),
   /** Game-mode engine pin from the New-design dialog. When undefined and
    *  artifactMode === 'game', the agent's first tool call is
    *  `choose_engine` and the engine lands on the snapshot from there. */
   gameEngine: GameEngine.optional(),
+  /** motion-graphics-plan §1.1 — motion-mode style pin from the
+   *  New-design dialog. When undefined and artifactMode === 'motion' the
+   *  agent's first tool call is `choose_remotion_style`. */
+  motionStyle: MotionStyle.optional(),
 });
 export type GeneratePayloadV1 = z.infer<typeof GeneratePayloadV1>;
 
@@ -397,6 +452,38 @@ export { DesignTokenV1, DesignTokenSet } from './design-token';
 export type { DesignToken } from './design-token';
 
 export {
+  GAME_ARTIFACT_SCHEMA_VERSION,
+  GameAnimationBinding,
+  GameAnimationBindingStatus,
+  GameArtifact,
+  GameArtifactCreateInput,
+  GameArtifactFile,
+  GameArtifactFileRefInput,
+  GameArtifactFileRole,
+  GameArtifactImportInput,
+  GameArtifactKind,
+  GameArtifactListResult,
+  GameArtifactProvenance,
+  GameArtifactSelection,
+  GameArtifactStatus,
+  GameArtifactUpdateInput,
+  GamePreviewMode,
+  AnimationArtifactMetadata,
+  GameArtifactBaseMetadata,
+  GameArtifactMetadata,
+  SpriteArtifactMetadata,
+  aliasForArtifact,
+  extractArtifactAliases,
+  parseArtifactAlias,
+  slugifyArtifactName,
+} from './game-artifact';
+export type {
+  GameArtifactPreviewManifest,
+  GameArtifactRegistry,
+  GameArtifactRegistryEntry,
+} from './game-artifact';
+
+export {
   CHAT_MESSAGE_SCHEMA_VERSION,
   ChatMessageKind,
   ChatMessageRowV1,
@@ -449,7 +536,7 @@ export type {
 } from './snapshot';
 
 export { SkillFrontmatterV1 } from './skills';
-export type { LoadedSkill } from './skills';
+export type { LoadedSkill, LoadedSkillRule } from './skills';
 
 export { summarizeSnapshotDiff } from './snapshot-diff';
 export type { SnapshotDiffOptions } from './snapshot-diff';

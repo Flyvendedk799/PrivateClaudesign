@@ -71,6 +71,11 @@ export {
   type TextEditorDetails,
 } from './tools/text-editor.js';
 export { makeSetTodosTool, type SetTodosDetails } from './tools/set-todos.js';
+export type {
+  CompactArtifact,
+  DetailedArtifact,
+  GameArtifactRegistryDeps,
+} from './tools/game-artifacts.js';
 export { makeListFilesTool, type ListFilesDetails } from './tools/list-files.js';
 export { makeReadUrlTool, type ReadUrlDetails } from './tools/read-url.js';
 export {
@@ -169,13 +174,17 @@ export interface GenerateInput {
    * Use `applyComment()` for `'revise'`; `'tweak'` has no public entry point yet.
    */
   mode?: Extract<PromptComposeOptions['mode'], 'create'> | undefined;
-  /** gameplan §A6 — when 'game', composeSystemPrompt composes the
-   *  game-builder layered prompt and the agent layer wires deps.gameMode. */
-  artifactType?: 'design' | 'game' | undefined;
+  /** gameplan §A6 / motion-graphics-plan §1.1 — when 'game' or 'motion',
+   *  composeSystemPrompt composes the matching layered prompt and the
+   *  agent layer wires deps.gameMode / deps.motionMode. */
+  artifactType?: 'design' | 'game' | 'motion' | undefined;
   /** gameplan §A6 — engine pin for game-mode runs (set by the New-design
    *  dialog or carried from a prior snapshot). When omitted on a game run
    *  the agent calls `choose_engine` first. */
   engine?: 'three' | 'phaser' | 'pygame' | 'godot' | undefined;
+  /** motion-graphics-plan §1.1 — style pin for motion-mode runs. When
+   *  omitted on a motion run the agent calls `choose_remotion_style` first. */
+  motionStyle?: '2d' | '3d' | 'kinetic-text' | 'data-viz' | 'mixed' | undefined;
   signal?: AbortSignal | undefined;
   onRetry?: ((info: RetryReason) => void) | undefined;
   /**
@@ -323,7 +332,7 @@ interface ModelRunInput {
   allowKeyless?: boolean | undefined;
   reasoningLevel?: ReasoningLevel | undefined;
   cacheRetention?: CacheRetention | undefined;
-  artifactType?: 'design' | 'game' | undefined;
+  artifactType?: 'design' | 'game' | 'motion' | undefined;
   signal?: AbortSignal | undefined;
   onRetry?: ((info: RetryReason) => void) | undefined;
   /** @see ApplyCommentInput.onTextDelta */
@@ -534,7 +543,8 @@ async function runModel(input: ModelRunInput): Promise<GenerateOutput> {
           // over the 'short' default. pi-ai's default is also 'short', so
           // pinning this explicitly survives a future pi-ai default change.
           cacheRetention:
-            input.cacheRetention ?? (input.artifactType === 'game' ? 'long' : 'short'),
+            input.cacheRetention ??
+            (input.artifactType === 'game' || input.artifactType === 'motion' ? 'long' : 'short'),
           ...(input.onTextDelta !== undefined ? { onTextDelta: input.onTextDelta } : {}),
         },
         {

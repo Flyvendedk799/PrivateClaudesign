@@ -53,9 +53,10 @@ export interface Preferences {
    *  Persisted so the unread-error badge doesn't flash every historical
    *  error after a restart. */
   diagnosticsLastReadTs: number;
-  /** gameplan §A6 / Q2 — the last mode picked in the New-design dialog.
-   *  The dialog opens to this tab on next launch. Defaults to 'design'. */
-  lastPickedMode: 'design' | 'game';
+  /** gameplan §A6 / Q2 + motion-graphics-plan §0.2 — the last mode
+   *  picked in the New-design dialog. The dialog opens to this tab on
+   *  next launch. Defaults to 'design'. */
+  lastPickedMode: 'design' | 'game' | 'motion';
   /** Improver1 §6 — opt-out of mid-run auto-verify_artifact. Default
    *  false (auto-verify ON). Set to true to suppress the synthetic
    *  verify steers on long runs (8+ turns) — primarily a debugging
@@ -120,7 +121,9 @@ function parsePersistedFile(parsed: Partial<PreferencesFile>): Preferences {
         ? parsed.diagnosticsLastReadTs
         : DEFAULTS.diagnosticsLastReadTs,
     lastPickedMode:
-      parsed.lastPickedMode === 'design' || parsed.lastPickedMode === 'game'
+      parsed.lastPickedMode === 'design' ||
+      parsed.lastPickedMode === 'game' ||
+      parsed.lastPickedMode === 'motion'
         ? parsed.lastPickedMode
         : DEFAULTS.lastPickedMode,
     incrementalVerifyDisabled:

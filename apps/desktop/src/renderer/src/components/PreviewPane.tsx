@@ -22,6 +22,12 @@ import { PreviewToolbar } from './PreviewToolbar';
 import { TweakPanel } from './TweakPanel';
 import { CommentBubble } from './comment/CommentBubble';
 import { PinOverlay } from './comment/PinOverlay';
+import { AnimationsTabView } from './game/AnimationsTabView';
+import { GameProjectTabs } from './game/GameProjectTabs';
+import { SpritesTabView } from './game/SpritesTabView';
+import { MotionCompositionsView } from './motion/MotionCompositionsView';
+import { MotionPreviewPane } from './motion/MotionPreviewPane';
+import { MotionProjectTabs } from './motion/MotionProjectTabs';
 
 export interface PreviewPaneProps {
   onPickStarter: (prompt: string) => void;
@@ -164,46 +170,10 @@ export function handlePreviewMessage(
 const COMMENT_HINT_CLASS =
   'absolute left-[var(--space-5)] top-[var(--space-5)] z-10 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-[var(--space-3)] py-[var(--space-1)] text-[var(--text-xs)] text-[var(--color-text-secondary)] shadow-[var(--shadow-soft)] backdrop-blur';
 
-/** A6.x — pick the iframe src for a game-mode design. Returns null for
- *  design-mode (PreviewSlot falls back to srcDoc). For Godot designs we
- *  only point at game-files:// once the user has built a web preview;
- *  before that the toolbar surfaces the build button and the iframe
- *  shows the agent-authored source via srcDoc as a (non-runnable)
- *  preview. Three.js / Phaser designs always use the game-files://
- *  origin so module imports + asset lookups resolve through the
- *  protocol handler. Pygame uses the same shape — the protocol layer's
- *  synthesizer fills in the missing index.html (Pyodide bootstrap) and
- *  manifest.json on demand from the registered runtime adapter. */
-export function resolveGameSrc(
-  designId: string,
-  engine: 'three' | 'phaser' | 'pygame' | 'godot' | null,
-  godotPreviewByDesign: Record<string, 'project' | 'build'>,
-): string | undefined {
-  if (engine === 'three' || engine === 'phaser' || engine === 'pygame') {
-    return `game-files://designs/${designId}/index.html`;
-  }
-  if (engine === 'godot' && godotPreviewByDesign[designId] === 'build') {
-    return `game-files://designs/${designId}/_build/index.html`;
-  }
-  return undefined;
-}
+import type { GamePreviewMode } from '@open-codesign/shared';
+import { resolveDesignFilesSrc, resolveGamePreviewSrc, resolveGameSrc } from '../lib/preview-src';
 
-/**
- * Pick the iframe src for a multi-file design-mode artifact. Returns a
- * `design-files://` URL with a cache-busting query string so the
- * iframe re-fetches each file after a write tick. Returns undefined
- * when the design only has a single file (or none) — caller falls
- * back to the cheaper `srcdoc` path. Game-mode designs route through
- * `resolveGameSrc` instead; this helper is design-mode-only.
- */
-export function resolveDesignFilesSrc(
-  designId: string,
-  multiFile: boolean,
-  reloadTick: number,
-): string | undefined {
-  if (!multiFile) return undefined;
-  return `design-files://designs/${designId}/index.html?v=${reloadTick}`;
-}
+export { resolveDesignFilesSrc, resolveGamePreviewSrc, resolveGameSrc };
 
 interface PreviewSlotProps {
   designId: string;
@@ -771,6 +741,20 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
 
   const activeTab = canvasTabs[activeCanvasTab];
   const showCommentUi = interactionMode === 'comment';
+  const currentArtifactType = useCodesignStore((s) => s.currentArtifactType);
+  // motion-graphics-plan §0.2 — primary mode discriminator. We still
+  // accept the legacy currentDesignEngine !== null fallback so designs
+  // hydrated before currentArtifactType existed don't lose their game
+  // chrome on the first render.
+  const isGameMode = currentArtifactType === 'game' || currentDesignEngine !== null;
+  const isMotionMode = currentArtifactType === 'motion';
+  const activeProjectTab = useCodesignStore((s) => s.activeProjectTab);
+  const activeMotionTab = useCodesignStore((s) => s.activeMotionTab);
+  const gamePreviewMode = useCodesignStore((s) =>
+    currentDesignId !== null
+      ? (s.gamePreviewModeByDesign[currentDesignId] ?? { mode: 'game' as const })
+      : ({ mode: 'game' as const } as GamePreviewMode),
+  );
   const snapshotComments = currentSnapshotId
     ? comments.filter((c) => c.snapshotId === currentSnapshotId)
     : [];
@@ -822,7 +806,19 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
         onDismiss={clearError}
       />
     );
-  } else if (activeTab?.kind === 'files' && previewHtml) {
+  } else if (isGameMode && activeProjectTab === 'sprites') {
+    body = <SpritesTabView />;
+  } else if (isGameMode && activeProjectTab === 'animations') {
+    body = <AnimationsTabView />;
+  } else if (isGameMode && activeProjectTab === 'files' && previewHtml) {
+    body = <FilesTabView />;
+  } else if (isMotionMode && activeMotionTab === 'compositions') {
+    body = <MotionCompositionsView />;
+  } else if (isMotionMode && activeMotionTab === 'files') {
+    body = <FilesTabView />;
+  } else if (isMotionMode && activeMotionTab === 'preview') {
+    body = <MotionPreviewPane />;
+  } else if (!isGameMode && !isMotionMode && activeTab?.kind === 'files' && previewHtml) {
     body = <FilesTabView />;
   } else {
     // Pool slots stay mounted even when the current design has no preview —
@@ -847,6 +843,15 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
               // the protocol when the active design has > 1 file in
               // `design_files`. Background slots fall through to srcdoc
               // (cheaper, and they're invisible anyway).
+              if (entry.id === currentDesignId && isGameMode) {
+                const gameUrl = resolveGamePreviewSrc({
+                  designId: entry.id,
+                  engine: currentDesignEngine,
+                  previewMode: gamePreviewMode,
+                  godotPreviewByDesign,
+                });
+                if (gameUrl !== undefined) return { srcUrl: gameUrl };
+              }
               const gameUrl = resolveGameSrc(entry.id, currentDesignEngine, godotPreviewByDesign);
               if (gameUrl !== undefined) return { srcUrl: gameUrl };
               if (entry.id === currentDesignId) {
@@ -891,7 +896,23 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
   return (
     <div className="flex min-h-0 flex-1">
       <div className="flex flex-col min-h-0 flex-1">
-        {isWelcome ? null : (
+        {isWelcome ? null : isMotionMode ? (
+          <>
+            <div className="flex items-stretch justify-between gap-[var(--space-2)] border-b border-[var(--color-border-muted)] bg-[var(--color-background-secondary)] pl-[var(--space-2)]">
+              <MotionProjectTabs />
+              <PreviewToolbar />
+            </div>
+            {activeMotionTab === 'files' && hasTabs ? <CanvasTabBar /> : null}
+          </>
+        ) : isGameMode ? (
+          <>
+            <div className="flex items-stretch justify-between gap-[var(--space-2)] border-b border-[var(--color-border-muted)] bg-[var(--color-background-secondary)] pl-[var(--space-2)]">
+              <GameProjectTabs />
+              <PreviewToolbar />
+            </div>
+            {activeProjectTab === 'files' && hasTabs ? <CanvasTabBar /> : null}
+          </>
+        ) : (
           <div className="flex items-stretch justify-between gap-[var(--space-2)] border-b border-[var(--color-border-muted)] bg-[var(--color-background-secondary)] pl-[var(--space-2)]">
             {hasTabs ? <CanvasTabBar /> : <div />}
             <PreviewToolbar />

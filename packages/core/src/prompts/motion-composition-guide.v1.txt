@@ -1,0 +1,137 @@
+# Remotion composition guide
+
+The host bundles your `src/Root.tsx` with `@remotion/bundler` on every save and mounts the result via `<Player>` from `@remotion/player`. This document covers the core API surface; deeper topics (audio, 3D, charts, captions, fonts) live in the `remotion` skill's `rules/*.md` subpages — fetch them via `view_skill_rule` when you need them.
+
+## File layout (single composition)
+
+```
+src/Root.tsx               # registerRoot() + <Composition> registration
+src/MainComposition.tsx    # the primary composition component
+public/                    # static assets — images, videos, fonts (auto-served)
+```
+
+## File layout (multi-scene)
+
+```
+src/Root.tsx
+src/MainComposition.tsx    # composes scenes via <Sequence>
+src/scenes/intro.tsx
+src/scenes/middle.tsx
+src/scenes/outro.tsx
+public/
+```
+
+## Lifecycle skeleton — `src/Root.tsx`
+
+```tsx
+import { registerRoot, Composition } from 'remotion';
+import { MainVideo } from './MainComposition';
+
+const RemotionRoot = () => (
+  <>
+    <Composition
+      id="main"
+      component={MainVideo}
+      durationInFrames={150}
+      fps={30}
+      width={1920}
+      height={1080}
+    />
+  </>
+);
+
+registerRoot(RemotionRoot);
+```
+
+`Composition.id` is what the agent passes to `register_composition` AND what the host's iframe URL queries via `?compositionId=`. Keep it in sync.
+
+## Composition skeleton — `src/MainComposition.tsx`
+
+```tsx
+import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring } from 'remotion';
+
+export const MainVideo: React.FC = () => {
+  const frame = useCurrentFrame();
+  const { fps, width, height, durationInFrames } = useVideoConfig();
+
+  const opacity = interpolate(frame, [0, 30], [0, 1], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  });
+  const scale = spring({ frame, fps, config: { damping: 12 } });
+
+  return (
+    <AbsoluteFill style={{ background: '#0d0d10', color: '#fafafa' }}>
+      <div
+        style={{
+          opacity,
+          transform: `scale(${scale})`,
+          fontSize: width / 12,
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        Hello, motion.
+      </div>
+    </AbsoluteFill>
+  );
+};
+```
+
+## Scene composition with `<Sequence>`
+
+```tsx
+import { AbsoluteFill, Sequence } from 'remotion';
+import { Intro } from './scenes/intro';
+import { Middle } from './scenes/middle';
+import { Outro } from './scenes/outro';
+
+export const MainVideo: React.FC = () => (
+  <AbsoluteFill>
+    <Sequence from={0} durationInFrames={45}><Intro /></Sequence>
+    <Sequence from={45} durationInFrames={75}><Middle /></Sequence>
+    <Sequence from={120} durationInFrames={30}><Outro /></Sequence>
+  </AbsoluteFill>
+);
+```
+
+Each scene uses `useCurrentFrame()` independently — Remotion offsets the frame value inside a `<Sequence>` so children think frame 0 is their entry point.
+
+## Common motion primitives
+
+- `interpolate(frame, [in, out], [from, to], opts)` — straight-line easing. Pair with `Easing.bezier(...)` for non-linear curves.
+- `spring({ frame, fps, from, to, config })` — physics-based easing. Defaults are usually fine; bump `damping` to slow oscillation.
+- `useCurrentFrame()` — current frame number (0-indexed within the enclosing `<Sequence>`).
+- `useVideoConfig()` — `{ fps, width, height, durationInFrames }`.
+- `<Img src={staticFile('logo.png')} />` — Remotion-aware `<img>` that defers render until the asset loads.
+- `<Audio src={staticFile('voice.mp3')} startFrom={0} endAt={120} />` — gapless audio playback synced to the frame stream.
+- `<Video src={staticFile('clip.mp4')} startFrom={0} />` — embeds a video; Remotion seeks frame-accurately.
+- `<OffthreadVideo>` — same as `<Video>` but runs decoding on a worker; preferable when the source is long.
+- `random(seed: string)` — deterministic RNG; use this instead of `Math.random()`.
+
+## Frame timing
+
+`durationInFrames` is the LAST frame inclusive. At 30 fps a 5-second clip is `durationInFrames: 150`. The shell template loops by default; the user controls play/pause/scrub through the `<Player>` UI.
+
+## Static assets
+
+- Put images, videos, audio, fonts in `public/` (or any folder you bundle in via the bundler — `public/` is convention). Reference via `staticFile('name.ext')`.
+- Fonts: load via `loadFont('Inter')` from `@remotion/google-fonts/Inter` to avoid layout shift. The skill's `rules/fonts.md` has the full pattern.
+
+## Performance
+
+- Avoid heavy DOM trees per frame. The bundler renders every frame; an animation that's expensive at 1× becomes 60× as expensive at 60 fps.
+- Memoize derived values (`useMemo`) when they don't depend on `frame`. The composition function re-runs on every frame.
+- For long compositions (> 30 s), break into scenes via `<Sequence>` so each scene's React tree is small.
+
+## Anti-patterns (forbidden)
+
+- `setTimeout` / `setInterval` / `requestAnimationFrame` — Remotion runs frame-by-frame, not time-by-time.
+- CSS keyframes / `transition` properties — they run off-clock and will not render at the frame the bundler captures.
+- `framer-motion`, `react-spring`, `gsap` — duplicate Remotion's own motion model and break server-side render.
+- `Math.random()` / `Date.now()` / `new Date()` — non-deterministic, breaks reproducible rendering. Use `random(seed)` from `'remotion'`.
+- Hardcoded pixel sizes that don't derive from `useVideoConfig()` — won't scale when the user changes composition dimensions.
+- A `<Composition>` whose `durationInFrames` is 0 or negative — bundler accepts it but the player blank-screens.

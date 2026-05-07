@@ -55,15 +55,51 @@ Full skill body here.
 // ---------------------------------------------------------------------------
 
 describe('loadSkillsFromDir()', () => {
-  it('loads 4 builtin skills from the real builtin directory', async () => {
+  it('loads the bundled builtin skills (4 flat + 1 folder)', async () => {
     const builtinDir = fileURLToPath(new URL('./builtin', import.meta.url));
     const skills = await loadSkillsFromDir(builtinDir, 'builtin');
-    expect(skills.length).toBe(4);
+    expect(skills.length).toBe(5);
     const ids = skills.map((s) => s.id).sort();
     expect(ids).toContain('frontend-design-anti-slop');
     expect(ids).toContain('pitch-deck');
     expect(ids).toContain('data-viz-recharts');
     expect(ids).toContain('mobile-mock');
+    // motion-graphics-plan §0.3 — folder-format skill, has rule subpages.
+    expect(ids).toContain('remotion');
+    const remotion = skills.find((s) => s.id === 'remotion');
+    expect(remotion?.rules?.length ?? 0).toBeGreaterThan(0);
+    expect(remotion?.rules?.some((r) => r.path === 'rules/timing.md')).toBe(true);
+  });
+
+  it('loads folder-format skills from a custom directory', async () => {
+    // Folder skill: <dir>/my-folder-skill/SKILL.md + rules/foo.md
+    const folder = join(testDir, 'my-folder-skill');
+    await writeSkill(
+      folder,
+      'SKILL.md',
+      '---\nschemaVersion: 1\nname: folder-skill\ndescription: A folder skill.\n---\n\nFolder body.\n',
+    );
+    await writeSkill(join(folder, 'rules'), 'foo.md', '# Foo rule\n\nFoo body.\n');
+    await writeSkill(join(folder, 'rules'), 'bar.md', '# Bar rule\n\nBar body.\n');
+    // Sibling flat skill should still load (additive contract).
+    await writeSkill(testDir, 'flat.md', MINIMAL_SKILL);
+    const skills = await loadSkillsFromDir(testDir, 'user');
+    const folderSkill = skills.find((s) => s.id === 'my-folder-skill');
+    expect(folderSkill).toBeDefined();
+    expect(folderSkill?.body.trim()).toBe('Folder body.');
+    expect(folderSkill?.rules?.map((r) => r.path)).toEqual(['rules/bar.md', 'rules/foo.md']);
+    const flatSkill = skills.find((s) => s.id === 'flat');
+    expect(flatSkill).toBeDefined();
+    expect(flatSkill?.rules).toBeUndefined();
+  });
+
+  it('skips directories that do not contain a SKILL.md', async () => {
+    await mkdir(join(testDir, 'plain-dir'), { recursive: true });
+    await writeSkill(testDir, 'flat.md', MINIMAL_SKILL);
+    const skills = await loadSkillsFromDir(testDir, 'user');
+    // The loader's id is the filename slug, not the frontmatter name; so
+    // flat.md → id 'flat'. The plain-dir is silently skipped (no SKILL.md).
+    expect(skills.map((s) => s.id)).toEqual(['flat']);
   });
 
   it('returns empty array when directory does not exist', async () => {

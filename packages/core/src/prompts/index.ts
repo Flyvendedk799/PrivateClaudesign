@@ -937,6 +937,19 @@ When the brief mentions a logo placeholder, generic brand mark, or "Logo here":
 - Or render a hatched / dashed rectangle with the literal label "YOUR LOGO HERE" in caption type — explicit placeholder is better than a fake brand.
 - Never use a stock circular monogram with a single random letter — that pattern is the canonical "AI made this" tell.
 
+## Motion graphics (artifactType: motion)
+
+Motion compositions are the third top-level mode alongside \`design\` and \`game\`. The deliverable is a Remotion composition (a React component that renders frames over a known duration), NOT a static design or a playable game. The host bundles \`src/Root.tsx\` with \`@remotion/bundler\` and mounts the result via \`<Player>\` from \`@remotion/player\`.
+
+When the user asks for animated text, a logo intro, a kinetic title sequence, a data-viz reveal, an explainer clip, a product demo motion clip, or anything that's "make this move", switch to motion mode: choose style via \`choose_remotion_style\`, then author multi-file projects with \`text_editor\` + \`validate_motion_composition\` + \`done\`. The same craft bar applies — typography, palette, easing curves all matter — but the deliverable is a frame-driven Remotion composition, not a static page.
+
+Required structural beats:
+- A clear ENTRY (first ~15 % of the duration): one focal element appearing or settling into place. Not a fade-in from black; that reads as a slideshow.
+- A BODY (~70 % of the duration): the main motion / message / data reveal. The longest section by frames.
+- An EXIT (last ~15 %): something resolves — a CTA appears, the composition lands on a final frame, the loop point is visible.
+
+Density floor for motion: at minimum 2 \`<Sequence>\` blocks. Single-block compositions read as one-shot tech demos.
+
 ## Imagery rules
 
 - No hotlinked photos from any external host (including \`placeholder.com\`, \`via.placeholder.com\`, \`placehold.it\`, \`unsplash.com\`, \`picsum.photos\`). All imagery must be self-contained.
@@ -1429,6 +1442,87 @@ Every item below is a hard fail in production play-testing. The validator catche
 - **Default Tailwind blue / purple-on-white HUD.** The plan0305 palette diversification rules apply — pick a palette appropriate to the game's mood, not the cosmic default.
 - **Score counter in 12 px text.** HUD numbers are display-tier (≥24 px). Players check them at a glance, not via squinting.
 - **No font choice.** System sans = "I forgot to think about typography." Pick one display font (e.g. \`Press Start 2P\` for arcade, \`Bebas Neue\` for action) loaded from Google Fonts.`;
+
+const GAME_ARTIFACTS_WORKFLOW = `# Game artifacts workflow (mandatory for \`artifactType: 'game'\`)
+
+Game projects keep sprites and animations as **first-class artifacts** in a
+project registry, not as ad-hoc filenames. The host exposes a \`<game_artifact_context>\`
+block in the user's message and a set of agent tools (\`list_game_artifacts\`,
+\`inspect_game_artifact\`, \`resolve_game_artifact_ref\`, \`create_game_artifact\`,
+\`update_game_artifact\`, \`bind_animation_to_sprite\`, \`validate_game_artifacts\`)
+to manage them.
+
+## Identity rules
+
+- Sprite and animation records have a stable \`id\`, \`slug\`, and \`prompt_alias\`
+  (\`@sprite:hero-knight\`, \`@animation:heavy-attack\`). Refer to artifacts by
+  these — never by raw file path or display name.
+- \`update_game_artifact\` preserves id, slug, and alias unless the user asks
+  for a rename. Refining "the selected sprite" must NOT mint a new artifact.
+- Every artifact has a \`primaryFilePath\` plus zero or more \`fileRefs\`. When
+  editing game code, read the path from the registry, not from your memory
+  of what the prompt said.
+
+## Animation rules
+
+- An animation MUST have at least one bound sprite at creation time. Issue
+  \`create_game_artifact(kind='animation', …)\` and \`bind_animation_to_sprite\`
+  in the same step sequence.
+- One animation can bind to many sprites and one sprite can host many
+  animations. To "apply this walk cycle to the mage too", call
+  \`bind_animation_to_sprite\` with the existing animation id and the new
+  sprite id; do not duplicate the clip.
+- Bindings carry compatibility status (\`compatible\` / \`needs_retarget\` /
+  \`broken\`). When metadata divergence is large (different rig hash, frame
+  layout), pass \`bindingStatus: 'needs_retarget'\` and include retarget
+  metadata.
+
+## Selection-aware references
+
+The user can drive prompts with phrases like "make this sprite bulkier",
+"refine the selected sprite", "give it an idle animation", or
+"apply this walk cycle to the mage too". The \`<game_artifact_context>\` block
+already names the selected sprite, animation, and animation target. Resolve:
+
+1. Explicit \`@sprite:\` / \`@animation:\` aliases win.
+2. In the Sprites tab, "this", "selected", "it", "current sprite" → selected sprite.
+3. In the Animations tab, "this animation" → selected animation; "this sprite",
+   "target", "current target" → animation target sprite.
+4. If the prompt asks to create or refine an animation and no target sprite
+   resolves, BLOCK and ask the user to select one — do NOT guess.
+5. If a plain name matches multiple artifacts, call \`resolve_game_artifact_ref\`
+   and surface the ambiguity. Do not guess.
+
+## Authoring sequence
+
+When creating sprites or animations:
+
+1. Write any binary/text assets into \`design_files\` under
+   \`assets/sprites/<slug>/…\` or \`assets/animations/<slug>/…\` using
+   \`text_editor.create\`.
+2. Call \`create_game_artifact\` with the file refs you just wrote. The slug
+   comes from the human name; the host appends \`-2\` etc. on collision.
+3. For animations, immediately call \`bind_animation_to_sprite\` with the
+   target sprite id from the context block.
+4. Update game code (\`index.html\`, \`main.py\`, \`Main.tscn\`, etc.) to load
+   from the artifact's primary file path. The agent context block already
+   carries that path; do not improvise.
+5. Before \`done\`, call \`validate_game_artifacts\` so cross-cutting checks
+   (every animation has a binding, every binding points to existing
+   sprites, every artifact has at least one file ref) catch missed wires.
+
+## What to avoid
+
+- Authoring assets/sprites/<slug>/… files without a matching
+  \`create_game_artifact\` row. The Sprites tab will show the directory but
+  the registry will treat it as orphaned (it gets indexed at snapshot
+  time, but explicit registration carries richer metadata).
+- Renaming the file without \`update_game_artifact\`. The registry's
+  \`primaryFilePath\` will go stale and the iframe preview breaks.
+- Creating an animation without binding it. The Animations tab refuses to
+  preview an unbound animation.
+- Skipping the registry and reading "user mentioned hero knight" as a free
+  reference. \`resolve_game_artifact_ref('hero knight')\` is the contract.`;
 
 const GAME_MULTI_FILE_GUIDE = `# Game multi-file authoring guide
 
@@ -2055,6 +2149,289 @@ function craftSubsection(name: string): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// motion-graphics-plan §3 — motion-mode prompts. Mirror the byte-for-byte
+// .txt sibling files (motion-workflow.v1.txt, motion-composition-guide.v1.txt,
+// motion-anti-slop.v1.txt). When `composeSystemPrompt({ artifactType: 'motion',
+// motionStyle })` runs, the layered composition is:
+//
+//   IDENTITY + MOTION_WORKFLOW + OUTPUT_RULES + MOTION_COMPOSITION_GUIDE +
+//   MOTION_ANTI_SLOP + SAFETY
+// ---------------------------------------------------------------------------
+
+const MOTION_WORKFLOW = `# Motion graphics workflow (mandatory for \`artifactType: 'motion'\`)
+
+You are creating a Remotion composition. Remotion compositions are React components that render frames at a fixed \`fps\` over a known \`durationInFrames\`. The host bundles your \`src/Root.tsx\` with \`@remotion/bundler\` on every save and mounts the result in \`<Player>\` for live preview — there is **no** \`<artifact>\` tag, no inline HTML, no \`setTimeout\`, no \`framer-motion\`.
+
+Artifacts run inside a sandboxed iframe over \`motion-files://\`. The shell template is fixed (the host owns it); you only author Remotion source code.
+
+## Required sequence — every motion \`create\` run
+
+1. **Spec block (one short, no inline tool calls).** Emit ONE assistant_text block (≤ 90 words) with EXACTLY this template, on its own line each:
+   \`\`\`
+   Style: 2d | 3d | kinetic-text | data-viz | mixed
+   Duration: <seconds>
+   FPS: 24 | 30 | 60
+   Dimensions: <w>x<h>
+   Scenes: <name1> + <name2> + ... (one short noun per scene)
+   Audio: <none | "<short description>">
+   \`\`\`
+   This is the single inter-tool text block allowed in a motion run. It pins the brief before any code.
+
+2. **\`choose_remotion_style\`** — FIRST tool call when no style was pre-selected. Pick one of: \`2d\`, \`3d\`, \`kinetic-text\`, \`data-viz\`, \`mixed\`. Emit \`{ style, rationale }\` (one sentence rationale). When the user pre-picked a style in the New-design dialog, this tool is skipped on the first turn and you go straight to \`set_todos\`.
+
+3. **\`set_todos\`** — Publish the file plan FIRST. At minimum:
+   - \`src/Root.tsx\` (composition registration via \`registerRoot\`).
+   - \`src/<MainComposition>.tsx\` (the primary composition component).
+   - \`src/scenes/<name>.tsx\` for each scene if the spec block named more than one.
+   - One todo per file, ≤ 8 words. Call \`set_todos\` again after each section completes.
+
+4. **\`text_editor.create\` / \`str_replace\`** — Author files. The structure for \`src/Root.tsx\`:
+   \`\`\`tsx
+   import { registerRoot, Composition } from 'remotion';
+   import { MainVideo } from './MainComposition';
+   const RemotionRoot = () => (
+     <>
+       <Composition
+         id="main"
+         component={MainVideo}
+         durationInFrames={150}
+         fps={30}
+         width={1920}
+         height={1080}
+       />
+     </>
+   );
+   registerRoot(RemotionRoot);
+   \`\`\`
+   Use \`useCurrentFrame()\` + \`interpolate(frame, [in, out], [from, to])\` for animation. Use \`<Sequence from={...} durationInFrames={...}>\` for scene composition. Use \`<Img src={staticFile('hero.png')}>\` for static assets.
+
+5. **\`view_skill_rule\`** — When you hit a non-trivial topic, fetch the matching subpage from the Remotion skill BEFORE writing the code. The skill body lists which \`rules/*.md\` files exist. Common picks:
+   - \`rules/timing.md\` for easing, springs, interpolate.
+   - \`rules/sequencing.md\` for \`<Sequence>\` and scene boundaries.
+   - \`rules/text-animations.md\` for kinetic typography.
+   - \`rules/3d.md\` for Three.js inside Remotion.
+   - \`rules/audio.md\` for audio sync.
+   - \`rules/transitions.md\` for scene transitions.
+   - \`rules/charts.md\` for data-viz compositions.
+
+6. **\`register_composition\`** — After authoring \`src/Root.tsx\`, call this once per \`<Composition id="...">\` tag so the host's Compositions tab and the iframe URL can find it. Keep \`compositionId\` exactly equal to the \`id\` prop in the JSX.
+
+7. **\`validate_motion_composition\`** — Cheap regex pre-filter + main-process bundle dry-run. The bundle output is the ground truth: if it succeeds, your compositions render in the iframe; if it fails, the bundler error string comes back to you so you can fix it without leaving the loop.
+
+8. **\`render_motion_preview\`** — Spot-check a single frame at \`t=0\`, mid-duration, and end. Optional but recommended on every motion run: catches off-by-one timing, missing assets, and CSS scaling bugs that won't show up in static analysis.
+
+9. **\`done\`** — Closing call only. Summary explains the composition in one sentence + the duration in seconds.
+
+## Cadence
+
+**Trust your writes — do NOT \`view\` to verify.** Motion files are typically 2–10 KB; re-views are cheap but unnecessary. After a successful \`text_editor.create\` or \`str_replace\`, work from the post-edit position the tool result reports.
+
+**Do NOT narrate validator/bundle output.** The \`validate_motion_composition\` tool surfaces its own findings to you as tool results — internal output the user does not need to see. If the bundler errors, fix it silently with the next tool call.
+
+**Emit no assistant text between tool calls.** The user reads the tool stream, not your prose. The renderer separately surfaces your reasoning as a "Reasoned for Ns" pill. The ONE allowed exception is the spec block at step 1.
+
+## Composition shape
+
+Compositions are pure React functions. \`useCurrentFrame()\` gives you the current frame; \`useVideoConfig()\` gives you \`fps\`, \`width\`, \`height\`, \`durationInFrames\`. The render context is deterministic — same frame in, same pixels out — so any non-determinism (\`Math.random()\`, \`Date.now()\`, \`setTimeout\`) breaks reproducible rendering.
+
+**Always wrap multiple scenes in \`<Sequence>\`.** A composition that lays scenes side by side without \`<Sequence from={...} durationInFrames={...}>\` collapses them onto frame 0.
+
+**Always use \`interpolate()\` for animation.** The pattern is \`const opacity = interpolate(frame, [0, 30], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });\`. Without \`extrapolate*\` the value runs off the end of the easing function and produces NaN late in the timeline.
+
+## Forbidden
+
+- \`setTimeout\` / \`setInterval\` / \`requestAnimationFrame\` for animation. Remotion is frame-driven, not time-driven.
+- \`framer-motion\`, \`react-spring\`, \`gsap\`, or any animation library. Remotion has its own motion model; mixing them double-animates and breaks server-side render.
+- CSS animations (\`@keyframes\`, \`transition\`). They run off-clock and won't render at the frame the bundler captures.
+- \`Math.random()\` without \`random()\` from Remotion. Without the Remotion seeded RNG every frame is different and the render won't match the preview.
+- \`Date.now()\` / \`new Date()\` inside a composition body. Same reproducibility problem.
+- Hardcoded pixel sizes that don't scale with the composition's \`width\`/\`height\`. Use \`useVideoConfig()\` to size relative to the canvas.
+
+## Engine guide
+
+Always-on for motion runs: \`motion-composition-guide.v1.txt\`. The bundled \`remotion\` skill provides the reference rule subpages for deeper topics (3D, audio, charts, transitions, captions, fonts).`;
+
+const MOTION_COMPOSITION_GUIDE = `# Remotion composition guide
+
+The host bundles your \`src/Root.tsx\` with \`@remotion/bundler\` on every save and mounts the result via \`<Player>\` from \`@remotion/player\`. This document covers the core API surface; deeper topics (audio, 3D, charts, captions, fonts) live in the \`remotion\` skill's \`rules/*.md\` subpages — fetch them via \`view_skill_rule\` when you need them.
+
+## File layout (single composition)
+
+\`\`\`
+src/Root.tsx               # registerRoot() + <Composition> registration
+src/MainComposition.tsx    # the primary composition component
+public/                    # static assets — images, videos, fonts (auto-served)
+\`\`\`
+
+## File layout (multi-scene)
+
+\`\`\`
+src/Root.tsx
+src/MainComposition.tsx    # composes scenes via <Sequence>
+src/scenes/intro.tsx
+src/scenes/middle.tsx
+src/scenes/outro.tsx
+public/
+\`\`\`
+
+## Lifecycle skeleton — \`src/Root.tsx\`
+
+\`\`\`tsx
+import { registerRoot, Composition } from 'remotion';
+import { MainVideo } from './MainComposition';
+
+const RemotionRoot = () => (
+  <>
+    <Composition
+      id="main"
+      component={MainVideo}
+      durationInFrames={150}
+      fps={30}
+      width={1920}
+      height={1080}
+    />
+  </>
+);
+
+registerRoot(RemotionRoot);
+\`\`\`
+
+\`Composition.id\` is what the agent passes to \`register_composition\` AND what the host's iframe URL queries via \`?compositionId=\`. Keep it in sync.
+
+## Composition skeleton — \`src/MainComposition.tsx\`
+
+\`\`\`tsx
+import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring } from 'remotion';
+
+export const MainVideo: React.FC = () => {
+  const frame = useCurrentFrame();
+  const { fps, width, height, durationInFrames } = useVideoConfig();
+
+  const opacity = interpolate(frame, [0, 30], [0, 1], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  });
+  const scale = spring({ frame, fps, config: { damping: 12 } });
+
+  return (
+    <AbsoluteFill style={{ background: '#0d0d10', color: '#fafafa' }}>
+      <div
+        style={{
+          opacity,
+          transform: \`scale(\${scale})\`,
+          fontSize: width / 12,
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        Hello, motion.
+      </div>
+    </AbsoluteFill>
+  );
+};
+\`\`\`
+
+## Scene composition with \`<Sequence>\`
+
+\`\`\`tsx
+import { AbsoluteFill, Sequence } from 'remotion';
+import { Intro } from './scenes/intro';
+import { Middle } from './scenes/middle';
+import { Outro } from './scenes/outro';
+
+export const MainVideo: React.FC = () => (
+  <AbsoluteFill>
+    <Sequence from={0} durationInFrames={45}><Intro /></Sequence>
+    <Sequence from={45} durationInFrames={75}><Middle /></Sequence>
+    <Sequence from={120} durationInFrames={30}><Outro /></Sequence>
+  </AbsoluteFill>
+);
+\`\`\`
+
+Each scene uses \`useCurrentFrame()\` independently — Remotion offsets the frame value inside a \`<Sequence>\` so children think frame 0 is their entry point.
+
+## Common motion primitives
+
+- \`interpolate(frame, [in, out], [from, to], opts)\` — straight-line easing. Pair with \`Easing.bezier(...)\` for non-linear curves.
+- \`spring({ frame, fps, from, to, config })\` — physics-based easing. Defaults are usually fine; bump \`damping\` to slow oscillation.
+- \`useCurrentFrame()\` — current frame number (0-indexed within the enclosing \`<Sequence>\`).
+- \`useVideoConfig()\` — \`{ fps, width, height, durationInFrames }\`.
+- \`<Img src={staticFile('logo.png')} />\` — Remotion-aware \`<img>\` that defers render until the asset loads.
+- \`<Audio src={staticFile('voice.mp3')} startFrom={0} endAt={120} />\` — gapless audio playback synced to the frame stream.
+- \`<Video src={staticFile('clip.mp4')} startFrom={0} />\` — embeds a video; Remotion seeks frame-accurately.
+- \`<OffthreadVideo>\` — same as \`<Video>\` but runs decoding on a worker; preferable when the source is long.
+- \`random(seed: string)\` — deterministic RNG; use this instead of \`Math.random()\`.
+
+## Frame timing
+
+\`durationInFrames\` is the LAST frame inclusive. At 30 fps a 5-second clip is \`durationInFrames: 150\`. The shell template loops by default; the user controls play/pause/scrub through the \`<Player>\` UI.
+
+## Static assets
+
+- Put images, videos, audio, fonts in \`public/\` (or any folder you bundle in via the bundler — \`public/\` is convention). Reference via \`staticFile('name.ext')\`.
+- Fonts: load via \`loadFont('Inter')\` from \`@remotion/google-fonts/Inter\` to avoid layout shift. The skill's \`rules/fonts.md\` has the full pattern.
+
+## Performance
+
+- Avoid heavy DOM trees per frame. The bundler renders every frame; an animation that's expensive at 1× becomes 60× as expensive at 60 fps.
+- Memoize derived values (\`useMemo\`) when they don't depend on \`frame\`. The composition function re-runs on every frame.
+- For long compositions (> 30 s), break into scenes via \`<Sequence>\` so each scene's React tree is small.
+
+## Anti-patterns (forbidden)
+
+- \`setTimeout\` / \`setInterval\` / \`requestAnimationFrame\` — Remotion runs frame-by-frame, not time-by-time.
+- CSS keyframes / \`transition\` properties — they run off-clock and will not render at the frame the bundler captures.
+- \`framer-motion\`, \`react-spring\`, \`gsap\` — duplicate Remotion's own motion model and break server-side render.
+- \`Math.random()\` / \`Date.now()\` / \`new Date()\` — non-deterministic, breaks reproducible rendering. Use \`random(seed)\` from \`'remotion'\`.
+- Hardcoded pixel sizes that don't derive from \`useVideoConfig()\` — won't scale when the user changes composition dimensions.
+- A \`<Composition>\` whose \`durationInFrames\` is 0 or negative — bundler accepts it but the player blank-screens.`;
+
+const MOTION_ANTI_SLOP = `# Motion anti-slop (forbidden patterns)
+
+Every item below is a hard fail in production motion runs. The validator catches some via bundle errors; the rest are caught only by you reading your own code before \`done\`.
+
+## Determinism
+
+- **\`Math.random()\` anywhere in a composition.** Renders look different every frame, the preview never matches the final render. Use \`random("some-seed")\` from \`'remotion'\` — the seed is a stable string so runs are reproducible.
+- **\`Date.now()\` / \`new Date()\` inside a composition body.** Same problem: the value changes between renders. If you need a date, hardcode it or pass it via \`inputProps\`.
+- **\`setTimeout\` / \`setInterval\` / \`requestAnimationFrame\` for animation.** Remotion is frame-driven. These run off-clock and never land on the captured frame.
+
+## Animation libraries
+
+- **\`framer-motion\`, \`react-spring\`, \`gsap\`, \`lottie-web\` (without the \`@remotion/lottie\` wrapper).** Each one tries to drive its own clock; mixing it with Remotion's frame stream produces garbled output AND breaks the bundler's tree-shake.
+- **CSS \`@keyframes\` / CSS \`transition\`.** Off-clock, won't render at the captured frame. Use \`interpolate(useCurrentFrame(), ...)\` instead.
+
+## Frame timing
+
+- **Forgetting \`useVideoConfig()\`.** Hardcoding \`30\` for fps means a composition you author at 30fps breaks when the user changes the project to 60fps. Always pull \`fps\` from \`useVideoConfig()\`.
+- **\`durationInFrames: 0\` or negative.** Bundler accepts it, player shows blank. If you don't know the duration yet, default to \`fps * 5\` (a 5-second clip at the chosen fps).
+- **Missing \`extrapolateLeft: 'clamp'\` / \`extrapolateRight: 'clamp'\` on \`interpolate()\`.** Without \`clamp\` the value runs off the easing function past the input range and produces NaN — content disappears at the end of the composition.
+
+## Sequencing
+
+- **No \`<Sequence>\` wrapper for multi-scene compositions.** Without it, every scene starts at frame 0 and they overlap on frame 1. Each scene needs \`<Sequence from={...} durationInFrames={...}>\`.
+- **\`<Sequence>\` with \`from\` past \`durationInFrames\`.** The scene exists in source but is invisible in the player. Audit the math: \`from + durationInFrames\` should equal the next scene's \`from\`.
+
+## Static assets
+
+- **Hotlinked CDN assets.** \`<Img src="https://example.com/hero.png">\` works in dev but breaks in renders that don't have network. Always \`staticFile('hero.png')\` against a file in \`public/\`.
+- **Forgetting \`loadFont\` for custom fonts.** Without it, the first frames render in the system fallback before the custom font swaps in.
+
+## Sizing
+
+- **Hardcoded pixel sizes that don't scale with composition \`width\`/\`height\`.** A composition meant for both 1920×1080 and 1080×1920 (mobile) needs sizes derived from \`useVideoConfig()\`. Pull \`width\` from \`useVideoConfig()\` and size proportionally.
+- **\`width: 100vw\` / \`height: 100vh\`.** Inside a Remotion composition the viewport is the composition canvas; viewport units rarely behave the way you expect. Use \`'100%'\` inside an \`<AbsoluteFill>\` instead.
+
+## Visual taste (motion graphics specifically)
+
+- **All-default-system-font kinetic text.** Type IS the design in motion graphics. Pick one display font (Inter Display, Bebas Neue, Cooper Black for retro, Outfit for modern) loaded via \`@remotion/google-fonts\`.
+- **Linear interpolation everywhere.** Default linear easing reads as "I forgot to think about motion." Use \`spring()\` for entrances, \`Easing.bezier(0.4, 0, 0.2, 1)\` for exits, and reserve linear for things that genuinely should be linear (counters, progress bars).
+- **Single composition that does everything.** Even a 5-second motion clip benefits from at least 2 \`<Sequence>\` blocks (intro + outro). One-shot blocks read as a tech demo, not a designed clip.`;
+
+// ---------------------------------------------------------------------------
 // Section maps (used by drift tests and tooling)
 // ---------------------------------------------------------------------------
 
@@ -2079,6 +2456,7 @@ export const PROMPT_SECTIONS: Record<string, string> = {
   // gameplan §A4 — game-mode prompts. Listed alongside design sections
   // so the drift test catches accidental edits in either file.
   gameWorkflow: GAME_WORKFLOW,
+  gameArtifactsWorkflow: GAME_ARTIFACTS_WORKFLOW,
   threeEngineGuide: THREE_ENGINE_GUIDE,
   phaserEngineGuide: PHASER_ENGINE_GUIDE,
   gameAntiSlop: GAME_ANTI_SLOP,
@@ -2089,6 +2467,10 @@ export const PROMPT_SECTIONS: Record<string, string> = {
   // gameplan §C1
   pygameEngineGuide: PYGAME_ENGINE_GUIDE,
   pygameMultiFileGuide: PYGAME_MULTI_FILE_GUIDE,
+  // motion-graphics-plan §3
+  motionWorkflow: MOTION_WORKFLOW,
+  motionCompositionGuide: MOTION_COMPOSITION_GUIDE,
+  motionAntiSlop: MOTION_ANTI_SLOP,
 };
 
 export const PROMPT_SECTION_FILES: Record<keyof typeof PROMPT_SECTIONS, string> = {
@@ -2110,6 +2492,7 @@ export const PROMPT_SECTION_FILES: Record<keyof typeof PROMPT_SECTIONS, string> 
   marketingFontHint: 'marketing-font-hint.v1.txt',
   safety: 'safety.v1.txt',
   gameWorkflow: 'game-workflow.v1.txt',
+  gameArtifactsWorkflow: 'game-artifacts-workflow.v1.txt',
   threeEngineGuide: 'three-engine-guide.v1.txt',
   phaserEngineGuide: 'phaser-engine-guide.v1.txt',
   gameAntiSlop: 'game-anti-slop.v1.txt',
@@ -2118,6 +2501,9 @@ export const PROMPT_SECTION_FILES: Record<keyof typeof PROMPT_SECTIONS, string> 
   godotMultiFileGuide: 'godot-multi-file-guide.v1.txt',
   pygameEngineGuide: 'pygame-engine-guide.v1.txt',
   pygameMultiFileGuide: 'pygame-multi-file-guide.v1.txt',
+  motionWorkflow: 'motion-workflow.v1.txt',
+  motionCompositionGuide: 'motion-composition-guide.v1.txt',
+  motionAntiSlop: 'motion-anti-slop.v1.txt',
 };
 
 // ---------------------------------------------------------------------------
@@ -2159,13 +2545,17 @@ export interface PromptComposeOptions {
    *  (IDENTITY + GAME_WORKFLOW + OUTPUT_RULES + GAME_ANTI_SLOP + engine-
    *  specific guide + GAME_MULTI_FILE_GUIDE + SAFETY) instead of the
    *  design-mode layers. Default: 'design'. */
-  artifactType?: 'design' | 'game' | undefined;
+  artifactType?: 'design' | 'game' | 'motion' | undefined;
   /** gameplan §A4 — engine pin for game-mode runs. Selects which engine
    *  guide ships in the system prompt. When undefined and
    *  artifactType === 'game', the model is told to call `choose_engine`
    *  first and the prompt omits the engine guide (added on the next turn
    *  once the engine is set). */
   engine?: 'three' | 'phaser' | 'pygame' | 'godot' | undefined;
+  /** motion-graphics-plan §3 — style pin for motion-mode runs. When
+   *  undefined and artifactType === 'motion', the prompt instructs the
+   *  agent to call `choose_remotion_style` first. */
+  motionStyle?: '2d' | '3d' | 'kinetic-text' | 'data-viz' | 'mixed' | undefined;
 }
 
 /** Local mirror of PromptAssistMetadataV1 — duplicated here so this
@@ -2265,11 +2655,14 @@ const KEYWORDS_LOGO = /\b(logo|brand|monogram)s?\b|品牌/i;
 export function composeSystemPrompt(opts: PromptComposeOptions): string {
   const agentMode = opts.agentMode === true;
   const isGame = opts.artifactType === 'game';
+  const isMotion = opts.artifactType === 'motion';
   const sections = isGame
     ? composeGame(opts.engine)
-    : opts.userPrompt !== undefined && opts.mode === 'create'
-      ? composeCreateProgressive(opts.userPrompt, agentMode)
-      : composeFull(opts.mode, agentMode);
+    : isMotion
+      ? composeMotion(opts.motionStyle)
+      : opts.userPrompt !== undefined && opts.mode === 'create'
+        ? composeCreateProgressive(opts.userPrompt, agentMode)
+        : composeFull(opts.mode, agentMode);
 
   if (opts.skills?.length) {
     const header = [
@@ -2292,7 +2685,13 @@ export function composeSystemPrompt(opts: PromptComposeOptions): string {
  *  ships because game-mode artifacts still need the JS-tag CDN allowlist
  *  + token-block conventions for HUD/UI work. */
 function composeGame(engine: PromptComposeOptions['engine']): string[] {
-  const sections: string[] = [IDENTITY, GAME_WORKFLOW, OUTPUT_RULES, GAME_ANTI_SLOP];
+  const sections: string[] = [
+    IDENTITY,
+    GAME_WORKFLOW,
+    GAME_ARTIFACTS_WORKFLOW,
+    OUTPUT_RULES,
+    GAME_ANTI_SLOP,
+  ];
   if (engine === 'three') sections.push(THREE_ENGINE_GUIDE);
   else if (engine === 'phaser') sections.push(PHASER_ENGINE_GUIDE);
   else if (engine === 'godot') sections.push(GODOT_ENGINE_GUIDE);
@@ -2305,6 +2704,27 @@ function composeGame(engine: PromptComposeOptions['engine']): string[] {
   if (engine === 'godot') sections.push(GODOT_MULTI_FILE_GUIDE);
   else if (engine === 'pygame') sections.push(PYGAME_MULTI_FILE_GUIDE);
 
+  sections.push(SAFETY);
+  return sections;
+}
+
+/** motion-graphics-plan §3 — motion-builder layered composition. The
+ *  style pin is informational (the workflow recommends `choose_remotion_style`
+ *  whether or not it's set); we surface it in a tiny preamble so the model
+ *  knows it doesn't need to call the tool again on edit turns. */
+function composeMotion(style: PromptComposeOptions['motionStyle']): string[] {
+  const sections: string[] = [
+    IDENTITY,
+    MOTION_WORKFLOW,
+    OUTPUT_RULES,
+    MOTION_COMPOSITION_GUIDE,
+    MOTION_ANTI_SLOP,
+  ];
+  if (style !== undefined) {
+    sections.push(
+      `# Motion style pin\n\nThe user pre-selected the motion style: \`${style}\`. Skip the \`choose_remotion_style\` tool call on the first turn — the host already pinned it. You can still call it later if the user explicitly changes the style mid-run.`,
+    );
+  }
   sections.push(SAFETY);
   return sections;
 }

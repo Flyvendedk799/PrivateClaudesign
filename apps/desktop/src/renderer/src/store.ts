@@ -11,6 +11,12 @@ import type {
   Design,
   DiagnosticEventRow,
   DiagnosticHypothesis,
+  GameAnimationBinding,
+  GameArtifact,
+  GameArtifactCreateInput,
+  GameArtifactKind,
+  GameArtifactListResult,
+  GamePreviewMode,
   LocalInputFile,
   ModelRef,
   OnboardingState,
@@ -20,7 +26,11 @@ import type {
   ReportableError,
   SelectedElement,
 } from '@open-codesign/shared';
-import { diagnoseGenerateFailure, looksLikeTruncatedStream } from '@open-codesign/shared';
+import {
+  diagnoseGenerateFailure,
+  extractArtifactAliases,
+  looksLikeTruncatedStream,
+} from '@open-codesign/shared';
 import { computeFingerprint } from '@open-codesign/shared/fingerprint';
 import { create } from 'zustand';
 import type { StoreApi } from 'zustand';
@@ -156,6 +166,47 @@ export const GAME_ASPECT_DIMS: Record<GameAspect, { width: number; height: numbe
 // tabs wrap a single file preview opened by double-clicking the list. Closing
 // a 'file' tab is purely UI state — it does NOT delete anything.
 export type CanvasTab = { kind: 'files' } | { kind: 'file'; path: string };
+
+/** game-artifacts §2 — top-level project tabs surfaced for game-mode designs.
+ *  Mounted above the iframe; replaces the file-only canvas tab concept for
+ *  game projects. Design-mode designs ignore this and keep their existing
+ *  CanvasTabBar inside the Files tab. */
+export type GameProjectTab = 'preview' | 'files' | 'sprites' | 'animations';
+
+/** motion-graphics-plan §0.4 — top-level project tabs surfaced for motion-
+ *  mode designs. Mirrors GameProjectTab but smaller (Assets is deferred to
+ *  v2 — small motion projects keep all assets in the Files tree). */
+export type MotionProjectTab = 'preview' | 'files' | 'compositions';
+
+/** motion-graphics-plan §1.1 — composition record loaded from the main
+ *  process registry. Stored as a plain interface (no zod) so the renderer
+ *  doesn't pull the shared schema into its bundle. */
+export interface MotionCompositionRow {
+  id: string;
+  designId: string;
+  compositionId: string;
+  name: string;
+  durationInFrames: number;
+  fps: number;
+  width: number;
+  height: number;
+  entryFile: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Discriminator for the motion preview iframe — composition playback
+ *  (default) vs single-frame still rendering. v1 only flips between
+ *  these two; future modes (frame-strip overview etc.) plug in here. */
+export type MotionPreviewMode = 'composition' | 'frame';
+
+export type MotionStyle = '2d' | '3d' | 'kinetic-text' | 'data-viz' | 'mixed';
+
+export interface MotionBundleStatus {
+  state: 'idle' | 'building' | 'ok' | 'error';
+  errorText?: string;
+  bundledAt?: number;
+}
 
 export const FILES_TAB: CanvasTab = { kind: 'files' };
 
@@ -368,8 +419,11 @@ interface CodesignState {
    *  payload construction reads + clears them. Last-picked mode also
    *  persists to preferences.json so the dialog opens to the right tab.
    */
-  pendingArtifactMode: 'design' | 'game' | null;
+  pendingArtifactMode: 'design' | 'game' | 'motion' | null;
   pendingGameEngine: 'three' | 'phaser' | 'pygame' | 'godot' | null;
+  /** motion-graphics-plan §1.1 — style pin from the New-design dialog,
+   *  consumed by the next IPC payload alongside pendingArtifactMode. */
+  pendingMotionStyle: MotionStyle | null;
   /** A6.x — engine of the currently-loaded design, populated from the
    *  latest snapshot when a design is opened (and from pendingGameEngine
    *  when a fresh game design starts generating). null for design-mode
@@ -393,7 +447,61 @@ interface CodesignState {
   >;
   /** Last-picked mode in the New-design dialog. Hydrated from preferences.json
    *  at boot; updated on every dialog submit. Defaults to 'design'. */
-  lastPickedMode: 'design' | 'game';
+  lastPickedMode: 'design' | 'game' | 'motion';
+  /** motion-graphics-plan §0.2 — discriminator for the currently-loaded
+   *  design's mode. Hydrated from the latest snapshot's `artifactType`
+   *  on design open. Drives PreviewPane's three-way dispatch
+   *  (CanvasTabBar / GameProjectTabs / MotionProjectTabs). */
+  currentArtifactType: 'design' | 'game' | 'motion';
+
+  // motion-graphics-plan §1.1 — motion-mode slices.
+  /** Per-design list of registered Remotion compositions, hydrated from
+   *  the main process via `loadMotionCompositions(id)`. */
+  motionCompositionsByDesign: Record<string, MotionCompositionRow[]>;
+  /** Per-design pinned style — set by the agent's `choose_remotion_style`
+   *  tool or by the New-design dialog. null when undecided. */
+  motionStyleByDesign: Record<string, MotionStyle | null>;
+  /** Active project tab for the currently-loaded motion design. */
+  activeMotionTab: MotionProjectTab;
+  /** Per-design preview mode discriminator. */
+  motionPreviewModeByDesign: Record<string, MotionPreviewMode>;
+  /** Per-design selected composition id (Compositions tab + preview).
+   *  Null when the design has no compositions yet. */
+  selectedCompositionIdByDesign: Record<string, string | null>;
+  /** Per-design bundle status from the main process (debounced bundler
+   *  emits 'motion:bundled' / 'motion:bundle-error' over IPC). */
+  motionBundleStatusByDesign: Record<string, MotionBundleStatus>;
+
+  // game-artifacts §2 — sprite/animation registry per design + selection state.
+  /** Per-design list of artifact records pulled from the main process IPC.
+   *  Hydrated by `loadGameArtifacts(id)` — called once per design switch
+   *  for game-mode designs. Stored as an array (not Map) so React component
+   *  identity survives state writes. */
+  gameArtifactsByDesign: Record<string, GameArtifact[]>;
+  /** Per-design list of animation→sprite bindings. Each animation can bind
+   *  to many sprites and each sprite can host many animations. */
+  gameAnimationBindingsByDesign: Record<string, GameAnimationBinding[]>;
+  /** Per-design boolean: true once the registry has been hydrated this
+   *  session. Avoids re-fetching on tab focus. Cleared on design switch. */
+  gameArtifactsLoadedByDesign: Record<string, boolean>;
+  /** Active project tab for the currently-loaded game design. Design-mode
+   *  designs ignore this. Resets to 'preview' on design switch. */
+  activeProjectTab: GameProjectTab;
+  /** Per-design preview mode discriminator: 'game' (default — full game),
+   *  'sprite' (inspect a single sprite in an empty scene), or 'animation'
+   *  (play an animation against a target sprite). The renderer flips the
+   *  iframe `src=` based on this. */
+  gamePreviewModeByDesign: Record<string, GamePreviewMode>;
+  /** Per-design selected sprite id (sprite tab + sprite preview). Null when
+   *  no sprite is selected. */
+  selectedSpriteIdByDesign: Record<string, string | null>;
+  /** Per-design selected animation id (animation tab + animation preview).
+   *  Null when no animation is selected. */
+  selectedAnimationIdByDesign: Record<string, string | null>;
+  /** Per-design target sprite for animation preview. Required before
+   *  creating / previewing an animation. Defaults to the selected sprite
+   *  when one exists. */
+  animationTargetSpriteIdByDesign: Record<string, string | null>;
   /** Workspace rebind confirmation state: { design, newPath } when user picks a different folder */
   workspaceRebindPending: { design: Design; newPath: string } | null;
 
@@ -643,12 +751,32 @@ interface CodesignState {
   openNewDesignDialog: () => void;
   closeNewDesignDialog: () => void;
   /** gameplan §A6 — set by the New-design dialog on submit; consumed by
-   *  the next runGenerate payload construction. */
+   *  the next runGenerate payload construction. Renamed surface name
+   *  retained for back-compat — motion calls go through
+   *  setPendingArtifactSelection below. */
   setPendingGameSelection: (
     mode: 'design' | 'game',
     engine: 'three' | 'phaser' | 'pygame' | 'godot' | null,
   ) => void;
+  /** motion-graphics-plan §0.2 + §4 — three-way variant of
+   *  setPendingGameSelection covering motion. */
+  setPendingArtifactSelection: (input: {
+    mode: 'design' | 'game' | 'motion';
+    engine?: 'three' | 'phaser' | 'pygame' | 'godot' | null;
+    motionStyle?: MotionStyle | null;
+  }) => void;
   clearPendingGameSelection: () => void;
+  // motion-graphics-plan §4 — actions used by the motion UI surface.
+  selectMotionTab: (tab: MotionProjectTab) => void;
+  loadMotionCompositions: (designId: string) => Promise<void>;
+  selectComposition: (designId: string, compositionId: string | null) => void;
+  setMotionPreviewMode: (designId: string, mode: MotionPreviewMode) => void;
+  applyMotionBundleEvent: (event: {
+    type: 'motion:bundled' | 'motion:bundle-error' | 'motion:composition-registered';
+    designId: string;
+    bundleDir?: string;
+    errorText?: string;
+  }) => void;
   /** A6.x — kick off `codesign:v1:godot-web-build` for a given design,
    *  stream progress into godotBuildStatusByDesign, flip
    *  godotPreviewByDesign[id] to 'build' on success. Renders nothing
@@ -775,6 +903,33 @@ interface CodesignState {
   closeCanvasTab: (index: number) => void;
   setActiveCanvasTab: (index: number) => void;
   resetCanvasTabs: () => void;
+
+  // game-artifacts §2 — registry + selection actions.
+  loadGameArtifacts: (designId: string) => Promise<void>;
+  selectProjectTab: (tab: GameProjectTab) => void;
+  selectSprite: (spriteId: string | null) => void;
+  selectAnimation: (animationId: string | null, targetSpriteId?: string) => void;
+  setAnimationTargetSprite: (spriteId: string | null) => void;
+  setGamePreviewMode: (mode: GamePreviewMode) => void;
+  bindAnimationToSprite: (animationId: string, spriteId: string) => Promise<void>;
+  unbindAnimationFromSprite: (animationId: string, spriteId: string) => Promise<void>;
+  archiveGameArtifact: (artifactId: string) => Promise<void>;
+  importSpriteFiles: (
+    files: Array<{ relativePath: string; content: string }>,
+    name?: string,
+  ) => Promise<GameArtifact | null>;
+  importAnimationFiles: (
+    files: Array<{ relativePath: string; content: string }>,
+    spriteId: string,
+    name?: string,
+  ) => Promise<GameArtifact | null>;
+  createGameArtifactFromInput: (input: GameArtifactCreateInput) => Promise<GameArtifact | null>;
+  appendArtifactRefToPrompt: (artifactId: string) => void;
+  /** Append text to the chat composer (`promptDraft`). Used by
+   *  `appendArtifactRefToPrompt` and the import flows. */
+  appendToPromptDraft: (text: string) => void;
+  promptDraft: string;
+  setPromptDraft: (text: string) => void;
 }
 
 export interface CommentBubbleAnchor {
@@ -935,6 +1090,13 @@ function looksRunnableArtifact(src: string): boolean {
   return true;
 }
 
+/** game-artifacts §5 — recover the literal alias strings (`@sprite:foo`,
+ *  `@animation:bar`) from a free-form prompt. The main process uses these
+ *  to resolve mentions to artifact records ahead of generation. */
+function parseArtifactAliasesFromText(text: string): string[] {
+  return extractArtifactAliases(text).map(({ kind, slug }) => `@${kind}:${slug}`);
+}
+
 function autoNameFromPrompt(prompt: string): string {
   const condensed = prompt.replace(/\s+/g, ' ').trim();
   if (condensed.length === 0) return 'Untitled design';
@@ -945,17 +1107,18 @@ function isDefaultDesignName(name: string): boolean {
   return name === 'Untitled design' || /^Untitled design \d+$/.test(name);
 }
 
-// Core emits 'html' | 'svg' | 'slides' | 'bundle' | 'game' (gameplan §A1)
-// but the snapshots schema only stores 'html' | 'react' | 'svg' | 'game'
-// (see DesignSnapshotV1). 'slides'/'bundle' fold into 'html' because their
-// on-disk source is HTML — keeping the column constraint stable means we
-// don't need a schema migration to persist them. 'game' carries through
-// directly so the renderer can branch the preview pipeline on it.
+// Core emits 'html' | 'svg' | 'slides' | 'bundle' | 'game' | 'motion'
+// (gameplan §A1, motion-graphics-plan §1.1) but the snapshots schema
+// stores 'html' | 'react' | 'svg' | 'game' | 'motion'. 'slides'/'bundle'
+// fold into 'html' because their on-disk source is HTML — keeping the
+// column constraint stable means we don't need a schema migration to
+// persist them. 'game' and 'motion' carry through directly so the
+// renderer can branch the preview pipeline on them.
 // Unknown types throw so a new core ArtifactType doesn't silently round-trip
 // as the wrong renderer.
 export function toSnapshotArtifactType(
   coreType: string | undefined,
-): 'html' | 'react' | 'svg' | 'game' {
+): 'html' | 'react' | 'svg' | 'game' | 'motion' {
   switch (coreType) {
     case undefined:
     case 'html':
@@ -968,6 +1131,8 @@ export function toSnapshotArtifactType(
       return 'react';
     case 'game':
       return 'game';
+    case 'motion':
+      return 'motion';
     default:
       throw new Error(`Unsupported artifact type for snapshot persistence: ${coreType}`);
   }
@@ -1977,10 +2142,27 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   newDesignDialogOpen: false,
   pendingArtifactMode: null,
   pendingGameEngine: null,
+  pendingMotionStyle: null,
   currentDesignEngine: null,
+  currentArtifactType: 'design',
   godotPreviewByDesign: {},
   godotBuildStatusByDesign: {},
   lastPickedMode: 'design',
+  gameArtifactsByDesign: {},
+  gameAnimationBindingsByDesign: {},
+  gameArtifactsLoadedByDesign: {},
+  activeProjectTab: 'preview' as GameProjectTab,
+  gamePreviewModeByDesign: {},
+  selectedSpriteIdByDesign: {},
+  selectedAnimationIdByDesign: {},
+  animationTargetSpriteIdByDesign: {},
+  motionCompositionsByDesign: {},
+  motionStyleByDesign: {},
+  activeMotionTab: 'preview' as MotionProjectTab,
+  motionPreviewModeByDesign: {},
+  selectedCompositionIdByDesign: {},
+  motionBundleStatusByDesign: {},
+  promptDraft: '',
   designToDelete: null,
   designToRename: null,
   workspaceRebindPending: null,
@@ -2370,11 +2552,13 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     });
 
     try {
-      // gameplan §A6 — pull and clear the pending mode/engine the dialog
-      // staged. They route into the IPC payload so the main process
-      // composes the game-mode prompt + wires deps.gameMode.
+      // gameplan §A6 / motion-graphics-plan §1.1 — pull and clear the
+      // pending mode/engine/style the dialog staged. They route into
+      // the IPC payload so the main process composes the right prompt
+      // + wires deps.gameMode / deps.motionMode.
       let pendingMode = get().pendingArtifactMode;
       const pendingEngine = get().pendingGameEngine;
+      const pendingMotionStyle = get().pendingMotionStyle;
       get().clearPendingGameSelection();
       // Auto-route game-genre prompts (FPS / wave defense / platformer /
       // etc.) into game-mode when the user didn't explicitly pick a
@@ -2406,6 +2590,33 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       // the existing currentDesignEngine when starting a follow-up turn
       // on an existing design (no fresh dialog selection).
       if (pendingEngine !== null) set({ currentDesignEngine: pendingEngine });
+      // motion-graphics-plan §0.2 — surface the pending mode on the
+      // active design so PreviewPane's three-way dispatch flips before
+      // the snapshot lands.
+      if (pendingMode === 'motion') set({ currentArtifactType: 'motion' });
+      else if (pendingMode === 'game') set({ currentArtifactType: 'game' });
+      else if (pendingMode === 'design') set({ currentArtifactType: 'design' });
+      // game-artifacts §5 — pack a renderer-side selection snapshot for
+      // the main resolver to turn into an artifact context block.
+      const gameArtifactContext:
+        | NonNullable<Parameters<CodesignApi['generate']>[0]['gameArtifactContext']>
+        | undefined = (() => {
+        const isGame = pendingMode === 'game' || get().currentDesignEngine !== null;
+        if (!isGame || designIdAtStart === null) return undefined;
+        const state = get();
+        const aliases = parseArtifactAliasesFromText(parsedCmd.prompt);
+        const ctx: NonNullable<Parameters<CodesignApi['generate']>[0]['gameArtifactContext']> = {
+          activeTab: state.activeProjectTab,
+          mentionedAliases: aliases,
+        };
+        const sel = state.selectedSpriteIdByDesign[designIdAtStart];
+        if (typeof sel === 'string') ctx.selectedSpriteId = sel;
+        const selAnim = state.selectedAnimationIdByDesign[designIdAtStart];
+        if (typeof selAnim === 'string') ctx.selectedAnimationId = selAnim;
+        const target = state.animationTargetSpriteIdByDesign[designIdAtStart];
+        if (typeof target === 'string') ctx.animationTargetSpriteId = target;
+        return ctx;
+      })();
       await runGenerate(
         get,
         set,
@@ -2422,6 +2633,8 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           ...(requestedPattern ? { pattern: requestedPattern } : {}),
           ...(pendingMode !== null ? { artifactMode: pendingMode } : {}),
           ...(pendingEngine !== null ? { gameEngine: pendingEngine } : {}),
+          ...(pendingMotionStyle !== null ? { motionStyle: pendingMotionStyle } : {}),
+          ...(gameArtifactContext !== undefined ? { gameArtifactContext } : {}),
         },
         designIdAtStart,
       );
@@ -3185,11 +3398,16 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         // Engine state will be refreshed alongside the background snapshot
         // pull below — clear stale state from the previous design first.
         currentDesignEngine: null,
+        currentArtifactType: 'design',
         canvasTabs: [FILES_TAB, { kind: 'file', path: 'index.html' }],
         activeCanvasTab: 1,
+        activeProjectTab: 'preview' as GameProjectTab,
+        activeMotionTab: 'preview' as MotionProjectTab,
       });
       void get().loadChatForCurrentDesign();
       void get().loadCommentsForCurrentDesign();
+      void get().loadGameArtifacts(id);
+      void get().loadMotionCompositions(id);
       void (async () => {
         try {
           const snapshots = await window.codesign?.snapshots.list(id);
@@ -3214,6 +3432,19 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           // src= to game-files://. Setting null on design-mode snapshots is
           // intentional: it hides game-mode chrome.
           set({ currentDesignEngine: latest?.engine ?? null });
+          // motion-graphics-plan §0.2 — derive currentArtifactType from
+          // the snapshot. Older rows that pre-date the field default to
+          // 'design'; rows with engine !== null are 'game' (back-compat
+          // with the legacy currentDesignEngine-as-mode trick); rows
+          // with artifactType === 'motion' obviously land on 'motion'.
+          const at = latest?.artifactType ?? null;
+          const derived: 'design' | 'game' | 'motion' =
+            at === 'motion'
+              ? 'motion'
+              : at === 'game' || latest?.engine != null
+                ? 'game'
+                : 'design';
+          set({ currentArtifactType: derived });
         } catch {
           // Background refresh failure is harmless — cached preview remains.
         }
@@ -3246,11 +3477,21 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         commentBubble: null,
         currentSnapshotId: null,
         currentDesignEngine: latest?.engine ?? null,
+        currentArtifactType:
+          latest?.artifactType === 'motion'
+            ? 'motion'
+            : latest?.artifactType === 'game' || latest?.engine != null
+              ? 'game'
+              : 'design',
         canvasTabs: latest ? [FILES_TAB, { kind: 'file', path: 'index.html' }] : [FILES_TAB],
         activeCanvasTab: latest ? 1 : 0,
+        activeProjectTab: 'preview' as GameProjectTab,
+        activeMotionTab: 'preview' as MotionProjectTab,
       });
       void get().loadChatForCurrentDesign();
       void get().loadCommentsForCurrentDesign();
+      void get().loadGameArtifacts(id);
+      void get().loadMotionCompositions(id);
     } catch (err) {
       const msg = err instanceof Error ? err.message : tr('errors.unknown');
       get().pushToast({
@@ -3367,6 +3608,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     set({
       pendingArtifactMode: mode,
       pendingGameEngine: mode === 'game' ? engine : null,
+      pendingMotionStyle: null,
       lastPickedMode: mode,
     });
     // Persist last-picked mode so the dialog opens to the right tab
@@ -3374,8 +3616,66 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     // state above is what drives the next generate.
     void window.codesign?.preferences?.update?.({ lastPickedMode: mode })?.catch(() => undefined);
   },
+  setPendingArtifactSelection(input) {
+    set({
+      pendingArtifactMode: input.mode,
+      pendingGameEngine: input.mode === 'game' ? (input.engine ?? null) : null,
+      pendingMotionStyle: input.mode === 'motion' ? (input.motionStyle ?? null) : null,
+      lastPickedMode: input.mode,
+    });
+    void window.codesign?.preferences
+      ?.update?.({ lastPickedMode: input.mode })
+      ?.catch(() => undefined);
+  },
   clearPendingGameSelection() {
-    set({ pendingArtifactMode: null, pendingGameEngine: null });
+    set({ pendingArtifactMode: null, pendingGameEngine: null, pendingMotionStyle: null });
+  },
+  selectMotionTab(tab) {
+    set({ activeMotionTab: tab });
+  },
+  async loadMotionCompositions(designId) {
+    if (!window.codesign?.motion?.list) return;
+    try {
+      const rows = await window.codesign.motion.list(designId);
+      set((s) => ({
+        motionCompositionsByDesign: { ...s.motionCompositionsByDesign, [designId]: rows },
+      }));
+    } catch {
+      // best-effort hydration; surface failures via the bundle status banner
+    }
+  },
+  selectComposition(designId, compositionId) {
+    set((s) => ({
+      selectedCompositionIdByDesign: {
+        ...s.selectedCompositionIdByDesign,
+        [designId]: compositionId,
+      },
+    }));
+  },
+  setMotionPreviewMode(designId, mode) {
+    set((s) => ({
+      motionPreviewModeByDesign: { ...s.motionPreviewModeByDesign, [designId]: mode },
+    }));
+  },
+  applyMotionBundleEvent(event) {
+    if (event.type === 'motion:composition-registered') {
+      void get().loadMotionCompositions(event.designId);
+      return;
+    }
+    set((s) => {
+      const current = s.motionBundleStatusByDesign[event.designId];
+      const next: MotionBundleStatus =
+        event.type === 'motion:bundled'
+          ? { state: 'ok', bundledAt: Date.now() }
+          : {
+              state: 'error',
+              errorText: event.errorText ?? 'Bundle failed (no error text).',
+              ...(current?.bundledAt !== undefined ? { bundledAt: current.bundledAt } : {}),
+            };
+      return {
+        motionBundleStatusByDesign: { ...s.motionBundleStatusByDesign, [event.designId]: next },
+      };
+    });
   },
   async buildGodotWebPreview(designId) {
     if (!window.codesign?.godot) return;
@@ -4072,6 +4372,394 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     set({ canvasTabs: [FILES_TAB], activeCanvasTab: 0 });
   },
 
+  // game-artifacts §2 — actions
+  async loadGameArtifacts(designId: string) {
+    if (!window.codesign?.gameArtifacts) return;
+    try {
+      const result: GameArtifactListResult = await window.codesign.gameArtifacts.list(designId, {
+        includeArchived: false,
+      });
+      set((s) => ({
+        gameArtifactsByDesign: {
+          ...s.gameArtifactsByDesign,
+          [designId]: result.artifacts,
+        },
+        gameAnimationBindingsByDesign: {
+          ...s.gameAnimationBindingsByDesign,
+          [designId]: result.bindings,
+        },
+        gameArtifactsLoadedByDesign: {
+          ...s.gameArtifactsLoadedByDesign,
+          [designId]: true,
+        },
+      }));
+    } catch (err) {
+      rendererLogger.warn('game_artifacts', 'load.fail', {
+        designId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  selectProjectTab(tab) {
+    set({ activeProjectTab: tab });
+    // Switching to Sprites/Animations changes preview mode; switching to
+    // Preview/Files restores the full game preview.
+    const designId = get().currentDesignId;
+    if (designId === null) return;
+    const state = get();
+    if (tab === 'sprites') {
+      const spriteId = state.selectedSpriteIdByDesign[designId] ?? null;
+      if (spriteId !== null) {
+        set((s) => ({
+          gamePreviewModeByDesign: {
+            ...s.gamePreviewModeByDesign,
+            [designId]: { mode: 'sprite', spriteId },
+          },
+        }));
+      }
+    } else if (tab === 'animations') {
+      const animationId = state.selectedAnimationIdByDesign[designId] ?? null;
+      const targetSpriteId = state.animationTargetSpriteIdByDesign[designId] ?? null;
+      if (animationId !== null && targetSpriteId !== null) {
+        set((s) => ({
+          gamePreviewModeByDesign: {
+            ...s.gamePreviewModeByDesign,
+            [designId]: { mode: 'animation', animationId, spriteId: targetSpriteId },
+          },
+        }));
+      }
+    } else {
+      set((s) => ({
+        gamePreviewModeByDesign: {
+          ...s.gamePreviewModeByDesign,
+          [designId]: { mode: 'game' },
+        },
+      }));
+    }
+  },
+
+  selectSprite(spriteId) {
+    const designId = get().currentDesignId;
+    if (designId === null) return;
+    set((s) => {
+      const next: Partial<CodesignState> = {
+        selectedSpriteIdByDesign: {
+          ...s.selectedSpriteIdByDesign,
+          [designId]: spriteId,
+        },
+      };
+      if (spriteId !== null) {
+        next.gamePreviewModeByDesign = {
+          ...s.gamePreviewModeByDesign,
+          [designId]: { mode: 'sprite', spriteId },
+        };
+        next.activeProjectTab = 'sprites';
+        // When the user picks a sprite, also default the animation target
+        // to that sprite so the animation tab can immediately preview.
+        if ((s.animationTargetSpriteIdByDesign[designId] ?? null) === null) {
+          next.animationTargetSpriteIdByDesign = {
+            ...s.animationTargetSpriteIdByDesign,
+            [designId]: spriteId,
+          };
+        }
+      }
+      return next;
+    });
+  },
+
+  selectAnimation(animationId, targetSpriteId) {
+    const designId = get().currentDesignId;
+    if (designId === null) return;
+    set((s) => {
+      const next: Partial<CodesignState> = {
+        selectedAnimationIdByDesign: {
+          ...s.selectedAnimationIdByDesign,
+          [designId]: animationId,
+        },
+        activeProjectTab: 'animations',
+      };
+      const resolvedTarget =
+        targetSpriteId ??
+        s.animationTargetSpriteIdByDesign[designId] ??
+        s.selectedSpriteIdByDesign[designId] ??
+        null;
+      if (resolvedTarget !== null) {
+        next.animationTargetSpriteIdByDesign = {
+          ...s.animationTargetSpriteIdByDesign,
+          [designId]: resolvedTarget,
+        };
+      }
+      if (animationId !== null && resolvedTarget !== null) {
+        next.gamePreviewModeByDesign = {
+          ...s.gamePreviewModeByDesign,
+          [designId]: { mode: 'animation', animationId, spriteId: resolvedTarget },
+        };
+      } else if (animationId === null) {
+        next.gamePreviewModeByDesign = {
+          ...s.gamePreviewModeByDesign,
+          [designId]: { mode: 'game' },
+        };
+      }
+      return next;
+    });
+  },
+
+  setAnimationTargetSprite(spriteId) {
+    const designId = get().currentDesignId;
+    if (designId === null) return;
+    set((s) => {
+      const next: Partial<CodesignState> = {
+        animationTargetSpriteIdByDesign: {
+          ...s.animationTargetSpriteIdByDesign,
+          [designId]: spriteId,
+        },
+      };
+      const animationId = s.selectedAnimationIdByDesign[designId] ?? null;
+      if (animationId !== null && spriteId !== null) {
+        next.gamePreviewModeByDesign = {
+          ...s.gamePreviewModeByDesign,
+          [designId]: { mode: 'animation', animationId, spriteId },
+        };
+      }
+      return next;
+    });
+  },
+
+  setGamePreviewMode(mode) {
+    const designId = get().currentDesignId;
+    if (designId === null) return;
+    set((s) => ({
+      gamePreviewModeByDesign: {
+        ...s.gamePreviewModeByDesign,
+        [designId]: mode,
+      },
+    }));
+  },
+
+  async bindAnimationToSprite(animationId, spriteId) {
+    const designId = get().currentDesignId;
+    if (!window.codesign?.gameArtifacts || designId === null) return;
+    try {
+      const result = await window.codesign.gameArtifacts.bindAnimation({
+        designId,
+        animationId,
+        spriteId,
+      });
+      set((s) => ({
+        gameArtifactsByDesign: {
+          ...s.gameArtifactsByDesign,
+          [designId]: result.artifacts,
+        },
+        gameAnimationBindingsByDesign: {
+          ...s.gameAnimationBindingsByDesign,
+          [designId]: result.bindings,
+        },
+      }));
+    } catch (err) {
+      get().pushToast({
+        variant: 'error',
+        title: 'Failed to bind animation',
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  async unbindAnimationFromSprite(animationId, spriteId) {
+    const designId = get().currentDesignId;
+    if (!window.codesign?.gameArtifacts || designId === null) return;
+    try {
+      const result = await window.codesign.gameArtifacts.unbindAnimation(
+        designId,
+        animationId,
+        spriteId,
+      );
+      set((s) => ({
+        gameArtifactsByDesign: {
+          ...s.gameArtifactsByDesign,
+          [designId]: result.artifacts,
+        },
+        gameAnimationBindingsByDesign: {
+          ...s.gameAnimationBindingsByDesign,
+          [designId]: result.bindings,
+        },
+      }));
+    } catch (err) {
+      get().pushToast({
+        variant: 'error',
+        title: 'Failed to unbind animation',
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  async archiveGameArtifact(artifactId) {
+    const designId = get().currentDesignId;
+    if (!window.codesign?.gameArtifacts || designId === null) return;
+    try {
+      const result = await window.codesign.gameArtifacts.archive(designId, artifactId);
+      const visible = result.artifacts.filter((a) => a.status !== 'archived');
+      const selectedSprite = get().selectedSpriteIdByDesign[designId] ?? null;
+      const selectedAnim = get().selectedAnimationIdByDesign[designId] ?? null;
+      const target = get().animationTargetSpriteIdByDesign[designId] ?? null;
+      set((s) => {
+        const next: Partial<CodesignState> = {
+          gameArtifactsByDesign: {
+            ...s.gameArtifactsByDesign,
+            [designId]: visible,
+          },
+          gameAnimationBindingsByDesign: {
+            ...s.gameAnimationBindingsByDesign,
+            [designId]: result.bindings,
+          },
+        };
+        if (selectedSprite === artifactId) {
+          next.selectedSpriteIdByDesign = {
+            ...s.selectedSpriteIdByDesign,
+            [designId]: null,
+          };
+        }
+        if (selectedAnim === artifactId) {
+          next.selectedAnimationIdByDesign = {
+            ...s.selectedAnimationIdByDesign,
+            [designId]: null,
+          };
+        }
+        if (target === artifactId) {
+          next.animationTargetSpriteIdByDesign = {
+            ...s.animationTargetSpriteIdByDesign,
+            [designId]: null,
+          };
+        }
+        return next;
+      });
+    } catch (err) {
+      get().pushToast({
+        variant: 'error',
+        title: 'Failed to archive artifact',
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  async importSpriteFiles(files, name) {
+    const designId = get().currentDesignId;
+    if (!window.codesign?.gameArtifacts || designId === null || files.length === 0) return null;
+    try {
+      const result = await window.codesign.gameArtifacts.importFiles({
+        designId,
+        kind: 'sprite',
+        files,
+        ...(name !== undefined ? { name } : {}),
+      });
+      set((s) => ({
+        gameArtifactsByDesign: {
+          ...s.gameArtifactsByDesign,
+          [designId]: result.artifacts,
+        },
+        gameAnimationBindingsByDesign: {
+          ...s.gameAnimationBindingsByDesign,
+          [designId]: result.bindings,
+        },
+      }));
+      const newest = result.artifacts.find((a) => a.kind === 'sprite');
+      if (newest) get().selectSprite(newest.id);
+      return newest ?? null;
+    } catch (err) {
+      get().pushToast({
+        variant: 'error',
+        title: 'Failed to import sprite',
+        description: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  },
+
+  async importAnimationFiles(files, spriteId, name) {
+    const designId = get().currentDesignId;
+    if (!window.codesign?.gameArtifacts || designId === null || files.length === 0) return null;
+    try {
+      const result = await window.codesign.gameArtifacts.importFiles({
+        designId,
+        kind: 'animation',
+        targetSpriteId: spriteId,
+        files,
+        ...(name !== undefined ? { name } : {}),
+      });
+      set((s) => ({
+        gameArtifactsByDesign: {
+          ...s.gameArtifactsByDesign,
+          [designId]: result.artifacts,
+        },
+        gameAnimationBindingsByDesign: {
+          ...s.gameAnimationBindingsByDesign,
+          [designId]: result.bindings,
+        },
+      }));
+      const newest = result.artifacts.find((a) => a.kind === 'animation');
+      if (newest) {
+        get().selectAnimation(newest.id, spriteId);
+      }
+      return newest ?? null;
+    } catch (err) {
+      get().pushToast({
+        variant: 'error',
+        title: 'Failed to import animation',
+        description: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  },
+
+  async createGameArtifactFromInput(input) {
+    if (!window.codesign?.gameArtifacts) return null;
+    try {
+      const result = await window.codesign.gameArtifacts.create(input);
+      set((s) => ({
+        gameArtifactsByDesign: {
+          ...s.gameArtifactsByDesign,
+          [input.designId]: result.artifacts,
+        },
+        gameAnimationBindingsByDesign: {
+          ...s.gameAnimationBindingsByDesign,
+          [input.designId]: result.bindings,
+        },
+      }));
+      // Find the freshly-created artifact by slug to return.
+      const slug = input.slug ?? input.name;
+      return (
+        result.artifacts.find(
+          (a) => a.kind === input.kind && (a.slug === slug || a.name === input.name),
+        ) ?? null
+      );
+    } catch (err) {
+      get().pushToast({
+        variant: 'error',
+        title: 'Failed to create artifact',
+        description: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  },
+
+  appendArtifactRefToPrompt(artifactId) {
+    const designId = get().currentDesignId;
+    if (designId === null) return;
+    const artifact = (get().gameArtifactsByDesign[designId] ?? []).find((a) => a.id === artifactId);
+    if (!artifact) return;
+    get().appendToPromptDraft(`${artifact.promptAlias} `);
+  },
+
+  appendToPromptDraft(text) {
+    set((s) => ({
+      promptDraft: s.promptDraft.length > 0 ? `${s.promptDraft}${text}` : text,
+    }));
+  },
+
+  setPromptDraft(text) {
+    set({ promptDraft: text });
+  },
+
   async refreshDiagnosticEvents() {
     const api = window.codesign?.diagnostics;
     if (!api?.listEvents) return;
@@ -4086,7 +4774,11 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         if (typeof persisted === 'number' && persisted > 0) {
           set({ lastReadTs: persisted });
         }
-        if (prefs?.lastPickedMode === 'design' || prefs?.lastPickedMode === 'game') {
+        if (
+          prefs?.lastPickedMode === 'design' ||
+          prefs?.lastPickedMode === 'game' ||
+          prefs?.lastPickedMode === 'motion'
+        ) {
           set({ lastPickedMode: prefs.lastPickedMode });
         }
       } catch {

@@ -10,6 +10,7 @@ import type { ChatAppendInput, ChatMessageKind, ChatMessageRow } from '@open-cod
 import { CodesignError, ERROR_CODES } from '@open-codesign/shared';
 import type BetterSqlite3 from 'better-sqlite3';
 import { ipcMain } from './electron-runtime';
+import { seedGameArtifactsFromLatestSnapshot } from './game-artifacts-db';
 import { getLogger } from './logger';
 import {
   appendChatMessage,
@@ -204,6 +205,21 @@ export function registerChatMessagesIpc(db: Database): void {
           message: err instanceof Error ? err.message : String(err),
         });
         // Non-fatal — chat still seeded, the iframe falls back to srcdoc.
+      }
+      // game-artifacts §10 — hydrate the sprite/animation registry from
+      // the latest snapshot when reopening a design cold so the new tabs
+      // populate without forcing the user to re-import. Skips when the
+      // registry is already populated this session.
+      try {
+        const restoredArtifacts = seedGameArtifactsFromLatestSnapshot(db, designId);
+        if (restoredArtifacts.artifacts > 0 || restoredArtifacts.bindings > 0) {
+          logger.info('game_artifacts.seeded', { designId, ...restoredArtifacts });
+        }
+      } catch (err) {
+        logger.error('game_artifacts.seed.fail', {
+          designId,
+          message: err instanceof Error ? err.message : String(err),
+        });
       }
       return { inserted };
     },

@@ -4,6 +4,7 @@ import {
   handlePreviewMessage,
   isTrustedPreviewMessageSource,
   postModeToPreviewWindow,
+  resolveGamePreviewSrc,
   scaleRectForZoom,
   stablePreviewSourceKey,
 } from './PreviewPane';
@@ -81,6 +82,40 @@ function App(){ return <div />; }`;
     const b =
       '<!doctype html><html><head><style>.a{}</style><style>.b{}</style></head><body>x</body></html>';
     expect(stablePreviewSourceKey(a)).not.toBe(stablePreviewSourceKey(b));
+  });
+});
+
+describe('resolveGamePreviewSrc', () => {
+  it('returns the sprite preview URL with artifactId in the query string', () => {
+    const url = resolveGamePreviewSrc({
+      designId: 'd1',
+      engine: 'three',
+      previewMode: { mode: 'sprite', spriteId: 'ga_sprite_123' },
+      godotPreviewByDesign: {},
+    });
+    expect(url).toBe('game-files://designs/d1/__preview/sprite.html?artifactId=ga_sprite_123');
+  });
+
+  it('returns the animation preview URL with both ids', () => {
+    const url = resolveGamePreviewSrc({
+      designId: 'd1',
+      engine: 'three',
+      previewMode: { mode: 'animation', animationId: 'ga_anim_42', spriteId: 'ga_sprite_7' },
+      godotPreviewByDesign: {},
+    });
+    expect(url).toBe(
+      'game-files://designs/d1/__preview/animation.html?artifactId=ga_anim_42&spriteId=ga_sprite_7',
+    );
+  });
+
+  it('falls back to game-mode URL for mode=game', () => {
+    const url = resolveGamePreviewSrc({
+      designId: 'd1',
+      engine: 'three',
+      previewMode: { mode: 'game' },
+      godotPreviewByDesign: {},
+    });
+    expect(url).toBe('game-files://designs/d1/index.html');
   });
 });
 

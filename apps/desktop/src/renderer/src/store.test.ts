@@ -638,7 +638,7 @@ describe('useCodesignStore artifact persistence', () => {
       parentId: string | null;
       type: 'initial' | 'edit' | 'fork';
       prompt: string | null;
-      artifactType: 'html' | 'react' | 'svg' | 'game';
+      artifactType: 'html' | 'react' | 'svg' | 'game' | 'motion';
       artifactSource: string;
       createdAt: string;
       message?: string;

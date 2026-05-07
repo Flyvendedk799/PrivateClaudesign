@@ -156,10 +156,16 @@ const NOT_FOUND: GameFilesResolved = {
  *  Production wiring: pygame designs get an index.html via
  *  `pygameAdapter.bootstrap()` + a manifest.json listing every .py /
  *  asset file in design_files. The agent never authors these, so
- *  the protocol fills them in transparently. */
+ *  the protocol fills them in transparently.
+ *
+ *  game-artifacts §3 — sprite/animation `__preview/*` synthesis hooks
+ *  receive the URL search params so they can read `artifactId` /
+ *  `spriteId` without re-parsing. Earlier callers passed only path; the
+ *  third arg is optional and defaults to an empty record for back-compat. */
 export type GameFilesSynthesize = (
   designId: string,
   path: string,
+  searchParams?: URLSearchParams,
 ) => { contentType: string; body: Uint8Array } | null;
 
 /** Pure resolver — Vitest-testable. The protocol handler shim wraps this
@@ -189,9 +195,16 @@ export function resolveGameFilesRequest(input: {
     .get(parsed.designId, parsed.path) as { content: string } | undefined;
   if (row === undefined) {
     // Fall through to the synthesizer — pygame's index.html / manifest.json
-    // have no design_files row but are needed at preview time.
+    // and the game-artifacts `__preview/*` previews have no design_files
+    // row but are needed at preview time.
     if (input.synthesize) {
-      const synth = input.synthesize(parsed.designId, parsed.path);
+      let searchParams: URLSearchParams | undefined;
+      try {
+        searchParams = new URL(input.rawUrl).searchParams;
+      } catch {
+        searchParams = undefined;
+      }
+      const synth = input.synthesize(parsed.designId, parsed.path, searchParams);
       if (synth !== null) {
         return {
           status: 200,

@@ -37,9 +37,11 @@ export type CacheRetention = 'none' | 'short' | 'long';
 export function resolveCachePolicy(
   api: Api,
   override?: CacheRetention,
-  options: { artifactType?: 'design' | 'game' } = {},
+  options: { artifactType?: 'design' | 'game' | 'motion' } = {},
 ): CacheRetention {
   if (override !== undefined) return override;
-  if (api === 'anthropic-messages') return options.artifactType === 'game' ? 'long' : 'short';
+  if (api === 'anthropic-messages') {
+    return options.artifactType === 'game' || options.artifactType === 'motion' ? 'long' : 'short';
+  }
   return 'none';
 }

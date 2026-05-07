@@ -24,7 +24,8 @@ export type ArtifactType =
   | 'case_study'
   | 'email'
   | 'mobile_flow'
-  | 'report';
+  | 'report'
+  | 'motion';
 
 export interface ClassifyResult {
   type: ArtifactType;
@@ -80,6 +81,24 @@ const KEYWORDS: Readonly<Record<string, Partial<Record<ArtifactType, number>>>> 
   // report
   report: { report: 5 },
   whitepaper: { report: 4 },
+  // motion (motion-graphics-plan §5.2)
+  animation: { motion: 4 },
+  animated: { motion: 3 },
+  motion: { motion: 3 },
+  remotion: { motion: 5 },
+  composition: { motion: 2 },
+  'kinetic text': { motion: 5 },
+  'kinetic typography': { motion: 5 },
+  'logo intro': { motion: 5 },
+  'logo reveal': { motion: 5 },
+  'title sequence': { motion: 5 },
+  'title card': { motion: 4 },
+  'lyric video': { motion: 5 },
+  'video clip': { motion: 4 },
+  'explainer video': { motion: 5 },
+  'product demo motion': { motion: 5 },
+  'video intro': { motion: 4 },
+  mp4: { motion: 3 },
 });
 
 const ALL_TYPES: ReadonlyArray<ArtifactType> = [
@@ -92,6 +111,7 @@ const ALL_TYPES: ReadonlyArray<ArtifactType> = [
   'email',
   'mobile_flow',
   'report',
+  'motion',
 ];
 
 /** Classify a prompt. The returned `confidence` is the gap between the
@@ -109,6 +129,7 @@ export function classifyArtifactType(prompt: string): ClassifyResult {
     email: 0,
     mobile_flow: 0,
     report: 0,
+    motion: 0,
   };
   for (const [keyword, weights] of Object.entries(KEYWORDS)) {
     if (!lower.includes(keyword)) continue;
@@ -120,7 +141,9 @@ export function classifyArtifactType(prompt: string): ClassifyResult {
   const candidates = ALL_TYPES.map((type) => ({ type, score: scores[type] })).sort(
     (a, b) => b.score - a.score,
   );
-  const top = candidates[0]!;
+  // ALL_TYPES is non-empty (compile-time invariant) so candidates always
+  // has at least one entry; the fallback satisfies biome without runtime cost.
+  const top = candidates[0] ?? { type: 'landing' as ArtifactType, score: 0 };
   const second = candidates[1]?.score ?? 0;
   const confidence = top.score === 0 ? 0 : (top.score - second) / top.score;
   return {
@@ -128,4 +151,18 @@ export function classifyArtifactType(prompt: string): ClassifyResult {
     confidence,
     candidates,
   };
+}
+
+/** motion-graphics-plan §5.2 — detect a Remotion composition by looking
+ *  at the generated source. The agent is supposed to call `registerRoot`
+ *  + at least one `<Composition>`; presence of either is a strong signal
+ *  the artifact IS motion (regardless of what the user asked for). Used
+ *  by mode-mismatch detection at the boundary between agent output and
+ *  snapshot persistence. Pure heuristic; no LLM call. */
+export function looksLikeMotionArtifact(source: string): boolean {
+  if (typeof source !== 'string' || source.length === 0) return false;
+  if (/registerRoot\s*\(/.test(source)) return true;
+  if (/<Composition\s/.test(source)) return true;
+  if (/from\s+['"]remotion['"]/.test(source)) return true;
+  return false;
 }

@@ -99,6 +99,9 @@ import {
   shell,
 } from './electron-runtime';
 import { registerExporterIpc } from './exporter-ipc';
+import { indexGameArtifactsFromFiles } from './game-artifacts-import';
+import { registerGameArtifactsIpc } from './game-artifacts-ipc';
+import { buildArtifactRegistryDeps } from './game-artifacts-registry-deps';
 import {
   DESIGN_FILES_PRIVILEGED_SCHEME,
   DESIGN_FILES_SCHEME,
@@ -130,6 +133,19 @@ import {
 import { maybeAbortIfRunningFromDmg } from './install-check';
 import { registerLocaleIpc } from './locale-ipc';
 import { getLogPath, getLogger, initLogger } from './logger';
+import { setMotionDesignDirResolver, setMotionMainWindowGetter } from './motion-bundler';
+import { listMotionCompositions } from './motion-compositions-db';
+import {
+  MOTION_FILES_PRIVILEGED_SCHEME,
+  MOTION_FILES_SCHEME,
+  motionFilesResponseHeaders,
+  resolveMotionFilesRequest,
+} from './motion-files-protocol';
+import {
+  buildMotionModeRuntime,
+  notifyMotionFileWrite,
+  setMotionCompositionEventSink,
+} from './motion-mode-runtime';
 import {
   getApiKeyForProvider,
   getCachedConfig,
@@ -209,6 +225,36 @@ function imageCache(): ImageCache {
   if (_imageCache === null) _imageCache = makeImageCache(app.getPath('userData'));
   return _imageCache;
 }
+
+/**
+ * motion-graphics-plan §4 / §0.5 — resolve the on-disk dir the motion
+ * bundler reads source files out of and writes `.bundle/index.{html,js}`
+ * into. Mirrors the `workspacePath` convention game/design designs use:
+ * if the design has a workspacePath set, the bundler operates in there
+ * (so `npx remotion studio` could open the same folder); otherwise we
+ * fall back to a per-design dir under userData.
+ */
+function motionDesignDirFor(designId: string): string | null {
+  if (_snapshotsDb === null) return null;
+  try {
+    const row = _snapshotsDb
+      .prepare('SELECT workspace_path FROM designs WHERE id = ?')
+      .get(designId) as { workspace_path?: string | null } | undefined;
+    const workspacePath =
+      row?.workspace_path !== undefined && row?.workspace_path !== null
+        ? String(row.workspace_path)
+        : null;
+    if (workspacePath !== null) return workspacePath;
+    return path_module.join(app.getPath('userData'), 'motion-designs', designId);
+  } catch {
+    return null;
+  }
+}
+
+/** Set in `app.whenReady()` once safeInitSnapshotsDb succeeds; consumed by
+ *  motionDesignDirFor() (which can be called from the protocol handler
+ *  before mainWindow is even open). */
+let _snapshotsDb: Database | null = null;
 
 /**
  * Workstream B Phase 1 feature flag. When truthy, `codesign:*:generate` routes
@@ -648,7 +694,11 @@ interface CreateRuntimeTextEditorFsOptions {
   designId: string | null;
   previousHtml: string | null;
   sendEvent: (event: AgentStreamEvent) => void;
-  logger: Pick<CoreLogger, 'error'>;
+  logger: Pick<CoreLogger, 'error'> & Partial<Pick<CoreLogger, 'warn'>>;
+  /** motion-graphics-plan §4 — when 'motion', text_editor writes also
+   *  mirror into the on-disk motion design dir so the bundler can read
+   *  them, and trigger a debounced bundle. */
+  artifactType?: 'design' | 'game' | 'motion' | undefined;
 }
 
 export function createRuntimeTextEditorFs({
@@ -658,6 +708,7 @@ export function createRuntimeTextEditorFs({
   previousHtml,
   sendEvent,
   logger,
+  artifactType,
 }: CreateRuntimeTextEditorFsOptions) {
   const baseCtx = { designId: designId ?? '', generationId } as const;
   const fsMap = new Map<string, string>();
@@ -734,6 +785,28 @@ export function createRuntimeTextEditorFs({
     }
 
     upsertDesignFile(db, designId, normalizedPath, content);
+
+    // motion-graphics-plan §4 — for motion runs the bundler reads source
+    // files off disk. When no workspacePath is set, mirror the write into
+    // the motion design dir (`userData/motion-designs/<id>/`). Then
+    // schedule a debounced bundle so the iframe picks it up.
+    if (artifactType === 'motion') {
+      const motionDir = motionDesignDirFor(designId);
+      if (motionDir !== null && motionDir !== design?.workspacePath) {
+        const destinationPath = path_module.join(motionDir, normalizedPath);
+        try {
+          await mkdir(path_module.dirname(destinationPath), { recursive: true });
+          await writeFile(destinationPath, content, 'utf8');
+        } catch (err) {
+          logger.warn?.('motion.fs.writeThrough.fail', {
+            designId,
+            filePath: normalizedPath,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      notifyMotionFileWrite(designId, normalizedPath);
+    }
   }
 
   const fs = {
@@ -1051,6 +1124,7 @@ function registerIpcHandlers(db: Database | null): void {
       logger: logIpc,
       previousHtml,
       sendEvent,
+      artifactType: input.artifactType,
     });
     const cfg = getCachedConfig();
     const imageConfig = cfg ? resolveImageGenerationConfig(cfg) : null;
@@ -1240,6 +1314,8 @@ function registerIpcHandlers(db: Database | null): void {
       if (!isGameRun) return undefined;
       let currentEngine: GameEngine | null =
         input.engine !== undefined ? (input.engine as GameEngine) : null;
+      const artifactRegistry: GameModeDeps['artifactRegistry'] | undefined =
+        designId !== null && db !== null ? buildArtifactRegistryDeps(db, designId) : undefined;
       return {
         setEngine(engine) {
           currentEngine = engine as GameEngine;
@@ -1267,6 +1343,33 @@ function registerIpcHandlers(db: Database | null): void {
             : { ok: false, engine, issues: result.issues };
         },
         playtester,
+        ...(artifactRegistry !== undefined ? { artifactRegistry } : {}),
+      };
+    })();
+    // motion-graphics-plan §3 — wire motion-mode tools when the IPC
+    // payload requested it. Style is captured into a per-run mutable
+    // that `choose_remotion_style` writes to. The validator + still
+    // renderer lazy-import @remotion/bundler / @remotion/renderer so
+    // design + game runs pay nothing.
+    type MotionModeDeps = NonNullable<GenerateViaAgentDeps['motionMode']>;
+    const motionMode: MotionModeDeps | undefined = ((): MotionModeDeps | undefined => {
+      const isMotionRun = input.artifactType === 'motion';
+      if (!isMotionRun) return undefined;
+      let currentStyle: '2d' | '3d' | 'kinetic-text' | 'data-viz' | 'mixed' | null =
+        input.motionStyle ?? null;
+      const validatorAndRenderer = buildMotionModeRuntime(designId, db);
+      return {
+        setStyle(style) {
+          currentStyle = style;
+        },
+        getCurrentStyle: () => currentStyle,
+        validate: validatorAndRenderer.validate,
+        ...(validatorAndRenderer.renderStill !== undefined
+          ? { renderStill: validatorAndRenderer.renderStill }
+          : {}),
+        ...(validatorAndRenderer.compositionRegistry !== undefined
+          ? { compositionRegistry: validatorAndRenderer.compositionRegistry }
+          : {}),
       };
     })();
     return generateViaAgent(input, {
@@ -1275,6 +1378,7 @@ function registerIpcHandlers(db: Database | null): void {
       renderPreview,
       userSkills,
       ...(gameMode !== undefined ? { gameMode } : {}),
+      ...(motionMode !== undefined ? { motionMode } : {}),
       ...(generateImageAsset !== undefined ? { generateImageAsset } : {}),
       onEvent: (event: AgentEvent) => {
         // High-signal only. Skip per-token deltas and inner message_*
@@ -2062,9 +2166,46 @@ function registerIpcHandlers(db: Database | null): void {
           chunkBudgetMs,
         });
 
+        // game-artifacts §5 — append a compact artifact-context block to
+        // the user prompt when the renderer shipped a selection payload
+        // and we have an active design id. The context lets the agent
+        // resolve "this sprite" / "the selected animation" without
+        // calling list/inspect tools first.
+        let promptForRun = payload.prompt;
+        if (
+          payload.gameArtifactContext !== undefined &&
+          payload.designId !== undefined &&
+          db !== null
+        ) {
+          try {
+            const { buildGameArtifactContextBlock } = await import(
+              './game-artifact-prompt-context'
+            );
+            const ctx = buildGameArtifactContextBlock(
+              db,
+              payload.designId,
+              payload.gameArtifactContext,
+            );
+            if (ctx.block.length > 0) {
+              promptForRun = `${payload.prompt}\n\n${ctx.block}`;
+            }
+            if (ctx.unresolvedAliases.length > 0) {
+              logIpc.warn('generate.unresolved_aliases', {
+                generationId: id,
+                aliases: ctx.unresolvedAliases,
+              });
+            }
+          } catch (err) {
+            logIpc.warn('generate.artifact_context.fail', {
+              generationId: id,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
         const runResult = await runGenerate(
           {
-            prompt: payload.prompt,
+            prompt: promptForRun,
             history: payload.history,
             model: active.model,
             apiKey,
@@ -2909,6 +3050,9 @@ if (!IS_VITEST) {
       // preview iframe can switch to `design-files://` when sidecar files
       // exist.
       DESIGN_FILES_PRIVILEGED_SCHEME,
+      // motion-graphics-plan §4 — same posture for Remotion bundles
+      // produced by the main-process bundler.
+      MOTION_FILES_PRIVILEGED_SCHEME,
     ]);
   } catch (err) {
     // Re-registration in dev (hot reload) throws; main-process logger isn't
@@ -2985,6 +3129,10 @@ if (!IS_VITEST) {
       // snapshots IPC channels; the rest of the app stays usable.
       const dbResult = safeInitSnapshotsDb(join(app.getPath('userData'), 'designs.db'));
       const diagnosticsDb: Database | null = dbResult.ok ? dbResult.db : null;
+      // Cache for motionDesignDirFor() (called from protocol handlers
+      // outside this scope). When the DB failed to init, motion runs
+      // gracefully degrade — the bundler reports "no design dir wired".
+      _snapshotsDb = dbResult.ok ? dbResult.db : null;
       if (dbResult.ok) {
         // gameplan §7.2 — attach the game-files:// handler now that the DB is
         // open. Resolves multi-file game project bundles into the preview
@@ -3027,6 +3175,44 @@ if (!IS_VITEST) {
             });
           }
         });
+        // motion-graphics-plan §4 — `motion-files://` handler. Same
+        // security posture as game-files; resolves to the on-disk
+        // `<design>/.bundle/` and any sibling source files written by the
+        // motion agent through text_editor. The shell template the
+        // bundler copies into `<design>/.bundle/index.html` is the
+        // entry the iframe targets.
+        const motionFilesLog = getLogger('motion-files');
+        protocol.handle(MOTION_FILES_SCHEME, async (request) => {
+          try {
+            const resolved = await resolveMotionFilesRequest({
+              rawUrl: request.url,
+              getDesignDir: (designId) => motionDesignDirFor(designId),
+            });
+            return new Response(resolved.body, {
+              status: resolved.status,
+              headers: motionFilesResponseHeaders(resolved),
+            });
+          } catch (err) {
+            motionFilesLog.error('handle.fail', {
+              url: request.url,
+              message: err instanceof Error ? err.message : String(err),
+            });
+            return new Response('Internal protocol error', {
+              status: 500,
+              headers: { 'content-type': 'text/plain' },
+            });
+          }
+        });
+        // Wire the bundler's design-dir resolver + main-window getter
+        // now that both are available in this scope.
+        setMotionDesignDirResolver((designId) => motionDesignDirFor(designId));
+        setMotionMainWindowGetter(() => mainWindow);
+        setMotionCompositionEventSink((designId) => {
+          mainWindow?.webContents.send('motion:event:v1', {
+            type: 'motion:composition-registered',
+            designId,
+          });
+        });
         // Multi-file design artifacts — same on-disk lookup as
         // game-files but no `_build/*` namespace and no synthesizer.
         // PreviewPane switches to this scheme when a design has more
@@ -3058,6 +3244,14 @@ if (!IS_VITEST) {
         registerWorkspaceIpc(dbResult.db, () => mainWindow);
         registerChatMessagesIpc(dbResult.db);
         registerCommentsIpc(dbResult.db);
+        registerGameArtifactsIpc(dbResult.db);
+        // motion-graphics-plan §4 — list_compositions IPC for the
+        // Compositions tab. Same DB the agent's register_composition
+        // tool writes through.
+        ipcMain.handle('motion:v1:list-compositions', (_evt, payload: { designId: string }) => {
+          if (typeof payload?.designId !== 'string') return [];
+          return listMotionCompositions(dbResult.db, payload.designId);
+        });
         // backlog-2 #7 — Skills CRUD + extractor. The extractor closure
         // routes through `generate()` so the active provider's auth /
         // cache / OAuth-refresh path is reused. systemPrompt override
