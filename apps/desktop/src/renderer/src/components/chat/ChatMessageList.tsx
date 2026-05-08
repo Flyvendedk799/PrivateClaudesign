@@ -1,5 +1,11 @@
 import { useT } from '@open-codesign/i18n';
-import type { ChatMessageRow, ChatToolCallPayload } from '@open-codesign/shared';
+import {
+  type ChatMessageRow,
+  type ChatToolCallPayload,
+  classifyAbortKind,
+  isNeutralAbort,
+  suggestsTokenReimport,
+} from '@open-codesign/shared';
 import { FileText, Pause } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { useCodesignStore } from '../../store';
@@ -484,6 +490,12 @@ export function ChatMessageList({
       const code = p?.code;
       const runId = p?.runId;
       const message = p?.message ?? t('errors.unknown');
+      // may9 Phase 7 D9 — classify the error so paused-at-safe-boundary
+      // renders as a neutral resume affordance, not a red error pill.
+      // D8 — token-expired errors carry a "Re-import token" affordance.
+      const abortKind = classifyAbortKind(message);
+      const neutralKind = isNeutralAbort(abortKind);
+      const suggestReimport = suggestsTokenReimport(abortKind);
       const copyDiagnostic = (): void => {
         const blob = JSON.stringify(
           {
@@ -509,19 +521,37 @@ export function ChatMessageList({
       items.push({
         key: `err-${msg.seq}`,
         node: (
-          <div className="rounded-[var(--radius-md)] border border-[var(--color-error)] bg-[var(--color-surface)] px-[var(--space-3)] py-[var(--space-2)] text-[12.5px] font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-primary)]">
-            <div className="break-all whitespace-pre-wrap">{message}</div>
+          <div
+            className={`rounded-[var(--radius-md)] border ${neutralKind ? 'border-[var(--color-border-muted)]' : 'border-[var(--color-error)]'} bg-[var(--color-surface)] px-[var(--space-3)] py-[var(--space-2)] text-[12.5px] font-[var(--font-mono),ui-monospace,Menlo,monospace] text-[var(--color-text-primary)]`}
+            data-abort-kind={abortKind}
+          >
+            <div className="break-all whitespace-pre-wrap">
+              {neutralKind ? (
+                <span>
+                  <span className="font-semibold">Paused — </span>
+                  {message}
+                </span>
+              ) : (
+                message
+              )}
+            </div>
             {(code !== undefined ||
               runId !== undefined ||
               status !== undefined ||
               requestId !== undefined ||
-              provider !== undefined) && (
+              provider !== undefined ||
+              suggestReimport) && (
               <div className="mt-[var(--space-1)] flex flex-wrap items-center gap-[var(--space-2)] text-[11.5px] text-[var(--color-text-muted)]">
                 {code !== undefined ? <span>code {code}</span> : null}
                 {runId !== undefined ? <span>run {runId}</span> : null}
                 {status !== undefined ? <span>HTTP {status}</span> : null}
                 {provider !== undefined ? <span>{provider}</span> : null}
                 {requestId !== undefined ? <span>req {requestId}</span> : null}
+                {suggestReimport ? (
+                  <span className="rounded-[var(--radius-sm)] border border-[var(--color-warning,_theme(colors.amber.500))] px-[var(--space-2)] py-[1px] text-[var(--color-text-warning,_theme(colors.amber.500))]">
+                    Re-import Claude Code token in Settings
+                  </span>
+                ) : null}
                 <button
                   type="button"
                   onClick={copyDiagnostic}
