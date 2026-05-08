@@ -2,6 +2,7 @@ import { buildSrcdoc } from '@open-codesign/runtime';
 import type { Design } from '@open-codesign/shared';
 import { Plus } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { SANDBOX_DESIGN, SANDBOX_GAME_2D } from '../../components/sandbox-tokens';
 
 // Hub cards render many iframes in parallel; live CSS animations / transitions /
 // autoplaying media in each one thrash compositor + GPU for no user value (the
@@ -226,12 +227,7 @@ export function DesignCardPreview({ design }: DesignCardPreviewProps) {
 
   // JSX artifacts need the React+Babel runtime wrapper; HTML artifacts render directly.
   const isJsx = useMemo(() => (html ? needsJsxRuntime(html) : false), [html]);
-  const sandbox =
-    artifactType === 'game'
-      ? 'allow-scripts allow-pointer-lock allow-fullscreen'
-      : isJsx
-        ? 'allow-scripts'
-        : '';
+  const sandbox = artifactType === 'game' ? SANDBOX_GAME_2D : isJsx ? SANDBOX_DESIGN : '';
   const srcDoc = useMemo(() => {
     if (!html) return null;
     const base = isJsx ? buildSrcdoc(html) : html;

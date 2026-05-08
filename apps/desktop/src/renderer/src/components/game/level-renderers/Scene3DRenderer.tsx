@@ -1,6 +1,7 @@
 import type { Scene3DLevelDoc } from '@open-codesign/shared';
 import { useMemo, useState } from 'react';
 import { useCodesignStore } from '../../../store';
+import { SANDBOX_GAME_3D } from '../../sandbox-tokens';
 
 /**
  * level-and-world-designer §Phase 5 — `scene-3d` renderer.
@@ -153,7 +154,7 @@ export function Scene3DRenderer({
               key={`live-${previewUpdatedAt?.ts ?? 0}`}
               srcDoc={previewHtml}
               title="Live game preview"
-              sandbox="allow-scripts allow-pointer-lock"
+              sandbox={SANDBOX_GAME_3D}
               className="h-full w-full border-0"
             />
             <div className="pointer-events-none absolute top-1 right-1 rounded-[var(--radius-sm)] bg-[var(--color-background-secondary)]/85 px-[6px] py-[1px] text-[10px] text-[var(--color-text-muted)]">

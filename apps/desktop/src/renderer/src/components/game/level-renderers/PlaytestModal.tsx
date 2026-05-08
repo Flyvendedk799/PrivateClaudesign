@@ -2,6 +2,7 @@ import type { LevelDoc } from '@open-codesign/shared';
 import { Activity, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCodesignStore } from '../../../store';
+import { SANDBOX_GODOT_WEB } from '../../sandbox-tokens';
 
 /**
  * level-and-world-designer §Phase 8.8 — thin-slice "Playtest level"
@@ -118,7 +119,7 @@ export function PlaytestModal({
           <iframe
             srcDoc={injected ?? previewHtml}
             title={`Playtest ${slug}`}
-            sandbox="allow-scripts allow-pointer-lock allow-same-origin"
+            sandbox={SANDBOX_GODOT_WEB}
             className="h-full w-full border-0"
           />
         </div>

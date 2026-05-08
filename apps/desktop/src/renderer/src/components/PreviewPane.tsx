@@ -30,6 +30,7 @@ import { WorldDesignerTabView } from './game/WorldDesignerTabView';
 import { MotionCompositionsView } from './motion/MotionCompositionsView';
 import { MotionPreviewPane } from './motion/MotionPreviewPane';
 import { MotionProjectTabs } from './motion/MotionProjectTabs';
+import { SANDBOX_DESIGN, SANDBOX_GODOT_WEB } from './sandbox-tokens';
 
 export interface PreviewPaneProps {
   onPickStarter: (prompt: string) => void;
@@ -362,11 +363,7 @@ function PreviewSlot({
     <iframe
       ref={setRef}
       title={`design-preview-${designId}`}
-      sandbox={
-        useSrcUrl
-          ? 'allow-scripts allow-same-origin allow-pointer-lock allow-fullscreen'
-          : 'allow-scripts'
-      }
+      sandbox={useSrcUrl ? SANDBOX_GODOT_WEB : SANDBOX_DESIGN}
       {...(useSrcUrl ? { src: srcUrl } : { srcDoc })}
       onLoad={(e) => {
         // Once the iframe's document has actually loaded, its in-page message

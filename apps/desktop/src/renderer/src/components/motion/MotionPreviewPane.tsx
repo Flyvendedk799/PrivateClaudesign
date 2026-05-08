@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from 'react';
 import { useCodesignStore } from '../../store';
+import { SANDBOX_DESIGN_SAME_ORIGIN } from '../sandbox-tokens';
 
 /** motion-graphics-plan §4 — embedded `<Player>` from @remotion/player. The
  *  iframe loads the fixed shell template at
@@ -61,7 +62,7 @@ export function MotionPreviewPane() {
         title="Remotion preview"
         data-testid="motion-preview-iframe"
         src={iframeSrc}
-        sandbox="allow-scripts allow-same-origin"
+        sandbox={SANDBOX_DESIGN_SAME_ORIGIN}
         className="flex-1 w-full bg-black"
       />
       {compositions.length === 0 ? (

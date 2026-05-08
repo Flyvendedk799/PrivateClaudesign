@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useDesignFiles } from '../hooks/useDesignFiles';
 import { workspacePathComparisonKey } from '../lib/workspace-path';
 import { useCodesignStore } from '../store';
+import { SANDBOX_DESIGN, SANDBOX_GAME_2D } from './sandbox-tokens';
 
 function truncatePath(path: string, maxLength = 40): string {
   if (path.length <= maxLength) return path;
@@ -303,11 +304,7 @@ export function FilesTabView() {
             <iframe
               ref={iframeRef}
               title={`design-preview-${selectedPath ?? ''}`}
-              sandbox={
-                currentDesignEngine !== null
-                  ? 'allow-scripts allow-pointer-lock allow-fullscreen'
-                  : 'allow-scripts'
-              }
+              sandbox={currentDesignEngine !== null ? SANDBOX_GAME_2D : SANDBOX_DESIGN}
               srcDoc={srcDoc}
               onLoad={() => {
                 const win = iframeRef.current?.contentWindow;
