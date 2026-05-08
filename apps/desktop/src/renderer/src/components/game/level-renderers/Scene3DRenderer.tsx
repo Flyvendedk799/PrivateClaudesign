@@ -1,5 +1,6 @@
 import type { Scene3DLevelDoc } from '@open-codesign/shared';
 import { useMemo, useState } from 'react';
+import { useCodesignStore } from '../../../store';
 
 /**
  * level-and-world-designer §Phase 5 — `scene-3d` renderer.
@@ -22,7 +23,10 @@ export function Scene3DRenderer({
   onChange: (next: Scene3DLevelDoc) => void;
 }) {
   const [plane, setPlane] = useState<'xz' | 'xy' | 'yz'>('xz');
+  const [showLivePreview, setShowLivePreview] = useState(true);
   const projection = useMemo(() => projectScene(doc, plane), [doc, plane]);
+  const previewHtml = useCodesignStore((s) => s.previewHtml);
+  const previewUpdatedAt = useCodesignStore((s) => s.previewUpdatedAt);
 
   return (
     <div className="flex flex-1 flex-col gap-[var(--space-2)] overflow-hidden">
@@ -30,7 +34,17 @@ export function Scene3DRenderer({
         <span>{doc.nodes.length} nodes</span>
         <span className="opacity-50">·</span>
         <span>{doc.spawns.length} spawns</span>
-        <div className="ml-auto flex items-center gap-[var(--space-1)]">
+        <div className="ml-auto flex items-center gap-[var(--space-2)]">
+          <label className="inline-flex items-center gap-[4px] text-[var(--color-text-muted)]">
+            <input
+              type="checkbox"
+              checked={showLivePreview}
+              onChange={(e) => setShowLivePreview(e.target.checked)}
+              aria-label="Show live preview"
+            />
+            <span>Live preview</span>
+          </label>
+          <span className="opacity-50">·</span>
           <span>Plane</span>
           {(['xz', 'xy', 'yz'] as const).map((p) => (
             <button
@@ -49,84 +63,104 @@ export function Scene3DRenderer({
           ))}
         </div>
       </div>
-      <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background)] p-[var(--space-2)]">
-        <svg
-          viewBox={`${projection.viewBox.x} ${projection.viewBox.y} ${projection.viewBox.w} ${projection.viewBox.h}`}
-          className="h-full w-full"
-          preserveAspectRatio="xMidYMid meet"
-          aria-label="Scene preview"
-        >
-          {/* Bounds rectangle */}
-          <rect
-            x={projection.boundsRect.x}
-            y={projection.boundsRect.y}
-            width={projection.boundsRect.w}
-            height={projection.boundsRect.h}
-            fill="none"
-            stroke="rgba(255,255,255,0.08)"
-            strokeDasharray="4 4"
-          />
-          {/* Origin axes */}
-          <line
-            x1={projection.viewBox.x}
-            y1={0}
-            x2={projection.viewBox.x + projection.viewBox.w}
-            y2={0}
-            stroke="rgba(34,225,255,0.18)"
-          />
-          <line
-            x1={0}
-            y1={projection.viewBox.y}
-            x2={0}
-            y2={projection.viewBox.y + projection.viewBox.h}
-            stroke="rgba(34,225,255,0.18)"
-          />
-          {projection.nodes.map((n) => (
-            <g key={n.id}>
-              <rect
-                x={n.x - n.size / 2}
-                y={n.y - n.size / 2}
-                width={n.size}
-                height={n.size}
-                fill={colorForNodeType(n.type)}
-                fillOpacity={0.65}
-                stroke="rgba(0,0,0,0.45)"
+      <div
+        className={`flex flex-1 gap-[var(--space-2)] overflow-hidden ${
+          showLivePreview && previewHtml !== null ? '' : ''
+        }`}
+      >
+        <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background)] p-[var(--space-2)]">
+          <svg
+            viewBox={`${projection.viewBox.x} ${projection.viewBox.y} ${projection.viewBox.w} ${projection.viewBox.h}`}
+            className="h-full w-full"
+            preserveAspectRatio="xMidYMid meet"
+            aria-label="Scene preview"
+          >
+            {/* Bounds rectangle */}
+            <rect
+              x={projection.boundsRect.x}
+              y={projection.boundsRect.y}
+              width={projection.boundsRect.w}
+              height={projection.boundsRect.h}
+              fill="none"
+              stroke="rgba(255,255,255,0.08)"
+              strokeDasharray="4 4"
+            />
+            {/* Origin axes */}
+            <line
+              x1={projection.viewBox.x}
+              y1={0}
+              x2={projection.viewBox.x + projection.viewBox.w}
+              y2={0}
+              stroke="rgba(34,225,255,0.18)"
+            />
+            <line
+              x1={0}
+              y1={projection.viewBox.y}
+              x2={0}
+              y2={projection.viewBox.y + projection.viewBox.h}
+              stroke="rgba(34,225,255,0.18)"
+            />
+            {projection.nodes.map((n) => (
+              <g key={n.id}>
+                <rect
+                  x={n.x - n.size / 2}
+                  y={n.y - n.size / 2}
+                  width={n.size}
+                  height={n.size}
+                  fill={colorForNodeType(n.type)}
+                  fillOpacity={0.65}
+                  stroke="rgba(0,0,0,0.45)"
+                  strokeWidth={projection.strokeWidth}
+                />
+                <text
+                  x={n.x}
+                  y={n.y}
+                  fontSize={projection.labelSize}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fill="rgba(255,255,255,0.85)"
+                >
+                  {n.type.slice(0, 8)}
+                </text>
+              </g>
+            ))}
+            {projection.spawns.map((s, i) => (
+              <circle
+                key={`spawn-${i.toString()}`}
+                cx={s.x}
+                cy={s.y}
+                r={projection.spawnSize}
+                fill={
+                  s.role === 'player'
+                    ? '#7dffb1'
+                    : s.role === 'enemy'
+                      ? '#ff7a7a'
+                      : s.role === 'exit'
+                        ? '#22e1ff'
+                        : s.role === 'checkpoint'
+                          ? '#ffce42'
+                          : '#bff8ff'
+                }
+                stroke="rgba(0,0,0,0.6)"
                 strokeWidth={projection.strokeWidth}
               />
-              <text
-                x={n.x}
-                y={n.y}
-                fontSize={projection.labelSize}
-                textAnchor="middle"
-                dominantBaseline="middle"
-                fill="rgba(255,255,255,0.85)"
-              >
-                {n.type.slice(0, 8)}
-              </text>
-            </g>
-          ))}
-          {projection.spawns.map((s, i) => (
-            <circle
-              key={`spawn-${i.toString()}`}
-              cx={s.x}
-              cy={s.y}
-              r={projection.spawnSize}
-              fill={
-                s.role === 'player'
-                  ? '#7dffb1'
-                  : s.role === 'enemy'
-                    ? '#ff7a7a'
-                    : s.role === 'exit'
-                      ? '#22e1ff'
-                      : s.role === 'checkpoint'
-                        ? '#ffce42'
-                        : '#bff8ff'
-              }
-              stroke="rgba(0,0,0,0.6)"
-              strokeWidth={projection.strokeWidth}
+            ))}
+          </svg>
+        </div>
+        {showLivePreview && previewHtml !== null ? (
+          <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background)]">
+            <iframe
+              key={`live-${previewUpdatedAt?.ts ?? 0}`}
+              srcDoc={previewHtml}
+              title="Live game preview"
+              sandbox="allow-scripts allow-pointer-lock"
+              className="h-full w-full border-0"
             />
-          ))}
-        </svg>
+            <div className="pointer-events-none absolute top-1 right-1 rounded-[var(--radius-sm)] bg-[var(--color-background-secondary)]/85 px-[6px] py-[1px] text-[10px] text-[var(--color-text-muted)]">
+              Live preview · {previewUpdatedAt !== null ? 'fresh' : 'cached'}
+            </div>
+          </div>
+        ) : null}
       </div>
       <Scene3DPrimitiveForm doc={doc} onChange={onChange} />
     </div>

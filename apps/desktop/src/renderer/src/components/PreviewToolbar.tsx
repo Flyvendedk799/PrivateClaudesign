@@ -4,6 +4,7 @@ import {
   FolderTree,
   Gamepad2,
   Hammer,
+  Layers,
   Loader2,
   MessageSquare,
   Monitor,
@@ -77,6 +78,18 @@ export function PreviewToolbar(): ReactElement {
     currentArtifactType !== 'game' &&
     previewHtml !== null;
   const [promotingToGame, setPromotingToGame] = useState(false);
+  // Phase 8.2 — "Decompose game" surfaces only on game-mode designs
+  // that already have an artifact to decompose. The orchestrator
+  // sequences sprites → animations → levels → world; the floating
+  // progress card mounted at App root tracks the run.
+  const isInGameMode = currentArtifactType === 'game' || isGameMode;
+  const decomposeFlow = useCodesignStore((s) => s.decomposeFlow);
+  const startDecomposeFlow = useCodesignStore((s) => s.startDecomposeFlow);
+  const canDecompose =
+    currentDesignId !== null &&
+    isInGameMode &&
+    previewHtml !== null &&
+    (decomposeFlow === null || decomposeFlow.overallStatus !== 'running');
   // Multi-file affordance — surface "N files" when the design has
   // sidecars in `design_files`. Click switches the canvas to the
   // Files tab so the user can inspect the tree.
@@ -272,6 +285,21 @@ export function PreviewToolbar(): ReactElement {
             <Gamepad2 className="w-3.5 h-3.5" aria-hidden="true" />
           )}
           Game Mode
+        </button>
+      ) : null}
+
+      {canDecompose ? (
+        <button
+          type="button"
+          onClick={() => {
+            if (currentDesignId !== null) void startDecomposeFlow(currentDesignId);
+          }}
+          aria-label="Decompose game"
+          title="Run all four extraction briefs (sprites → animations → levels → world) in sequence. Progress shows in a floating card."
+          className="inline-flex items-center gap-[6px] h-[26px] px-[10px] text-[12px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)] transition-[background-color,color,transform] duration-[var(--duration-faster)] active:scale-[var(--scale-press-down)] disabled:opacity-40 disabled:pointer-events-none"
+        >
+          <Layers className="w-3.5 h-3.5" aria-hidden="true" />
+          Decompose
         </button>
       ) : null}
 

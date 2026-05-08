@@ -1,6 +1,7 @@
 import type { GameArtifact } from '@open-codesign/shared';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useCodesignStore } from '../../store';
+import { ANIMATION_EXTRACTION_BRIEF } from './game-briefs';
 
 function readFileAsText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -214,36 +215,9 @@ export function AnimationsTabView() {
   );
 }
 
-/** Pre-filled brief for the "Extract from existing artwork" empty-state
- *  button on the Animations tab. Mirrors the sprite version's tight
- *  scoping: explicit slugs, canonical paths the indexer recognises
- *  (`assets/animations/<slug>/clip.json`), and a hard ban on rewriting
- *  unrelated game logic. */
-const ANIMATION_EXTRACTION_BRIEF = [
-  'Decompose the inline animation cycles in `index.html` into animation clips so the',
-  'Animations tab can index them.',
-  '',
-  'For each distinct cycle (reload, fire, melee combos, ADS, jump, vault, idle breathing),',
-  'extract the keyframe data + timing into a new file at',
-  '`assets/animations/<slug>/clip.json` (slug = stable kebab-case name, e.g.',
-  '`reload-m4`, `melee-combo-0`, `melee-combo-1`, `idle-breathing`).',
-  '',
-  'Each clip JSON should follow this minimal shape:',
-  '```',
-  '{ "name": "<slug>", "durationMs": <number>, "fps": 60,',
-  '  "tracks": [ { "target": "<bone>", "property": "<rotation|position|scale>",',
-  '                "values": [{ "tMs": 0, "value": [...] }, ...] } ] }',
-  '```',
-  '',
-  'Hard rules:',
-  '- DO NOT rewrite unrelated parts of `index.html`. Make targeted edits only.',
-  '- Keep the in-game animations playing — extract the data; reference the clip',
-  '  files from `index.html` or duplicate the data inline. Visual parity is mandatory.',
-  '- After each extraction call `verify_artifact` and `render_preview` to confirm',
-  '  the game still renders. If a render shows the scene gone, revert that edit.',
-  '- Do NOT change game logic, weapon switching, or sprite geometry.',
-  '- After all extractions, call `done`.',
-].join('\n');
+// ANIMATION_EXTRACTION_BRIEF lives in ./game-briefs.ts so the unified
+// "Decompose game" orchestrator can sequence it alongside the other
+// extraction briefs.
 
 function AnimationsEmptyState({
   hasTarget,

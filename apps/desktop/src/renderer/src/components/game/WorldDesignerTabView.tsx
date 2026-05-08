@@ -1,8 +1,10 @@
 import type { GameArtifact, WorldDoc } from '@open-codesign/shared';
 import { WorldDoc as WorldDocSchema } from '@open-codesign/shared';
-import { Loader2 } from 'lucide-react';
+import { Download, Loader2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCodesignStore } from '../../store';
+import { GENERATE_WORLD_GRAPH_BRIEF } from './game-briefs';
+import { computeForceLayout } from './level-renderers/forceLayout';
 
 /**
  * level-and-world-designer §Phase 4 — World Designer.
@@ -171,7 +173,8 @@ function WorldGraphView({
   onSelectLevel: (slug: string) => void;
   onChange: (next: WorldDoc) => void;
 }) {
-  const layout = useMemo(() => layoutWorld(doc), [doc]);
+  const [layoutMode, setLayoutMode] = useState<'sequence' | 'force'>('sequence');
+  const layout = useMemo(() => layoutWorld(doc, layoutMode), [doc, layoutMode]);
   const [pendingFrom, setPendingFrom] = useState<string>('');
   const [pendingTo, setPendingTo] = useState<string>('');
   const [pendingTrigger, setPendingTrigger] =
@@ -188,7 +191,36 @@ function WorldGraphView({
             Saving…
           </span>
         ) : null}
-        <div className="ml-auto flex items-center gap-[var(--space-1)]">
+        <div className="ml-auto flex items-center gap-[var(--space-2)]">
+          <div className="inline-flex items-center gap-[2px]">
+            <span className="text-[var(--color-text-muted)]">Layout</span>
+            {(['sequence', 'force'] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                aria-pressed={layoutMode === m}
+                onClick={() => setLayoutMode(m)}
+                className={`rounded-[var(--radius-sm)] px-[var(--space-2)] py-[2px] capitalize ${
+                  layoutMode === m
+                    ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)]'
+                    : 'text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+                }`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+          <span className="opacity-50">·</span>
+          <button
+            type="button"
+            onClick={() => downloadStringAsFile(JSON.stringify(doc, null, 2), 'world.json')}
+            aria-label="Export world graph"
+            title="Export world.json as a standalone file"
+            className="rounded-[var(--radius-sm)] p-[4px] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+          <span className="opacity-50">·</span>
           <span>Start level</span>
           <select
             value={doc.startLevelSlug ?? ''}
@@ -367,7 +399,23 @@ function WorldGraphView({
   );
 }
 
-function layoutWorld(doc: WorldDoc): {
+/** Same browser-side download helper used by LevelDetail. Phase 8.7. */
+function downloadStringAsFile(content: string, filename: string): void {
+  const blob = new Blob([content], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function layoutWorld(
+  doc: WorldDoc,
+  mode: 'sequence' | 'force',
+): {
   byId: Map<string, { x: number; y: number }>;
   viewBox: { x: number; y: number; w: number; h: number };
   nodeRadius: number;
@@ -383,6 +431,24 @@ function layoutWorld(doc: WorldDoc): {
       labelSize: 4,
     };
   }
+  const W = 1000;
+  const H = 600;
+  const byId = new Map<string, { x: number; y: number }>();
+  if (mode === 'force') {
+    const positioned = computeForceLayout(
+      doc.levels.map((l) => ({ id: l.slug, x: 0, y: 0 })),
+      doc.transitions.map((t) => ({ from: t.from, to: t.to })),
+      { size: Math.max(W, H), springLen: 200, repulsion: 22000, iterations: 240 },
+    );
+    for (const [slug, p] of positioned.entries()) byId.set(slug, p);
+    return {
+      byId,
+      viewBox: { x: 0, y: 0, w: W, h: H },
+      nodeRadius: 36,
+      strokeWidth: 2,
+      labelSize: 14,
+    };
+  }
   // Sort by sequencePosition (declared) then alphabetically (stable
   // tiebreak). Layout: simple chain across the X axis with a slight
   // staggered Y so longer chains read top-down.
@@ -392,11 +458,8 @@ function layoutWorld(doc: WorldDoc): {
     if (ap !== bp) return ap - bp;
     return a.slug.localeCompare(b.slug);
   });
-  const W = 1000;
-  const H = 600;
   const margin = 80;
   const span = Math.max(1, sorted.length - 1);
-  const byId = new Map<string, { x: number; y: number }>();
   for (let i = 0; i < sorted.length; i += 1) {
     const x = margin + ((W - margin * 2) * i) / span;
     // 4-row stagger to avoid label overlap on big graphs.
@@ -444,26 +507,5 @@ function WorldEmptyState({
   );
 }
 
-/** Phase 6 — pre-flighted brief that the empty-state CTA seeds. */
-export const GENERATE_WORLD_GRAPH_BRIEF = [
-  'Generate the world graph for this game.',
-  '',
-  'Steps:',
-  '1. List every `assets/levels/<slug>/level.json` file in the design.',
-  '2. Read each level file briefly (headline metadata only — kind,',
-  '   biome, sequencePosition).',
-  '3. Compose `assets/world/world.json` matching the WorldDoc schema:',
-  '   `{ schemaVersion: 1, kind: "world-graph", startLevelSlug: <slug>,',
-  '     levels: [...], transitions: [...] }`. Pick startLevelSlug = the',
-  '   level with the lowest sequencePosition (or a level whose slug',
-  '   includes "tutorial" / "intro" / "1").',
-  '4. Add `transitions` based on sequencePosition: each level → the',
-  '   next sequencePosition with triggerType="exit". For death-loops',
-  '   (e.g. wave-defense), add a triggerType="death" self-loop.',
-  '',
-  'Hard rules:',
-  '- DO NOT modify `index.html` or any level files.',
-  '- DO NOT invent levels that are not already in the registry.',
-  '- Validate against WorldDoc before writing.',
-  '- Call `done` when finished.',
-].join('\n');
+// GENERATE_WORLD_GRAPH_BRIEF lives in ./game-briefs.ts so the unified
+// Decompose orchestrator can sequence it after the level extraction.

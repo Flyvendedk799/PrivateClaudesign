@@ -457,6 +457,25 @@ interface CodesignState {
    *  (CanvasTabBar / GameProjectTabs / MotionProjectTabs). */
   currentArtifactType: 'design' | 'game' | 'motion';
 
+  /** level-and-world-designer §Phase 8.2 — unified "Decompose game"
+   *  orchestrator state. When non-null the renderer's progress card is
+   *  visible; phases run sequentially through the existing sendPrompt
+   *  pipeline so each phase pays for + benefits from the agent's
+   *  context once. The flow can be cancelled mid-phase via the
+   *  in-flight controller. */
+  decomposeFlow: {
+    designId: string;
+    phases: Array<{
+      id: 'sprites' | 'animations' | 'levels' | 'world';
+      label: string;
+      status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+      errorMessage?: string;
+    }>;
+    currentPhaseIndex: number;
+    overallStatus: 'running' | 'completed' | 'failed' | 'cancelled';
+    startedAt: number;
+  } | null;
+
   // motion-graphics-plan §1.1 — motion-mode slices.
   /** Per-design list of registered Remotion compositions, hydrated from
    *  the main process via `loadMotionCompositions(id)`. */
@@ -802,6 +821,18 @@ interface CodesignState {
    *  snapshot with artifact_type='game' and reloads the design so the
    *  Sprites/Animations tabs surface. */
   promoteCurrentDesignToGame: () => Promise<void>;
+  /** level-and-world-designer §Phase 8.2 — sequence the four extraction
+   *  briefs (sprites → animations → levels → world) through sendPrompt
+   *  in order. Updates `decomposeFlow` so the progress card stays
+   *  current across phase transitions. Resolves when the last phase
+   *  completes or the flow is cancelled. */
+  startDecomposeFlow: (designId: string) => Promise<void>;
+  /** Cancel an in-flight Decompose flow. Sets overallStatus to
+   *  'cancelled' and aborts the current generation. The completed
+   *  phases stay in DB; only the current and future phases are skipped. */
+  cancelDecomposeFlow: () => void;
+  /** Dismiss the progress card after a flow has finished. */
+  dismissDecomposeFlow: () => void;
   renameCurrentDesign: (name: string) => Promise<void>;
   renameDesign: (id: string, name: string) => Promise<void>;
   duplicateDesign: (id: string) => Promise<Design | null>;
@@ -2203,6 +2234,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   pendingMotionStyle: null,
   currentDesignEngine: null,
   currentArtifactType: 'design',
+  decomposeFlow: null,
   godotPreviewByDesign: {},
   godotBuildStatusByDesign: {},
   lastPickedMode: 'design',
@@ -3479,6 +3511,132 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     }
     void get().loadGameArtifacts(designId);
     set({ toastMessage: 'Promoted to Game Mode — Sprites + Animations tabs available' });
+  },
+
+  async startDecomposeFlow(designId: string) {
+    // Lazy-load the brief table so the orchestrator doesn't add to the
+    // main store-bundle weight.
+    const { DECOMPOSE_PHASES } = await import('./components/game/game-briefs');
+    if (get().decomposeFlow !== null && get().decomposeFlow?.overallStatus === 'running') {
+      // Refuse to double-start.
+      return;
+    }
+    if (get().isGenerating) {
+      set({ toastMessage: 'A generation is in flight — cancel or wait before decomposing.' });
+      return;
+    }
+    set({
+      decomposeFlow: {
+        designId,
+        phases: DECOMPOSE_PHASES.map((p) => ({
+          id: p.id,
+          label: p.label,
+          status: 'pending',
+        })),
+        currentPhaseIndex: 0,
+        overallStatus: 'running',
+        startedAt: Date.now(),
+      },
+    });
+    for (let i = 0; i < DECOMPOSE_PHASES.length; i += 1) {
+      const flow = get().decomposeFlow;
+      if (flow === null || flow.overallStatus !== 'running') break;
+      // Update current phase to running.
+      set((s) => {
+        if (s.decomposeFlow === null) return {};
+        return {
+          decomposeFlow: {
+            ...s.decomposeFlow,
+            currentPhaseIndex: i,
+            phases: s.decomposeFlow.phases.map((p, idx) =>
+              idx === i ? { ...p, status: 'running' as const } : p,
+            ),
+          },
+        };
+      });
+      const phase = DECOMPOSE_PHASES[i];
+      if (phase === undefined) continue;
+      try {
+        await get().sendPrompt({
+          prompt: phase.brief,
+          // Suppress the chat user-bubble for orchestrator-driven runs —
+          // the user didn't type these, the briefs are pre-flighted.
+          silent: true,
+        });
+        // sendPrompt resolves on completion (success or error). If the
+        // store flipped to 'cancelled' mid-run, bail before marking
+        // completed.
+        const flowAfter = get().decomposeFlow;
+        if (flowAfter === null || flowAfter.overallStatus !== 'running') break;
+        set((s) => {
+          if (s.decomposeFlow === null) return {};
+          return {
+            decomposeFlow: {
+              ...s.decomposeFlow,
+              phases: s.decomposeFlow.phases.map((p, idx) =>
+                idx === i ? { ...p, status: 'completed' as const } : p,
+              ),
+            },
+          };
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        set((s) => {
+          if (s.decomposeFlow === null) return {};
+          return {
+            decomposeFlow: {
+              ...s.decomposeFlow,
+              overallStatus: 'failed' as const,
+              phases: s.decomposeFlow.phases.map((p, idx) =>
+                idx === i ? { ...p, status: 'failed' as const, errorMessage: message } : p,
+              ),
+            },
+          };
+        });
+        return;
+      }
+    }
+    // All phases completed — mark overall done unless the user already
+    // cancelled mid-flight (in which case overallStatus stays 'cancelled').
+    set((s) => {
+      if (s.decomposeFlow === null) return {};
+      if (s.decomposeFlow.overallStatus !== 'running') return {};
+      return {
+        decomposeFlow: {
+          ...s.decomposeFlow,
+          overallStatus: 'completed',
+        },
+        toastMessage: 'Decomposition complete — Sprites, Animations, Levels, World all populated.',
+      };
+    });
+  },
+
+  cancelDecomposeFlow() {
+    set((s) => {
+      if (s.decomposeFlow === null) return {};
+      const currentIdx = s.decomposeFlow.currentPhaseIndex;
+      return {
+        decomposeFlow: {
+          ...s.decomposeFlow,
+          overallStatus: 'cancelled',
+          phases: s.decomposeFlow.phases.map((p, idx) =>
+            idx === currentIdx && p.status === 'running'
+              ? { ...p, status: 'skipped' as const }
+              : idx > currentIdx && p.status === 'pending'
+                ? { ...p, status: 'skipped' as const }
+                : p,
+          ),
+        },
+      };
+    });
+    // Cancel the in-flight generation if any. The for-loop in
+    // startDecomposeFlow checks `overallStatus === 'running'` between
+    // phases and bails out.
+    void get().cancelGeneration();
+  },
+
+  dismissDecomposeFlow() {
+    set({ decomposeFlow: null });
   },
 
   async switchDesign(id: string) {

@@ -1,5 +1,6 @@
 import type { Tilemap2DLevelDoc } from '@open-codesign/shared';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Eraser, MousePointer2, Paintbrush } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 /**
  * level-and-world-designer §Phase 5 — `tilemap-2d` renderer.
@@ -14,6 +15,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
  * fields (size.cols/rows, tileSize, layer visibility/opacity, spawn
  * coordinates) be edited inline.
  */
+type Tool = 'select' | 'paint' | 'erase';
+
 export function TilemapRenderer({
   doc,
   onChange,
@@ -27,6 +30,24 @@ export function TilemapRenderer({
     () => doc.layers.filter((l) => l.visible).map((_, i) => i),
     [doc.layers],
   );
+  // Phase 8.4 — paint brush state. activeTileId selects the tile that
+  // gets painted on left-click; right-click always erases (sets to -1).
+  // activeLayerIdx scopes mutations to a single layer so painting on
+  // foreground doesn't disturb the background. Drag mutations batch
+  // into a single onChange call when the pointer comes up so undo/redo
+  // sees one ring entry per stroke, not per-tile.
+  const [tool, setTool] = useState<Tool>('paint');
+  const [activeTileId, setActiveTileId] = useState(0);
+  const [activeLayerIdx, setActiveLayerIdx] = useState(0);
+  const drawingRef = useRef<{ docDuringStroke: Tilemap2DLevelDoc; layerIdx: number } | null>(null);
+  const lastPaintCellRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Clamp activeLayerIdx if the layer list shrinks.
+  useEffect(() => {
+    if (activeLayerIdx >= doc.layers.length) {
+      setActiveLayerIdx(Math.max(0, doc.layers.length - 1));
+    }
+  }, [doc.layers.length, activeLayerIdx]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -98,6 +119,83 @@ export function TilemapRenderer({
     }
   }, [doc, zoom, visibleLayers]);
 
+  const cellPx = Math.max(2, Math.round(doc.tileSize * zoom));
+
+  const cellAtEvent = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>): { x: number; y: number } | null => {
+      const canvas = canvasRef.current;
+      if (canvas === null) return null;
+      const rect = canvas.getBoundingClientRect();
+      const cx = Math.floor((e.clientX - rect.left) / cellPx);
+      const cy = Math.floor((e.clientY - rect.top) / cellPx);
+      if (cx < 0 || cy < 0 || cx >= doc.size.cols || cy >= doc.size.rows) return null;
+      return { x: cx, y: cy };
+    },
+    [cellPx, doc.size.cols, doc.size.rows],
+  );
+
+  const paintCell = useCallback(
+    (cellX: number, cellY: number, tileId: number) => {
+      const draft = drawingRef.current;
+      if (draft === null) return;
+      const layer = draft.docDuringStroke.layers[draft.layerIdx];
+      if (!layer) return;
+      // Defensive: backfill missing rows / columns to the declared size.
+      const rows = ensureRect(layer.tiles, doc.size.rows, doc.size.cols);
+      const row = rows[cellY];
+      if (!row) return;
+      if (row[cellX] === tileId) return; // no-op when unchanged
+      row[cellX] = tileId;
+      drawingRef.current = {
+        ...draft,
+        docDuringStroke: {
+          ...draft.docDuringStroke,
+          layers: draft.docDuringStroke.layers.map((l, i) =>
+            i === draft.layerIdx ? { ...l, tiles: rows } : l,
+          ),
+        },
+      };
+    },
+    [doc.size.cols, doc.size.rows],
+  );
+
+  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (tool === 'select') return;
+    const cell = cellAtEvent(e);
+    if (cell === null) return;
+    if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 2) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    drawingRef.current = { docDuringStroke: doc, layerIdx: activeLayerIdx };
+    const tileId = tool === 'erase' || e.button === 2 ? -1 : activeTileId;
+    paintCell(cell.x, cell.y, tileId);
+    lastPaintCellRef.current = cell;
+    // Force a re-render with the in-progress doc so the user sees the
+    // stroke materialise. We commit on pointerup.
+    onChange(drawingRef.current.docDuringStroke);
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (drawingRef.current === null) return;
+    const cell = cellAtEvent(e);
+    if (cell === null) return;
+    if (lastPaintCellRef.current?.x === cell.x && lastPaintCellRef.current?.y === cell.y) {
+      return;
+    }
+    const isErase = tool === 'erase' || (e.buttons & 2) !== 0;
+    paintCell(cell.x, cell.y, isErase ? -1 : activeTileId);
+    lastPaintCellRef.current = cell;
+    onChange(drawingRef.current.docDuringStroke);
+  };
+
+  const finishStroke = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (drawingRef.current === null) return;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    onChange(drawingRef.current.docDuringStroke);
+    drawingRef.current = null;
+    lastPaintCellRef.current = null;
+  };
+
   return (
     <div className="flex flex-1 flex-col gap-[var(--space-2)] overflow-hidden">
       <div className="flex items-center gap-[var(--space-2)] text-[11px] text-[var(--color-text-muted)]">
@@ -125,17 +223,134 @@ export function TilemapRenderer({
           <span className="tabular-nums">{(zoom * 100).toFixed(0)}%</span>
         </div>
       </div>
+      <TilemapBrushBar
+        tool={tool}
+        onToolChange={setTool}
+        activeTileId={activeTileId}
+        onTileIdChange={setActiveTileId}
+        layers={doc.layers.map((l) => l.name)}
+        activeLayerIdx={activeLayerIdx}
+        onLayerChange={setActiveLayerIdx}
+      />
       <div className="flex flex-1 items-start justify-center overflow-auto rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background)] p-[var(--space-2)]">
         <canvas
           ref={canvasRef}
           aria-label="Tilemap preview"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={finishStroke}
+          onPointerCancel={finishStroke}
+          onContextMenu={(e) => e.preventDefault()}
           className="image-render-pixelated"
-          style={{ imageRendering: 'pixelated' }}
+          style={{
+            imageRendering: 'pixelated',
+            cursor: tool === 'paint' ? 'crosshair' : tool === 'erase' ? 'cell' : 'default',
+          }}
         />
       </div>
       <TilemapPrimitiveForm doc={doc} onChange={onChange} />
     </div>
   );
+}
+
+function TilemapBrushBar({
+  tool,
+  onToolChange,
+  activeTileId,
+  onTileIdChange,
+  layers,
+  activeLayerIdx,
+  onLayerChange,
+}: {
+  tool: Tool;
+  onToolChange: (next: Tool) => void;
+  activeTileId: number;
+  onTileIdChange: (next: number) => void;
+  layers: string[];
+  activeLayerIdx: number;
+  onLayerChange: (next: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-[var(--space-2)] rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background-secondary)] p-[var(--space-2)] text-[11px]">
+      <div className="inline-flex items-center gap-[2px]">
+        {(
+          [
+            { id: 'select' as Tool, icon: MousePointer2, label: 'Select (no-op)' },
+            { id: 'paint' as Tool, icon: Paintbrush, label: 'Paint tile' },
+            { id: 'erase' as Tool, icon: Eraser, label: 'Erase tile' },
+          ] as const
+        ).map(({ id, icon: Icon, label }) => (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={tool === id}
+            aria-label={label}
+            title={label}
+            onClick={() => onToolChange(id)}
+            className={`inline-flex items-center justify-center rounded-[var(--radius-sm)] p-[4px] ${
+              tool === id
+                ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)]'
+                : 'text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+            }`}
+          >
+            <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        ))}
+      </div>
+      <span className="opacity-50">·</span>
+      <label className="inline-flex items-center gap-[var(--space-1)]">
+        <span className="text-[var(--color-text-muted)]">Layer</span>
+        <select
+          value={activeLayerIdx}
+          onChange={(e) => onLayerChange(Number.parseInt(e.target.value, 10))}
+          className="rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background)] px-[var(--space-1)] py-[2px] text-[12px] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
+        >
+          {layers.map((name, i) => (
+            <option key={`${name}-${i.toString()}`} value={i}>
+              {name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <span className="opacity-50">·</span>
+      <label className="inline-flex items-center gap-[var(--space-1)]">
+        <span className="text-[var(--color-text-muted)]">Tile id</span>
+        <input
+          type="number"
+          value={activeTileId}
+          min={-1}
+          step={1}
+          onChange={(e) => {
+            const n = Number.parseInt(e.target.value, 10);
+            if (!Number.isNaN(n)) onTileIdChange(n);
+          }}
+          className="w-16 rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background)] px-[var(--space-1)] py-[2px] text-[12px] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
+        />
+      </label>
+      <span className="ml-auto text-[10px] text-[var(--color-text-muted)]">
+        Right-click erases · -1 = empty cell
+      </span>
+    </div>
+  );
+}
+
+/** Defensive helper — when level.json's tiles[][] doesn't span the
+ *  declared size (agent wrote a sparse map), fill in -1 so the brush
+ *  has something to mutate. Returns a deep-copied 2D array. */
+function ensureRect(tiles: number[][], rows: number, cols: number): number[][] {
+  const out: number[][] = [];
+  for (let y = 0; y < rows; y += 1) {
+    const src = tiles[y];
+    const row = new Array<number>(cols).fill(-1);
+    if (src) {
+      for (let x = 0; x < Math.min(cols, src.length); x += 1) {
+        const v = src[x];
+        if (typeof v === 'number') row[x] = v;
+      }
+    }
+    out.push(row);
+  }
+  return out;
 }
 
 function colorForTile(id: number, layerIdx: number): string {

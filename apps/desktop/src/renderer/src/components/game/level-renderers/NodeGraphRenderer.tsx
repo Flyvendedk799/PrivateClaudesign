@@ -1,5 +1,6 @@
 import type { NodeGraphLevelDoc } from '@open-codesign/shared';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
+import { computeForceLayout } from './forceLayout';
 
 /**
  * level-and-world-designer §Phase 5 — `node-graph` renderer.
@@ -21,7 +22,8 @@ export function NodeGraphRenderer({
   doc: NodeGraphLevelDoc;
   onChange: (next: NodeGraphLevelDoc) => void;
 }) {
-  const layout = useMemo(() => layoutGraph(doc), [doc]);
+  const [layoutMode, setLayoutMode] = useState<'declared' | 'force'>('declared');
+  const layout = useMemo(() => layoutGraph(doc, layoutMode), [doc, layoutMode]);
 
   return (
     <div className="flex flex-1 flex-col gap-[var(--space-2)] overflow-hidden">
@@ -35,6 +37,24 @@ export function NodeGraphRenderer({
             <span>start: {doc.startNodeId}</span>
           </>
         ) : null}
+        <div className="ml-auto inline-flex items-center gap-[2px]">
+          <span className="text-[var(--color-text-muted)]">Layout</span>
+          {(['declared', 'force'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              aria-pressed={layoutMode === m}
+              onClick={() => setLayoutMode(m)}
+              className={`rounded-[var(--radius-sm)] px-[var(--space-2)] py-[2px] capitalize ${
+                layoutMode === m
+                  ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent)]'
+                  : 'text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
       </div>
       <div className="flex flex-1 items-center justify-center overflow-hidden rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background)] p-[var(--space-2)]">
         <svg
@@ -124,15 +144,17 @@ export function NodeGraphRenderer({
   );
 }
 
-function layoutGraph(doc: NodeGraphLevelDoc): {
+function layoutGraph(
+  doc: NodeGraphLevelDoc,
+  mode: 'declared' | 'force',
+): {
   nodeIndex: Map<string, { x: number; y: number }>;
   viewBox: { x: number; y: number; w: number; h: number };
   nodeRadius: number;
   strokeWidth: number;
   labelSize: number;
 } {
-  const positions = doc.nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }));
-  if (positions.length === 0) {
+  if (doc.nodes.length === 0) {
     return {
       nodeIndex: new Map(),
       viewBox: { x: 0, y: 0, w: 100, h: 100 },
@@ -140,6 +162,20 @@ function layoutGraph(doc: NodeGraphLevelDoc): {
       strokeWidth: 0.4,
       labelSize: 4,
     };
+  }
+  let positions: Array<{ id: string; x: number; y: number }>;
+  if (mode === 'force') {
+    const computed = computeForceLayout(
+      doc.nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y })),
+      doc.edges.map((e) => ({ from: e.from, to: e.to })),
+      { size: 800 },
+    );
+    positions = doc.nodes.map((n) => {
+      const p = computed.get(n.id) ?? { x: 0, y: 0 };
+      return { id: n.id, x: p.x, y: p.y };
+    });
+  } else {
+    positions = doc.nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }));
   }
   let minX = positions[0]?.x ?? 0;
   let maxX = minX;

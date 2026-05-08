@@ -1,6 +1,7 @@
 import type { GameArtifact } from '@open-codesign/shared';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useCodesignStore } from '../../store';
+import { SPRITE_EXTRACTION_BRIEF } from './game-briefs';
 
 const ROLE_LABELS: Record<string, string> = {
   texture: 'Texture',
@@ -168,32 +169,9 @@ export function SpritesTabView() {
   );
 }
 
-/**
- * Pre-filled brief that the "Extract from existing artwork" empty-state
- * button drops into the prompt draft. Tight scoping is intentional —
- * historically the agent has rewritten the whole game when given any
- * weapon/HUD-shaped prompt (see .claude/workspace/2026-05-08-pause-prune-
- * continuation-fix.md). The brief explicitly names the slugs, points at
- * canonical paths the indexer recognises (assets/sprites/<slug>/sprite.svg),
- * and forbids touching unrelated game logic.
- */
-const SPRITE_EXTRACTION_BRIEF = [
-  'Decompose the inline weapon / character viewmodels in `index.html` into',
-  'sprite files so the Sprites tab can index them.',
-  '',
-  'For each major `<svg>` block representing a discrete asset, extract the markup',
-  'into a new file at `assets/sprites/<slug>/sprite.svg` (slug = stable kebab-case',
-  'name, e.g. `m4a1`, `desert-eagle`, `knife`, `enemy-grunt`).',
-  '',
-  'Hard rules:',
-  '- DO NOT rewrite unrelated parts of `index.html`. Make targeted edits only.',
-  '- Keep the in-game render working — either reference the sprite via `<img>` /',
-  '  fetch + inline, or duplicate the markup. Visual parity is mandatory.',
-  '- After each extraction call `verify_artifact` and `render_preview` to confirm',
-  '  the game still loads. If a render shows the scene gone, revert that edit.',
-  '- Do NOT change game logic, weapon switching, melee combos, or animations.',
-  '- After all extractions, call `done`.',
-].join('\n');
+// SPRITE_EXTRACTION_BRIEF lives in ./game-briefs.ts so the unified
+// "Decompose game" orchestrator (Phase 8.2) can sequence it alongside
+// the other extraction briefs.
 
 function SpriteEmptyState({
   onImport,

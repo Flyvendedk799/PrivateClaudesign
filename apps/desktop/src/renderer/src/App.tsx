@@ -16,6 +16,7 @@ import { TopBar } from './components/TopBar';
 import { UpdateBanner } from './components/UpdateBanner';
 import { CommentsPanel } from './components/comment/CommentsPanel';
 import { ReportEventDialog } from './components/diagnostics/ReportEventDialog';
+import { DecomposeProgressCard } from './components/game/DecomposeProgressCard';
 import { useKeyboard } from './hooks/useKeyboard';
 import { useUpdateWiring } from './hooks/useUpdateWiring';
 import { createUpdateStore } from './state/update-store';
@@ -266,6 +267,7 @@ export function App() {
       <SkillExtractorOverlay />
       <ToastViewport />
       <CommentsPanel />
+      <DecomposeProgressCard />
       <ReportEventDialog localId={activeReportLocalId} onClose={closeReportDialog} />
     </div>
   );

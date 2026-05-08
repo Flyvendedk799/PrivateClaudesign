@@ -3,6 +3,11 @@ import { LevelDoc as LevelDocSchema, inferLevelKind } from '@open-codesign/share
 import { Plus } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useCodesignStore } from '../../store';
+import {
+  ADD_LEVEL_BRIEF,
+  DEFINE_LEVEL_SCHEMA_BRIEF,
+  EXTRACT_LEVELS_FROM_GAME_BRIEF,
+} from './game-briefs';
 import { LevelDetail } from './level-renderers/LevelDetail';
 
 /**
@@ -183,88 +188,10 @@ function LevelsEmptyState({
 }
 
 // ---------------------------------------------------------------------------
-// Phase 6 — pre-flighted briefs.
+// Phase 6 briefs (ADD_LEVEL_BRIEF / DEFINE_LEVEL_SCHEMA_BRIEF /
+// EXTRACT_LEVELS_FROM_GAME_BRIEF) live in ./game-briefs.ts so the
+// unified Decompose orchestrator can reference them too.
 // ---------------------------------------------------------------------------
-
-/** Minimal, scope-locked brief for the agent to add ONE level. The
- *  Levels-tab "+ New level" button drops this into the prompt draft. */
-export const ADD_LEVEL_BRIEF = [
-  'Add a new level to this game.',
-  '',
-  'Steps:',
-  '1. Read `assets/levels/_schema.json` to learn the per-design level shape.',
-  '   If it does not exist, write it first by reading `index.html` to choose',
-  '   one of: tilemap-2d, scene-3d, node-graph, wave-script, freeform-json.',
-  '2. Read the most recent existing level under `assets/levels/<slug>/level.json`',
-  '   for stylistic conventions (entity types, spawn-role names, naming).',
-  '3. Write a new level at `assets/levels/<new-slug>/level.json` matching the',
-  '   schema. Slug = stable kebab-case (`level-1`, `tutorial`, `wave-2`).',
-  '4. Append a corresponding entry to `assets/world/world.json` `levels[]`',
-  '   with sequencePosition = max(existing) + 1, plus a transition from the',
-  '   previous level. Validate against WorldDoc.',
-  '',
-  'Hard rules:',
-  '- DO NOT modify `index.html` or game runtime logic.',
-  '- DO NOT invent fields outside the declared schema.',
-  '- After writing, call `verify_artifact` and `render_preview` to confirm',
-  '  the game still loads. If a render shows the scene gone, revert.',
-  '- Call `done` when finished.',
-].join('\n');
-
-/** "Define level schema" empty-state CTA. Lets the agent inspect the
- *  game and choose the appropriate canonical kind WITHOUT also
- *  generating a level. The schema file alone unlocks downstream
- *  generators that conform to it. */
-export const DEFINE_LEVEL_SCHEMA_BRIEF = [
-  'Decide the level shape for this game.',
-  '',
-  'Steps:',
-  '1. Read `index.html` to understand the genre (FPS, tilemap, dialogue tree,',
-  '   wave defense, etc.). Read `assets/sprites/_registry.json` if present.',
-  '2. Pick exactly ONE of the canonical level kinds:',
-  '   - `tilemap-2d` (2D platformer / top-down RPG / roguelike)',
-  '   - `scene-3d` (3D FPS / third-person / city-builder)',
-  '   - `node-graph` (dialogue / state-machine / puzzle)',
-  '   - `wave-script` (wave-defense / arena)',
-  '   - `freeform-json` (bailout — only if none of the above fit)',
-  '3. Write `assets/levels/_schema.json` declaring the chosen kind. Schema:',
-  '   `{ schemaVersion: 1, kind: "<chosen>", notes: "<reasoning>", defaults: {...} }`.',
-  '4. Output the chosen kind + a 1-sentence justification in your response.',
-  '',
-  'Hard rules:',
-  '- DO NOT modify `index.html` or write any level files yet — schema only.',
-  '- DO NOT invent a new kind outside the canonical five.',
-  '- Call `done` when finished.',
-].join('\n');
-
-/** Extract levels from a design that already has a game baked into
- *  index.html. Targets the user's three.js shooter case where waves,
- *  building progressions, and area boundaries all live inline in JS. */
-export const EXTRACT_LEVELS_FROM_GAME_BRIEF = [
-  'This design has an existing game in `index.html` but no level files.',
-  'Extract the implicit level/area boundaries into discrete level files.',
-  '',
-  'Steps:',
-  '1. Read `assets/levels/_schema.json` if present, else write it first via',
-  '   the same process as the "Define level schema" brief.',
-  '2. Read `index.html` and identify discrete level/area concepts. Examples:',
-  '   - waves of enemies → one level per wave (kind=wave-script)',
-  '   - rooms / corridors / floors → one level per room (kind=scene-3d)',
-  '   - dialogue trees / quest branches → one level per branch (kind=node-graph)',
-  '3. For each, write `assets/levels/<slug>/level.json` matching the schema.',
-  '   Extraction must be lossless — the data already lives in code; copy it',
-  '   into the level file, do not paraphrase.',
-  '4. Write `assets/world/world.json` linking the levels with transitions',
-  '   that match the in-game progression order.',
-  '',
-  'Hard rules:',
-  '- DO NOT change `index.html` behavior. Extraction is read-only against the',
-  '  game logic. If a concept does not fit the schema, expand `_schema.json`',
-  '  first via a single targeted edit.',
-  '- After every two extractions, call `verify_artifact` and `render_preview`',
-  '  to confirm the game still renders. Revert any edit that breaks it.',
-  '- Call `done` when finished.',
-].join('\n');
 
 // Export the parser type for downstream renderers.
 export type ParsedLevelDoc = LevelDoc;
