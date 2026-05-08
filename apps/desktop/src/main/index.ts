@@ -732,7 +732,20 @@ export function createRuntimeTextEditorFs({
     try {
       for (const file of listDesignFiles(db, designId)) {
         if (file.path === 'index.html') continue;
-        fsMap.set(file.path, file.content);
+        // Defensive: better-sqlite3 returns BLOB-stored values as
+        // Buffer; downstream consumers (text_editor view → content.split)
+        // assume string. Coerce here so a BLOB row doesn't crash the
+        // run with "content.split is not a function". Production rows
+        // written via upsertDesignFile are already TEXT; this catches
+        // out-of-band inserts and binary uploads.
+        const raw = file.content as unknown;
+        const content =
+          typeof raw === 'string'
+            ? raw
+            : Buffer.isBuffer(raw)
+              ? raw.toString('utf8')
+              : String(raw ?? '');
+        fsMap.set(file.path, content);
       }
     } catch (err) {
       logger.error('runtime.fs.seed_design_files.fail', {

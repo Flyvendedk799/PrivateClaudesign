@@ -2354,8 +2354,21 @@ export async function generateViaAgent(
   // "paused — say continue" hint appended below.
   // Treat wall_clock-aborted as graceful (handled below); only fail on
   // genuine errors or non-budget aborts (user cancel, signal).
+  //
+  // Phase 2.2 of pause-prune-fix-2026-05-08 — also treat an abort whose
+  // errorMessage carries our PAUSE_AT_SAFE_BOUNDARY signature as a
+  // checkpoint. The IPC's continuation hint (context_threshold,
+  // output_budget, IPC-side wall_clock) is independent of core's local
+  // `budgetTimer`; without this clause, an IPC-driven pause showed up
+  // here with `budgetReason === null` and got reclassified as
+  // PROVIDER_ERROR (run moxavy7d-wqz8iu, 2026-05-08).
+  const isContinuationPause =
+    finalAssistant.stopReason === 'aborted' &&
+    typeof finalAssistant.errorMessage === 'string' &&
+    finalAssistant.errorMessage.startsWith('Paused at safe boundary');
   const isWallClockCheckpoint =
-    budgetReason === 'wall_clock' && finalAssistant.stopReason === 'aborted';
+    (budgetReason === 'wall_clock' && finalAssistant.stopReason === 'aborted') ||
+    isContinuationPause;
   if (
     !isWallClockCheckpoint &&
     (finalAssistant.stopReason === 'error' || finalAssistant.stopReason === 'aborted')
