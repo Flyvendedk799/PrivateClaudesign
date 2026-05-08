@@ -616,6 +616,18 @@ const api = {
         schemaVersion: 1,
         ...input,
       }) as Promise<DesignSnapshot>,
+    /**
+     * Manually promote an existing design to game mode by writing a
+     * fresh snapshot with artifact_type='game'. Returns the new
+     * snapshot. No-op (returns the existing snapshot) when the design
+     * is already game-mode. Optional engine pins the engine field on
+     * the new snapshot — leave undefined to keep it null. */
+    promoteToGame: (designId: string, engine?: 'three' | 'phaser' | 'pygame' | 'godot') =>
+      ipcRenderer.invoke('snapshots:v1:promote-to-game', {
+        schemaVersion: 1,
+        designId,
+        ...(engine !== undefined ? { engine } : {}),
+      }) as Promise<DesignSnapshot>,
     delete: (id: string) =>
       ipcRenderer.invoke('snapshots:v1:delete', { schemaVersion: 1, id }) as Promise<void>,
     pickWorkspaceFolder: () =>

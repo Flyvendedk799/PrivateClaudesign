@@ -795,6 +795,10 @@ interface CodesignState {
   buildGodotWebPreview: (designId: string) => Promise<void>;
   createNewDesign: (workspacePath?: string | null) => Promise<Design | null>;
   switchDesign: (id: string) => Promise<void>;
+  /** Manually promote the current design to game mode. Writes a new
+   *  snapshot with artifact_type='game' and reloads the design so the
+   *  Sprites/Animations tabs surface. */
+  promoteCurrentDesignToGame: () => Promise<void>;
   renameCurrentDesign: (name: string) => Promise<void>;
   renameDesign: (id: string, name: string) => Promise<void>;
   duplicateDesign: (id: string) => Promise<Design | null>;
@@ -3437,6 +3441,41 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       });
       return null;
     }
+  },
+
+  async promoteCurrentDesignToGame() {
+    if (!window.codesign) return;
+    const state = get();
+    const designId = state.currentDesignId;
+    if (designId === null) return;
+    if (state.currentArtifactType === 'game') return;
+    try {
+      await window.codesign.snapshots.promoteToGame(designId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      set({ toastMessage: `Promote failed: ${message}` });
+      return;
+    }
+    // Re-derive currentArtifactType + currentDesignEngine from the new
+    // latest snapshot. Mirrors the refresh path inside switchDesign's
+    // hot branch (store.ts:3556-3569). switchDesign(id) early-returns
+    // when id === currentDesignId, so we do this inline instead of
+    // relying on it.
+    try {
+      const snapshots = await window.codesign.snapshots.list(designId);
+      const latest = snapshots[0] ?? null;
+      set({ currentDesignEngine: latest?.engine ?? null });
+      const at = latest?.artifactType ?? null;
+      const derived: 'design' | 'game' | 'motion' =
+        at === 'motion' ? 'motion' : at === 'game' || latest?.engine != null ? 'game' : 'design';
+      set({ currentArtifactType: derived });
+    } catch {
+      // Optimistic flip — even if re-list fails, surface the new mode
+      // immediately. A subsequent design switch will re-derive cleanly.
+      set({ currentArtifactType: 'game' });
+    }
+    void get().loadGameArtifacts(designId);
+    set({ toastMessage: 'Promoted to Game Mode — Sprites + Animations tabs available' });
   },
 
   async switchDesign(id: string) {

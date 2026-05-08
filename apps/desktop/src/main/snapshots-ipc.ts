@@ -327,6 +327,121 @@ export function registerSnapshotsIpc(db: Database): void {
     return snapshot;
   });
 
+  // Manually flip an existing design into game mode by writing a fresh
+  // snapshot with `artifact_type='game'`. Used by the renderer's
+  // "Promote to Game Mode" button so a project that started as plain
+  // HTML (and is actually a three.js / canvas game) gets the game-mode
+  // chrome — Sprites + Animations tabs — without having to recreate
+  // the design. Idempotent at the data layer (just appends a snapshot);
+  // safe to call repeatedly.
+  ipcMain.handle('snapshots:v1:promote-to-game', (_e: unknown, raw: unknown): DesignSnapshot => {
+    if (typeof raw !== 'object' || raw === null) {
+      throw new CodesignError(
+        'snapshots:v1:promote-to-game expects an object with designId',
+        'IPC_BAD_INPUT',
+      );
+    }
+    const r = raw as Record<string, unknown>;
+    requireSchemaV1(r, 'snapshots:v1:promote-to-game');
+    if (typeof r['designId'] !== 'string' || r['designId'].trim().length === 0) {
+      throw new CodesignError('designId must be a non-empty string', 'IPC_BAD_INPUT');
+    }
+    const designId = (r['designId'] as string).trim();
+    const validEngines = ['three', 'phaser', 'pygame', 'godot'] as const;
+    let engine: (typeof validEngines)[number] | null = null;
+    if (r['engine'] !== undefined && r['engine'] !== null) {
+      if (
+        typeof r['engine'] !== 'string' ||
+        !validEngines.includes(r['engine'] as (typeof validEngines)[number])
+      ) {
+        throw new CodesignError(
+          `engine must be one of: ${validEngines.join(', ')} (or null/omitted)`,
+          'IPC_BAD_INPUT',
+        );
+      }
+      engine = r['engine'] as (typeof validEngines)[number];
+    }
+
+    const existing = runDb('promote.list', () => listSnapshots(db, designId));
+    if (existing.length === 0) {
+      throw new CodesignError(
+        'designId references a design with no snapshots — generate something first',
+        'IPC_NOT_FOUND',
+      );
+    }
+    const parent = existing[0];
+    if (parent === undefined) {
+      throw new CodesignError('design has no snapshots to use as parent', 'IPC_NOT_FOUND');
+    }
+    if (parent.artifactType === 'game') {
+      // Already game-mode; surface the latest snapshot as a no-op so the
+      // renderer's optimistic UI doesn't have to special-case it.
+      logger.info('snapshot.promote_to_game.noop', { designId, snapshotId: parent.id });
+      return parent;
+    }
+    const indexRow = runDb('promote.read-index-html', () =>
+      db
+        .prepare('SELECT content FROM design_files WHERE design_id = ? AND path = ?')
+        .get(designId, 'index.html'),
+    ) as { content?: unknown } | undefined;
+    const rawContent = indexRow?.content;
+    const indexHtml =
+      typeof rawContent === 'string'
+        ? rawContent
+        : Buffer.isBuffer(rawContent)
+          ? rawContent.toString('utf8')
+          : '';
+    if (indexHtml.length === 0) {
+      throw new CodesignError(
+        'design has no index.html content to capture — generate something first',
+        'IPC_NOT_FOUND',
+      );
+    }
+
+    const input: SnapshotCreateInput = {
+      designId,
+      parentId: parent.id,
+      type: 'edit',
+      prompt: null,
+      artifactType: 'game',
+      artifactSource: indexHtml,
+      engine,
+      engineVersion: null,
+      message: 'Promoted to game mode',
+    };
+
+    let indexed = { spritesAdded: 0, animationsAdded: 0 };
+    try {
+      indexed = runDb('promote.index-artifacts', () => indexGameArtifactsFromFiles(db, designId));
+      runDb('promote.regenerate-registry', () => regenerateArtifactsRegistry(db, designId));
+    } catch (err) {
+      logger.warn('snapshot.promote_to_game.index_artifacts.fail', {
+        designId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    const snapshot = runDb('promote.create', () => createSnapshot(db, input));
+    const filesCount = runDb('promote.snapshot-files', () =>
+      snapshotDesignFiles(db, snapshot.id, designId),
+    );
+    const artifactCount = runDb('promote.snapshot-artifacts', () =>
+      snapshotGameArtifactsForSnapshot(db, snapshot.id, designId),
+    );
+    logger.info('snapshot.promote_to_game.ok', {
+      designId,
+      snapshotId: snapshot.id,
+      parentId: parent.id,
+      filesSnapshot: filesCount,
+      artifactsIndexedSprites: indexed.spritesAdded,
+      artifactsIndexedAnimations: indexed.animationsAdded,
+      artifactsSnapshot: artifactCount.artifacts,
+      bindingsSnapshot: artifactCount.bindings,
+      engine,
+    });
+    return snapshot;
+  });
+
   ipcMain.handle('snapshots:v1:delete', (_e: unknown, raw: unknown): void => {
     if (typeof raw !== 'object' || raw === null) {
       throw new CodesignError('snapshots:v1:delete expects an object with id', 'IPC_BAD_INPUT');
@@ -668,6 +783,7 @@ export const SNAPSHOTS_CHANNELS_V1 = [
   'snapshots:v1:list',
   'snapshots:v1:get',
   'snapshots:v1:create',
+  'snapshots:v1:promote-to-game',
   'snapshots:v1:delete',
   'snapshots:v1:workspace:pick',
   'snapshots:v1:workspace:update',

@@ -2,6 +2,7 @@ import { useT } from '@open-codesign/i18n';
 import {
   Download,
   FolderTree,
+  Gamepad2,
   Hammer,
   Loader2,
   MessageSquare,
@@ -62,6 +63,20 @@ export function PreviewToolbar(): ReactElement {
   const gameAspect = useCodesignStore((s) => s.gameAspect);
   const setGameAspect = useCodesignStore((s) => s.setGameAspect);
   const isGameMode = currentDesignEngine !== null;
+  const currentArtifactType = useCodesignStore((s) => s.currentArtifactType);
+  const promoteCurrentDesignToGame = useCodesignStore((s) => s.promoteCurrentDesignToGame);
+  // Surface the manual-promote affordance whenever the design is NOT
+  // already in game mode (artifact_type !== 'game' AND no engine pin)
+  // and there's an actual artifact to promote. Designs that started as
+  // plain HTML but happen to be three.js / canvas games can flip into
+  // game mode and pick up the Sprites + Animations tabs without having
+  // to be recreated from scratch.
+  const canPromoteToGame =
+    currentDesignId !== null &&
+    !isGameMode &&
+    currentArtifactType !== 'game' &&
+    previewHtml !== null;
+  const [promotingToGame, setPromotingToGame] = useState(false);
   // Multi-file affordance — surface "N files" when the design has
   // sidecars in `design_files`. Click switches the canvas to the
   // Files tab so the user can inspect the tree.
@@ -233,6 +248,32 @@ export function PreviewToolbar(): ReactElement {
           })}
         </div>
       )}
+
+      {canPromoteToGame ? (
+        <button
+          type="button"
+          disabled={promotingToGame}
+          onClick={async () => {
+            if (promotingToGame) return;
+            setPromotingToGame(true);
+            try {
+              await promoteCurrentDesignToGame();
+            } finally {
+              setPromotingToGame(false);
+            }
+          }}
+          aria-label="Promote to Game Mode"
+          title="Promote this project to Game Mode (unlocks Sprites + Animations tabs)"
+          className="inline-flex items-center gap-[6px] h-[26px] px-[10px] text-[12px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)] transition-[background-color,color,transform] duration-[var(--duration-faster)] active:scale-[var(--scale-press-down)] disabled:opacity-40 disabled:pointer-events-none"
+        >
+          {promotingToGame ? (
+            <Loader2 className="w-3.5 h-3.5 codesign-spin-once" aria-hidden="true" />
+          ) : (
+            <Gamepad2 className="w-3.5 h-3.5" aria-hidden="true" />
+          )}
+          Game Mode
+        </button>
+      ) : null}
 
       <button
         type="button"
