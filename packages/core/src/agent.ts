@@ -1388,6 +1388,26 @@ export async function generateViaAgent(
   let turn0EmittedTools = false;
   const forcedToolStreamFn: StreamFn = (model, context, options) => {
     const isAnthropic = model.api === 'anthropic-messages';
+    // Phase 2.2 of pause-prune-fix-2026-05-08 — last-line guard: refuse
+    // to dispatch a streamFn round-trip when a continuation hint was
+    // set at the previous turn_end. pi-agent-core may schedule
+    // `turn_start` before our subscriber runs, so `agent.abort()` from
+    // `turn_end` does not always preempt the next turn's streamFn (run
+    // mox8xixd-j8cr2o, 2026-05-08). Throwing a sentinel from here
+    // guarantees no provider call goes out, no context-prune work is
+    // wasted, and the IPC layer can convert this into a planned-pause
+    // continuation_pending row instead of a STREAM_INTERRUPTED error.
+    const hintAtStreamFn = input.getContinuationHint?.();
+    if (hintAtStreamFn !== null && hintAtStreamFn !== undefined) {
+      log.info('[agent] step=streamFn.skipped_for_pause', {
+        ...ctx,
+        hint: hintAtStreamFn,
+      });
+      throw new CodesignError(
+        `Paused at safe boundary (${hintAtStreamFn}) before next turn dispatch.`,
+        ERROR_CODES.PAUSE_AT_SAFE_BOUNDARY,
+      );
+    }
     const turn = agentTurnIndex;
     agentTurnIndex += 1;
     // Force tools when retryArmed (after a no-progress turn) OR by
@@ -1603,6 +1623,22 @@ export async function generateViaAgent(
   // via getPendingSteers — that's an intentional user override, not a
   // pacing nudge.
   agent.subscribe((event) => {
+    // Phase 2.1 sentinel — if a `turn_start` fires after the continuation
+    // hint was already set at the previous `turn_end`, the safe-boundary
+    // abort raced the next turn dispatch. Logging this loudly turns a
+    // silent regression (mox8xixd-j8cr2o, 2026-05-08) into a greppable
+    // signal. The streamFn-level guard added in Phase 2.2 catches the
+    // race; this log proves the guard is the only thing standing between
+    // the loop and a wasted turn.
+    if (event.type === 'turn_start') {
+      const hintAtStart = input.getContinuationHint?.();
+      if (hintAtStart !== null && hintAtStart !== undefined) {
+        log.warn('[agent] step=turn_start_after_pause', {
+          ...ctx,
+          hint: hintAtStart,
+        });
+      }
+    }
     if (event.type === 'tool_execution_start' && budgetReason === null) {
       toolCallCount += 1;
       // Backlog-3 §3 — track whether turn 0 actually emitted any tool

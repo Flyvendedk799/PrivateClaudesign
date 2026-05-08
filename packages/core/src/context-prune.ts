@@ -101,6 +101,23 @@ export const PER_TOOL_RECENT_BUDGET: Record<string, number> = {
  *  `text-editor.ts` so `findActiveFile` recognises edits. */
 const TEXT_EDITOR_TOOL_NAME = 'str_replace_based_edit_tool';
 
+/**
+ * Tools whose latest toolResult is the agent's ground-truth view of the
+ * artifact. Pruning their most-recent result destroys the very state the
+ * model is reasoning about — observed in run mox8xixd-j8cr2o (2026-05-08)
+ * where a 627 KB `render_preview` result at idx 25 was capped to 2 KB by
+ * aggressive prune, leaving the model with no visual handle on what it
+ * had just rendered.
+ *
+ * The latest result of each name is exempt from caps + aggressive prune
+ * regardless of position in the conversation. Older results of the same
+ * tool fall under normal caps.
+ */
+export const GROUND_TRUTH_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'render_preview',
+  'verify_artifact',
+]);
+
 function estimateBytes(messages: AgentMessage[]): number {
   let total = 0;
   for (const m of messages) {
@@ -405,6 +422,57 @@ export function buildActiveFileResultIds(
 }
 
 /**
+ * Phase-3-of-pause-prune-fix-2026-05-08 — pin the latest toolResult of
+ * each "ground truth" tool. Walks newest→oldest assistant messages,
+ * collecting the toolCallId of the first toolCall block whose `name`
+ * matches each entry in `toolNames`. Returns a Set of those ids; the
+ * pruner exempts them from caps + aggressive mode.
+ *
+ * Only the *latest* result per tool is pinned (perToolWindow=1 by
+ * default). Earlier `render_preview` / `verify_artifact` results fall
+ * under normal caps — they are stale snapshots of state the model has
+ * already iterated past.
+ */
+export function buildGroundTruthResultIds(
+  messages: AgentMessage[],
+  toolNames: ReadonlySet<string>,
+  perToolWindow = 1,
+): Set<string> {
+  const out = new Set<string>();
+  if (toolNames.size === 0 || perToolWindow <= 0) return out;
+  const seenPerName = new Map<string, number>();
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m?.role !== 'assistant') continue;
+    const original = m as unknown as { content?: Array<Record<string, unknown>> };
+    if (!Array.isArray(original.content)) continue;
+    for (const block of original.content) {
+      if (block?.['type'] !== 'toolCall') continue;
+      const name = block['name'];
+      if (typeof name !== 'string' || !toolNames.has(name)) continue;
+      const taken = seenPerName.get(name) ?? 0;
+      if (taken >= perToolWindow) continue;
+      const id = block['id'];
+      if (typeof id !== 'string' || id.length === 0) continue;
+      out.add(id);
+      seenPerName.set(name, taken + 1);
+    }
+    // Early-exit when every requested tool has hit its quota.
+    if (seenPerName.size === toolNames.size) {
+      let allDone = true;
+      for (const tname of toolNames) {
+        if ((seenPerName.get(tname) ?? 0) < perToolWindow) {
+          allDone = false;
+          break;
+        }
+      }
+      if (allDone) break;
+    }
+  }
+  return out;
+}
+
+/**
  * Index threshold (inclusive) — messages at or after this index are "recent"
  * and their tool payloads stay verbatim. Counts assistant + toolResult roles
  * from the tail; user messages are never a prune target but also don't
@@ -431,8 +499,12 @@ interface CapConfig {
   toolResultLimitRecent: number | null;
   windowTurns: number;
   /** Set of toolCallIds whose toolResult blocks are exempt from size
-   *  limits even under aggressive mode — see backlog-2 #3. */
-  activeFileResultIds: Set<string>;
+   *  limits even under aggressive mode. Union of two sources:
+   *    - active-file pinning (backlog-2 #3) — text_editor results on
+   *      the file(s) the agent is currently editing.
+   *    - ground-truth pinning (pause-prune-fix 2026-05-08) — the latest
+   *      result of each tool in `GROUND_TRUTH_TOOL_NAMES`. */
+  exemptResultIds: Set<string>;
   /** Backlog-3 §6 — toolCallId → tool name lookup. Built by walking
    *  assistant messages once and indexing every toolCall block. Used to
    *  enforce per-tool windows on toolResult messages (where pi-ai
@@ -512,11 +584,12 @@ function applyCaps(messages: AgentMessage[], cfg: CapConfig): ApplyCapsResult {
     }
     if (m.role === 'toolResult') {
       const tcId = (m as unknown as { toolCallId?: unknown }).toolCallId;
-      if (typeof tcId === 'string' && cfg.activeFileResultIds.has(tcId)) {
-        // Active-file exemption — backlog-2 #3. Keep the result verbatim
-        // regardless of the recent window or aggressive mode so late-run
-        // navigation on the file the agent is editing doesn't re-pay
-        // tokens to re-establish state.
+      if (typeof tcId === 'string' && cfg.exemptResultIds.has(tcId)) {
+        // Exempt — backlog-2 #3 (active-file pinning) + pause-prune-fix
+        // 2026-05-08 (ground-truth pinning). Keep the result verbatim
+        // regardless of the recent window or aggressive mode so the
+        // model retains its handle on the file it's editing AND on the
+        // latest render_preview / verify_artifact ground truth.
         return m;
       }
       // Backlog-3 §6 — per-tool window enforcement. If we know the tool
@@ -598,6 +671,21 @@ export function buildTransformContext(
       });
     }
 
+    // Phase 3 of pause-prune-fix-2026-05-08 — pin the latest result of
+    // each ground-truth tool. The aggressive prune step runs at the end
+    // of long runs (typically the same point a context-threshold pause
+    // fires); without this, the most recent render_preview / verify_artifact
+    // result gets capped to AGGRESSIVE_BLOCK_LIMIT, leaving the model with
+    // no visual state to react to on the resumed turn.
+    const groundTruthResultIds = buildGroundTruthResultIds(messages, GROUND_TRUTH_TOOL_NAMES);
+    if (groundTruthResultIds.size > 0) {
+      log.info('[context-prune] step=ground_truth_kept', {
+        toolNames: Array.from(GROUND_TRUTH_TOOL_NAMES),
+        keptResults: groundTruthResultIds.size,
+      });
+    }
+    const exemptResultIds = new Set<string>([...activeFileResultIds, ...groundTruthResultIds]);
+
     // Backlog-3 §6 — local-join toolName preservation. Build the
     // toolCallId → toolName map once per pruning pass; reused across
     // both caps + aggressive applyCaps invocations.
@@ -611,7 +699,7 @@ export function buildTransformContext(
       toolInputLimitRecent: null,
       toolResultLimitRecent: null,
       windowTurns: recentWindow,
-      activeFileResultIds,
+      exemptResultIds,
       toolNameById,
       perToolRecent: PER_TOOL_RECENT_BUDGET,
     });
@@ -651,7 +739,7 @@ export function buildTransformContext(
       toolInputLimitRecent: aggressiveBlockLimit,
       toolResultLimitRecent: aggressiveBlockLimit,
       windowTurns: 0,
-      activeFileResultIds,
+      exemptResultIds,
       toolNameById,
       perToolRecent: PER_TOOL_RECENT_BUDGET,
     });
@@ -664,6 +752,7 @@ export function buildTransformContext(
       after: aggressiveSize,
       blockLimit: aggressiveBlockLimit,
       activeFileExempt: activeFileResultIds.size,
+      groundTruthExempt: groundTruthResultIds.size,
       perToolCollapses: aggressiveResult.perToolCollapses,
     });
     return aggressive;

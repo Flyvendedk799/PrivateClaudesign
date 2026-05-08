@@ -1,6 +1,12 @@
 import type { AgentMessage } from '@mariozechner/pi-agent-core';
 import { describe, expect, it } from 'vitest';
-import { buildToolNameMap, buildTransformContext, topByBytes } from './context-prune.js';
+import {
+  GROUND_TRUTH_TOOL_NAMES,
+  buildGroundTruthResultIds,
+  buildToolNameMap,
+  buildTransformContext,
+  topByBytes,
+} from './context-prune.js';
 
 function userMsg(text: string): AgentMessage {
   return {
@@ -562,5 +568,140 @@ describe('topByBytes — Improver1 §9 aggressive root-cause logging', () => {
     const map = buildToolNameMap(messages);
     const top = topByBytes(messages, map, 1);
     expect(top[0]?.idx).toBe(2);
+  });
+});
+
+// Phase 3 of pause-prune-fix-2026-05-08 — ground-truth tool pinning.
+// Regression coverage for run mox8xixd-j8cr2o where a 627 KB
+// `render_preview` toolResult got capped to 2 KB by aggressive prune,
+// leaving the model with no visual handle on what it just rendered.
+
+function assistantWithNamedTool(toolCallId: string, name: string): AgentMessage {
+  return {
+    role: 'assistant',
+    content: [
+      {
+        type: 'toolCall',
+        id: toolCallId,
+        name,
+        arguments: { viewport: 'desktop' },
+      },
+    ],
+  } as unknown as AgentMessage;
+}
+
+describe('buildGroundTruthResultIds — pin latest result of ground-truth tools', () => {
+  it('returns the toolCallId of the latest render_preview', () => {
+    const messages: AgentMessage[] = [
+      userMsg('go'),
+      assistantWithNamedTool('rp_old', 'render_preview'),
+      toolResult('rp_old', 'old'),
+      assistantWithEditorCall('edit1', 'index.html', 'str_replace'),
+      toolResult('edit1', 'edit done'),
+      assistantWithNamedTool('rp_new', 'render_preview'),
+      toolResult('rp_new', 'new'),
+    ];
+    const ids = buildGroundTruthResultIds(messages, GROUND_TRUTH_TOOL_NAMES);
+    expect(ids.has('rp_new')).toBe(true);
+    expect(ids.has('rp_old')).toBe(false);
+  });
+
+  it('pins the latest result of every requested tool independently', () => {
+    const messages: AgentMessage[] = [
+      userMsg('go'),
+      assistantWithNamedTool('va1', 'verify_artifact'),
+      toolResult('va1', 'pass'),
+      assistantWithNamedTool('rp1', 'render_preview'),
+      toolResult('rp1', 'rendered'),
+      assistantWithNamedTool('va2', 'verify_artifact'),
+      toolResult('va2', 'pass again'),
+    ];
+    const ids = buildGroundTruthResultIds(messages, GROUND_TRUTH_TOOL_NAMES);
+    expect(ids.has('rp1')).toBe(true);
+    expect(ids.has('va2')).toBe(true);
+    expect(ids.has('va1')).toBe(false);
+  });
+
+  it('returns empty when no ground-truth tools were called', () => {
+    const messages: AgentMessage[] = [
+      userMsg('go'),
+      assistantWithEditorCall('edit1', 'index.html', 'str_replace'),
+      toolResult('edit1', 'ok'),
+    ];
+    expect(buildGroundTruthResultIds(messages, GROUND_TRUTH_TOOL_NAMES).size).toBe(0);
+  });
+
+  it('respects perToolWindow > 1 to keep N most-recent results per tool', () => {
+    const messages: AgentMessage[] = [
+      userMsg('go'),
+      assistantWithNamedTool('rp1', 'render_preview'),
+      toolResult('rp1', 'a'),
+      assistantWithNamedTool('rp2', 'render_preview'),
+      toolResult('rp2', 'b'),
+      assistantWithNamedTool('rp3', 'render_preview'),
+      toolResult('rp3', 'c'),
+    ];
+    const ids = buildGroundTruthResultIds(messages, new Set(['render_preview']), 2);
+    expect(ids.has('rp3')).toBe(true);
+    expect(ids.has('rp2')).toBe(true);
+    expect(ids.has('rp1')).toBe(false);
+  });
+});
+
+describe('buildTransformContext — ground-truth toolResult survives aggressive prune', () => {
+  it('keeps the latest render_preview result verbatim when the run blows past the hard cap', async () => {
+    const transform = buildTransformContext();
+    // Build a transcript big enough to trip the aggressive branch
+    // (HARD_CAP_BYTES = 200 KB): one giant render_preview result at
+    // the tail plus enough older str_replace traffic that the first
+    // pass still exceeds 200 KB. Mirrors run mox8xixd-j8cr2o.
+    const HUGE_PREVIEW = 'p'.repeat(620_000);
+    const STR_REPLACE_OLD = 's'.repeat(15_000);
+    const messages: AgentMessage[] = [userMsg('build it')];
+    for (let i = 0; i < 6; i += 1) {
+      messages.push(assistantWithEditorCall(`edit${i}`, 'index.html', 'str_replace'));
+      messages.push(toolResult(`edit${i}`, STR_REPLACE_OLD));
+    }
+    messages.push(assistantWithNamedTool('rp_latest', 'render_preview'));
+    messages.push(toolResult('rp_latest', HUGE_PREVIEW));
+
+    const out = await transform(messages);
+    const last = out[out.length - 1] as { content?: Array<{ text?: string }> };
+    const lastText = last?.content?.[0]?.text ?? '';
+    // Ground-truth exemption keeps the full 620 KB blob, not the
+    // aggressive-mode 2 KB stub.
+    expect(lastText.length).toBeGreaterThan(600_000);
+    expect(lastText.startsWith('[tool result dropped')).toBe(false);
+  });
+
+  it('still collapses stale (non-latest) render_preview results under aggressive', async () => {
+    const transform = buildTransformContext();
+    const STALE = 's'.repeat(50_000);
+    const FRESH = 'f'.repeat(50_000);
+    const PADDING = 'p'.repeat(15_000);
+    const messages: AgentMessage[] = [userMsg('build it')];
+    // Older render_preview that should NOT be pinned.
+    messages.push(assistantWithNamedTool('rp_stale', 'render_preview'));
+    messages.push(toolResult('rp_stale', STALE));
+    // Padding to push total past hard cap.
+    for (let i = 0; i < 8; i += 1) {
+      messages.push(assistantWithEditorCall(`edit${i}`, 'index.html', 'str_replace'));
+      messages.push(toolResult(`edit${i}`, PADDING));
+    }
+    // Latest render_preview.
+    messages.push(assistantWithNamedTool('rp_latest', 'render_preview'));
+    messages.push(toolResult('rp_latest', FRESH));
+
+    const out = await transform(messages);
+    const findResult = (id: string): { content?: Array<{ text?: string }> } | undefined =>
+      (out as Array<{ role: string; toolCallId?: string }>).find(
+        (m) => m.role === 'toolResult' && m.toolCallId === id,
+      ) as { content?: Array<{ text?: string }> } | undefined;
+    const stale = findResult('rp_stale');
+    const fresh = findResult('rp_latest');
+    expect(fresh?.content?.[0]?.text?.length ?? 0).toBeGreaterThan(40_000);
+    // The stale one is collapsed by aggressive caps (2 KB block limit).
+    const staleText = stale?.content?.[0]?.text ?? '';
+    expect(staleText.startsWith('[tool result dropped')).toBe(true);
   });
 });
