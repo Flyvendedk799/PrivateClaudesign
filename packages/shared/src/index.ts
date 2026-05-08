@@ -516,6 +516,9 @@ export {
 } from './game-spec';
 export type { EngineFit, EngineFitVerdict, GameEngineId } from './game-spec';
 
+export { classifyAbortKind, isNeutralAbort, suggestsTokenReimport } from './abort-kind';
+export type { AbortKind } from './abort-kind';
+
 export {
   CHAT_MESSAGE_SCHEMA_VERSION,
   ChatMessageKind,
