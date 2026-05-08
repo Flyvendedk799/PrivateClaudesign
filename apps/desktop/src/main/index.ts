@@ -2472,6 +2472,14 @@ function registerIpcHandlers(db: Database | null): void {
               totalMs: Date.now() - t0,
               provider: active.model.provider,
               modelId: active.model.modelId,
+              // may9 Phase 0 — measurement context. artifactType + engine
+              // come from the IPC payload (already validated upstream).
+              // abortKind, narrationDropped, promptVersion, firstToolCallMs
+              // wire in their respective phases (1 / 3 / 9 / 9). Until then
+              // they default to NULL/0 in the writer.
+              artifactType: payload.artifactMode ?? undefined,
+              engine: payload.gameEngine ?? undefined,
+              abortKind: finalResult.interrupted ? 'interrupted' : undefined,
             });
           } catch (err) {
             logIpc.warn('run_usage.persist.fail', {

@@ -387,6 +387,27 @@ function applyAdditiveMigrations(db: Database): void {
   if (!runUsageCols.includes('implied_cost_usd')) {
     db.exec('ALTER TABLE run_usage ADD COLUMN implied_cost_usd REAL NOT NULL DEFAULT 0');
   }
+  // may9 Phase 0 — measurement context for evals + escalation hints. None
+  // of these are derivable from run_tool_durations alone; they're part of
+  // the run header.
+  if (!runUsageCols.includes('artifact_type')) {
+    db.exec('ALTER TABLE run_usage ADD COLUMN artifact_type TEXT');
+  }
+  if (!runUsageCols.includes('engine')) {
+    db.exec('ALTER TABLE run_usage ADD COLUMN engine TEXT');
+  }
+  if (!runUsageCols.includes('abort_kind')) {
+    db.exec('ALTER TABLE run_usage ADD COLUMN abort_kind TEXT');
+  }
+  if (!runUsageCols.includes('narration_dropped')) {
+    db.exec('ALTER TABLE run_usage ADD COLUMN narration_dropped INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!runUsageCols.includes('prompt_version')) {
+    db.exec('ALTER TABLE run_usage ADD COLUMN prompt_version TEXT');
+  }
+  if (!runUsageCols.includes('first_tool_call_ms')) {
+    db.exec('ALTER TABLE run_usage ADD COLUMN first_tool_call_ms INTEGER');
+  }
   // Phase 3 — run_tool_durations table. Per-tool latency telemetry.
   // Idempotent CREATE; tests rely on this being safe to re-apply.
   db.exec(`
@@ -2422,7 +2443,7 @@ export function deleteUserSkill(db: Database, id: string): void {
 /** Phase 3 — bumped from 1 → 2 with the addition of `implied_cost_usd`.
  *  Forward-migration of v1 rows is identity (the column is added with a
  *  default of 0; the read path treats absent values as 0). */
-export const RUN_USAGE_SCHEMA_VERSION = 2;
+export const RUN_USAGE_SCHEMA_VERSION = 3;
 
 export interface RunUsageInput {
   generationId: string;
@@ -2446,6 +2467,15 @@ export interface RunUsageInput {
   totalMs: number;
   provider?: string | undefined;
   modelId?: string | undefined;
+  /** may9 Phase 0 — measurement context. All optional; legacy callers
+   *  pass nothing and the writer NULLs the columns. Drives the eval
+   *  baseline + escalation hint (Phase 13) + cost dashboard filters. */
+  artifactType?: 'design' | 'game' | 'motion' | undefined;
+  engine?: 'three' | 'phaser' | 'pygame' | 'godot' | undefined;
+  abortKind?: string | undefined;
+  narrationDropped?: number | undefined;
+  promptVersion?: string | undefined;
+  firstToolCallMs?: number | undefined;
 }
 
 export interface RunUsageRow extends RunUsageInput {
@@ -2479,8 +2509,9 @@ export function recordRunUsage(db: Database, input: RunUsageInput): void {
     `INSERT INTO run_usage (
        generation_id, schema_version, design_id,
        input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
-       cost_usd, implied_cost_usd, total_chunks, total_ms, provider, model_id, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       cost_usd, implied_cost_usd, total_chunks, total_ms, provider, model_id, created_at,
+       artifact_type, engine, abort_kind, narration_dropped, prompt_version, first_tool_call_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(generation_id) DO UPDATE SET
        input_tokens                = excluded.input_tokens,
        output_tokens               = excluded.output_tokens,
@@ -2491,7 +2522,13 @@ export function recordRunUsage(db: Database, input: RunUsageInput): void {
        total_chunks                = excluded.total_chunks,
        total_ms                    = excluded.total_ms,
        provider                    = excluded.provider,
-       model_id                    = excluded.model_id`,
+       model_id                    = excluded.model_id,
+       artifact_type               = excluded.artifact_type,
+       engine                      = excluded.engine,
+       abort_kind                  = excluded.abort_kind,
+       narration_dropped           = excluded.narration_dropped,
+       prompt_version              = excluded.prompt_version,
+       first_tool_call_ms          = excluded.first_tool_call_ms`,
   ).run(
     input.generationId,
     RUN_USAGE_SCHEMA_VERSION,
@@ -2507,6 +2544,12 @@ export function recordRunUsage(db: Database, input: RunUsageInput): void {
     input.provider ?? null,
     input.modelId ?? null,
     now,
+    input.artifactType ?? null,
+    input.engine ?? null,
+    input.abortKind ?? null,
+    input.narrationDropped ?? 0,
+    input.promptVersion ?? null,
+    input.firstToolCallMs ?? null,
   );
   // Backlog-3 §10 — roll up the daily_usage row for today (local
   // tz). UPSERT so the same date accumulates across runs. ISO date
