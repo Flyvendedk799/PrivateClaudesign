@@ -888,6 +888,12 @@ export interface GenerateViaAgentDeps {
    * before calling `done`. See backlog-2 #5.
    */
   renderPreview?: RenderPreviewer | undefined;
+  /** may9 Phase 9b — host-supplied counter callback for set_todos.
+   *  Returns the per-turn + per-design invocation counts AFTER
+   *  incrementing. When undefined, the cap is dormant (vitest paths).
+   *  Production wires this from apps/desktop/src/main so 93-set_todos
+   *  storms (FPS Wave Defense baseline) get gated at 3/turn / 12/design. */
+  setTodosCounter?: (() => { turnCount: number; designCount: number }) | undefined;
   /**
    * User-authored design skills loaded from the host's local DB. Surfaced
    * to the agent through `list_design_skills` and `view_design_skill`
@@ -1061,7 +1067,9 @@ export async function generateViaAgent(
   const defaultTools: AgentTool<TSchema, unknown>[] = [];
   const isGameMode = deps.gameMode !== undefined;
   const isMotionMode = deps.motionMode !== undefined;
-  defaultTools.push(makeSetTodosTool() as unknown as AgentTool<TSchema, unknown>);
+  defaultTools.push(
+    makeSetTodosTool(deps.setTodosCounter) as unknown as AgentTool<TSchema, unknown>,
+  );
   defaultTools.push(makeReadUrlTool() as unknown as AgentTool<TSchema, unknown>);
   // Design library — both `list_design_skills` + `view_*` lookup tools.
   // No fs deps; available even when `deps.fs` is absent (read-only path).

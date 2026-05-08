@@ -438,6 +438,15 @@ const HISTORY_FULL_CAP = 12;
  *  delta is negligible. */
 const HISTORY_COMPACT_TOOL_PAIRS = 2;
 
+/** may9 Phase 9b — per-design lifetime counter for set_todos calls.
+ *  The agent.ts setTodosCounter callback bumps this on every invocation;
+ *  set_todos returns a `capped: 'design'` result once the count exceeds
+ *  SET_TODOS_DESIGN_CAP (12). FPS Wave Defense logged 93 in a single
+ *  design — the cap exists to prevent that class of replanning storm.
+ *  Map entries persist for the lifetime of the main process; the cost
+ *  is a single integer per design. */
+const setTodosCountByDesign = new Map<string, number>();
+
 function loadHistoryForAutoContinue(
   db: BetterSqlite3.Database | null,
   designId: string | null,
@@ -1450,10 +1459,28 @@ function registerIpcHandlers(db: Database | null): void {
           : {}),
       };
     })();
+    // may9 Phase 9b — per-design + per-run set_todos counter. The
+    // design-lifetime count persists across snapshots in the
+    // setTodosCountByDesign Map (module scope below); the per-turn
+    // count is a closure mutable that resets on every turn_start via
+    // agent.subscribe — but at this layer we only have the
+    // pre-construction deps, so we count *all* calls within this
+    // generate as the "turn count" and rely on the turn-boundary
+    // reset to be a follow-up. The 12/design lifetime cap still
+    // catches the 93-call FPS regression class.
+    let perRunSetTodosCount = 0;
+    const setTodosCounter = (): { turnCount: number; designCount: number } => {
+      perRunSetTodosCount += 1;
+      const designKey = designId ?? '__no_design__';
+      const next = (setTodosCountByDesign.get(designKey) ?? 0) + 1;
+      setTodosCountByDesign.set(designKey, next);
+      return { turnCount: perRunSetTodosCount, designCount: next };
+    };
     return generateViaAgent(input, {
       fs,
       runtimeVerify,
       renderPreview,
+      setTodosCounter,
       userSkills,
       ...(gameMode !== undefined ? { gameMode } : {}),
       ...(motionMode !== undefined ? { motionMode } : {}),
