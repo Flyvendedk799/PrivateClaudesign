@@ -55,10 +55,15 @@ function readFileAsText(file: File): Promise<string> {
 
 export function SpritesTabView() {
   const designId = useCodesignStore((s) => s.currentDesignId);
-  const artifacts = useCodesignStore((s) =>
-    designId !== null
-      ? (s.gameArtifactsByDesign[designId] ?? []).filter((a) => a.kind === 'sprite')
-      : [],
+  // Select the stable raw array, derive the filtered subset via
+  // useMemo. Inline `.filter()` inside a zustand selector returns a
+  // new reference per call → re-render → infinite loop.
+  const allArtifacts = useCodesignStore((s) =>
+    designId !== null ? (s.gameArtifactsByDesign[designId] ?? null) : null,
+  );
+  const artifacts = useMemo(
+    () => (allArtifacts ?? []).filter((a) => a.kind === 'sprite'),
+    [allArtifacts],
   );
   const selectedSpriteId = useCodesignStore((s) =>
     designId !== null ? (s.selectedSpriteIdByDesign[designId] ?? null) : null,

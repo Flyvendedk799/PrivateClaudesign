@@ -41,19 +41,24 @@ function isTextLike(name: string): boolean {
 
 export function AnimationsTabView() {
   const designId = useCodesignStore((s) => s.currentDesignId);
-  const sprites = useCodesignStore((s) =>
-    designId !== null
-      ? (s.gameArtifactsByDesign[designId] ?? []).filter((a) => a.kind === 'sprite')
-      : [],
+  // Same selector-stability fix as GameProjectTabs / SpritesTabView —
+  // select the raw arrays once, filter via useMemo so we don't return
+  // a fresh reference on every render and trip zustand's loop guard.
+  const allArtifacts = useCodesignStore((s) =>
+    designId !== null ? (s.gameArtifactsByDesign[designId] ?? null) : null,
   );
-  const animations = useCodesignStore((s) =>
-    designId !== null
-      ? (s.gameArtifactsByDesign[designId] ?? []).filter((a) => a.kind === 'animation')
-      : [],
+  const sprites = useMemo(
+    () => (allArtifacts ?? []).filter((a) => a.kind === 'sprite'),
+    [allArtifacts],
   );
-  const bindings = useCodesignStore((s) =>
-    designId !== null ? (s.gameAnimationBindingsByDesign[designId] ?? []) : [],
+  const animations = useMemo(
+    () => (allArtifacts ?? []).filter((a) => a.kind === 'animation'),
+    [allArtifacts],
   );
+  const rawBindings = useCodesignStore((s) =>
+    designId !== null ? (s.gameAnimationBindingsByDesign[designId] ?? null) : null,
+  );
+  const bindings = useMemo(() => rawBindings ?? [], [rawBindings]);
   const targetSpriteId = useCodesignStore((s) =>
     designId !== null ? (s.animationTargetSpriteIdByDesign[designId] ?? null) : null,
   );

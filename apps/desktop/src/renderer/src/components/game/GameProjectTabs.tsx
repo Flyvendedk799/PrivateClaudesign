@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type { GameProjectTab } from '../../store';
 import { useCodesignStore } from '../../store';
 
@@ -15,15 +16,21 @@ export function GameProjectTabs() {
   const activeTab = useCodesignStore((s) => s.activeProjectTab);
   const selectProjectTab = useCodesignStore((s) => s.selectProjectTab);
   const designId = useCodesignStore((s) => s.currentDesignId);
-  const sprites = useCodesignStore((s) =>
-    designId !== null
-      ? (s.gameArtifactsByDesign[designId] ?? []).filter((a) => a.kind === 'sprite')
-      : [],
+  // Select the raw stable array reference and derive the filtered
+  // subsets via useMemo. The previous shape called `.filter()` (and a
+  // bare `[]` literal) inside the selector, which returned a fresh
+  // array reference on every render — zustand sees the new reference,
+  // forces a re-render, the selector runs again, and the loop never
+  // terminates ("Maximum update depth exceeded"). The bug stayed
+  // dormant until the first design got promoted into game mode and
+  // GameProjectTabs actually mounted.
+  const artifacts = useCodesignStore((s) =>
+    designId !== null ? (s.gameArtifactsByDesign[designId] ?? null) : null,
   );
-  const animations = useCodesignStore((s) =>
-    designId !== null
-      ? (s.gameArtifactsByDesign[designId] ?? []).filter((a) => a.kind === 'animation')
-      : [],
+  const sprites = useMemo(() => (artifacts ?? []).filter((a) => a.kind === 'sprite'), [artifacts]);
+  const animations = useMemo(
+    () => (artifacts ?? []).filter((a) => a.kind === 'animation'),
+    [artifacts],
   );
 
   const counts: Record<GameProjectTab, number | null> = {
