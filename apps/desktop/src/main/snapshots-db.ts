@@ -567,6 +567,13 @@ function applyAdditiveMigrations(db: Database): void {
   if (!snapshotCols.includes('engine_version')) {
     db.exec('ALTER TABLE design_snapshots ADD COLUMN engine_version TEXT');
   }
+  // may9 Phase 4 — game spec carry-forward. spec_json holds the
+  // serialized GameSpec emitted via declare_game_spec / amend_game_spec.
+  // Re-injected into the system prompt on every follow-up turn so
+  // feature invariants survive across edits without restating.
+  if (!snapshotCols.includes('spec_json')) {
+    db.exec('ALTER TABLE design_snapshots ADD COLUMN spec_json TEXT');
+  }
 
   // The CHECK constraint on artifact_type was 'html'/'react'/'svg' until we
   // added 'game'. SQLite has no ALTER TABLE … MODIFY CONSTRAINT, so an

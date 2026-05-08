@@ -71,6 +71,7 @@ import { reasoningForModel } from './index.js';
 import { type CoreLogger, NOOP_LOGGER } from './logger.js';
 import { createNarrationDetector } from './narration-detector.js';
 import { composeSystemPrompt } from './prompts/index.js';
+import { type GetGameSpecFn, makeAmendGameSpecTool } from './tools/amend-game-spec.js';
 import { makeAssertGameInvariantsTool } from './tools/assert-game-invariants.js';
 import { createCameraGuard } from './tools/camera-pin.js';
 // gameplan §A5 — game-builder tools (registered when deps.gameMode is set).
@@ -82,6 +83,7 @@ import {
   type MotionStyleName,
   makeChooseRemotionStyleTool,
 } from './tools/choose-remotion-style.js';
+import { type SetGameSpecFn, makeDeclareGameSpecTool } from './tools/declare-game-spec.js';
 import { makeDeclareTweakSchemaTool } from './tools/declare-tweak-schema.js';
 import {
   makeListDesignSkillsTool,
@@ -958,6 +960,15 @@ export interface GenerateViaAgentDeps {
          *  objects rather than ad-hoc filenames. Host implementation lives
          *  in apps/desktop/src/main/game-artifacts-db.ts. */
         artifactRegistry?: GameArtifactRegistryDeps | undefined;
+        /** may9 Phase 4 — spec carry-forward. `setSpec` persists the
+         *  agent's `declare_game_spec` / `amend_game_spec` decision into
+         *  the per-run mutable so the next snapshot writer reads it back.
+         *  `getSpec` returns the prior turn's spec (loaded from the
+         *  parent snapshot's `spec_json`) so amend_game_spec can patch it
+         *  and re-injection at turn-start can re-include it in context.
+         *  Both undefined ⇒ tools register but no-op (vitest paths). */
+        setSpec?: SetGameSpecFn | undefined;
+        getSpec?: GetGameSpecFn | undefined;
       }
     | undefined;
 }
@@ -1089,6 +1100,20 @@ export async function generateViaAgent(
   // dependency). The agent's first call in a game run; persists the
   // engine choice through the host-supplied setter.
   if (isGameMode && deps.gameMode !== undefined) {
+    // may9 Phase 4 — declare_game_spec + amend_game_spec are the *first*
+    // tools in a game run, ahead of choose_engine. The system prompt
+    // forbids text_editor.create until declare_game_spec returns
+    // successfully; choose_engine's gating uses the spec via getSpec
+    // (Phase 4 follow-up wiring).
+    defaultTools.push(
+      makeDeclareGameSpecTool(deps.gameMode.setSpec) as unknown as AgentTool<TSchema, unknown>,
+    );
+    defaultTools.push(
+      makeAmendGameSpecTool(deps.gameMode.getSpec, deps.gameMode.setSpec) as unknown as AgentTool<
+        TSchema,
+        unknown
+      >,
+    );
     defaultTools.push(
       makeChooseEngineTool(deps.gameMode.setEngine) as unknown as AgentTool<TSchema, unknown>,
     );

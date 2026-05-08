@@ -502,6 +502,21 @@ export type {
 } from './game-artifact';
 
 export {
+  GAME_SPEC_SCHEMA_VERSION,
+  GameCameraKind,
+  GameDimensions,
+  GameFeatureSpec,
+  GameGenre,
+  GameInputKind,
+  GamePerspective,
+  GameSpec,
+  GameSpecPatch,
+  applyGameSpecPatch,
+  checkEngineFit,
+} from './game-spec';
+export type { EngineFit, EngineFitVerdict, GameEngineId } from './game-spec';
+
+export {
   CHAT_MESSAGE_SCHEMA_VERSION,
   ChatMessageKind,
   ChatMessageRowV1,
