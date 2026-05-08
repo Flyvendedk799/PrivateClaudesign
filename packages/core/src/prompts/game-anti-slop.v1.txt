@@ -51,3 +51,9 @@ Every item below is a hard fail in production play-testing. The validator catche
 - **Default Tailwind blue / purple-on-white HUD.** The plan0305 palette diversification rules apply — pick a palette appropriate to the game's mood, not the cosmic default.
 - **Score counter in 12 px text.** HUD numbers are display-tier (≥24 px). Players check them at a glance, not via squinting.
 - **No font choice.** System sans = "I forgot to think about typography." Pick one display font (e.g. `Press Start 2P` for arcade, `Bebas Neue` for action) loaded from Google Fonts.
+
+## Geometry (may9 Phase 8 + 8b)
+
+- **Unreachable trigger zones.** If your level declares trigger zones (exits, checkpoints, kill zones), the centroid of every zone MUST lie inside the walkable polygon plus an ε margin (≥1 tile or ≥1 player-radius). The FPS Wave Defense run shipped a level whose exit zone was numerically outside the walkable area — the user had to play through to discover. Validate before `done`: walk each trigger's centroid against the collision layer.
+- **HUD that eats the canvas.** A HUD overlay must use `position: fixed` (or `absolute` over a positioned parent) with `pointer-events: none` outside its own buttons; it MUST NOT replace the `<canvas>`. The FPS Wave Defense holographic HUD edit on 2026-05-08 (snapshot a3d4afd7) collapsed the source from 110 KB → 21 KB and the user reported "it doesnt show the game now only the hud" because the HUD div replaced the canvas instead of overlaying it. After every HUD-related edit, re-verify the canvas still renders by emitting `verify_artifact` before `done`.
+- **Destructive-edit guardrail.** When a single edit shrinks the artifact's source by ≥40% AND your user prompt did not contain remove/strip/delete/cleanup language, treat it as a defect — call `view` and re-justify before `done`. Source-size collapse without explicit removal intent is the empirical signature of an accidental rewrite.
