@@ -158,6 +158,7 @@ import {
   setDesignSystem,
 } from './onboarding-ipc';
 import { isAllowedExternalUrl } from './open-external';
+import { persistContinuationRowOnce } from './persist-continuation';
 import { makePlaytester } from './playtest-game';
 import { readPersisted as readPreferences, registerPreferencesIpc } from './preferences-ipc';
 import { preparePromptContext } from './prompt-context';
@@ -1253,6 +1254,14 @@ function registerIpcHandlers(db: Database | null): void {
     // instead of a log per token delta.
     let deltaCount = 0;
     let toolCount = 0;
+    // Phase 4 of pause-prune-fix-2026-05-08 — disambiguate empty-token
+    // turn_end events (run mox8xixd-j8cr2o turn 12 had deltas=0,
+    // tools=0, inputTokens=0 with no way to tell whether the model
+    // returned empty or the abort cancelled the request mid-flight).
+    // Captured at turn_start, compared against the live signal at
+    // turn_end to attribute the zero-token outcome to one of three
+    // distinct causes.
+    let turnStartSignalAborted = false;
 
     // Per-RUN aggregators (Group A2: agent.run_summary). Counts every tool
     // execution by name, separates failures by name, tracks the longest
@@ -1390,6 +1399,7 @@ function registerIpcHandlers(db: Database | null): void {
           deltaCount = 0;
           toolCount = 0;
           totalTurns += 1;
+          turnStartSignalAborted = input.signal?.aborted === true;
           logIpc.info('agent.turn_start', { generationId: id });
         } else if (event.type === 'message_update') {
           const ame = event.assistantMessageEvent;
@@ -1461,6 +1471,20 @@ function registerIpcHandlers(db: Database | null): void {
             turnLog['cacheHitPct'] =
               inputTotal > 0 ? Math.round((cacheRead / inputTotal) * 100) : 0;
             turnLog['costUsd'] = Number((turnUsage.cost?.total ?? 0).toFixed(6));
+          }
+          // Phase 4 of pause-prune-fix-2026-05-08 — attribution flags
+          // for zero-output turns. Exactly one of these is true when
+          // deltas+tools=0; all three are false when the turn produced
+          // tokens normally.
+          if (deltaCount === 0 && toolCount === 0) {
+            const signalAbortedNow = input.signal?.aborted === true;
+            if (turnStartSignalAborted) {
+              turnLog['abortedAtStart'] = true;
+            } else if (signalAbortedNow) {
+              turnLog['abortedDuringStream'] = true;
+            } else {
+              turnLog['emptyResponse'] = true;
+            }
           }
           logIpc.info('agent.turn_end', turnLog);
         } else if (event.type === 'agent_end') {
@@ -1805,6 +1829,14 @@ function registerIpcHandlers(db: Database | null): void {
    *  post-run handler writes a `continuation_pending` row with the
    *  right cause. */
   const continuationHints = new Map<string, import('@open-codesign/core').ContinuationReason>();
+  /** Phase 1 of pause-prune-fix-2026-05-08 — per-generation flag that a
+   *  `continuation_pending` chat row has already been appended for this
+   *  run. Read by `persistContinuationRow` to make the writer
+   *  idempotent: planned-pause and unplanned-abort code paths can both
+   *  call into it without risk of double-writing or, worse, both paths
+   *  skipping each other (the bug fixed here — see plan
+   *  `.claude/workspace/2026-05-08-pause-prune-continuation-fix.md`). */
+  const continuationRowsWritten = new Set<string>();
   /** Per-generation cumulative output tokens. Approximated from
    *  text_delta lengths; refined when run_usage lands the final count.
    *  Drives the `output_budget` continuation threshold. */
@@ -1823,6 +1855,77 @@ function registerIpcHandlers(db: Database | null): void {
   const initialPromptBytes = new Map<string, number>();
   /** Per-generation start timestamp for the wall-clock threshold. */
   const generationStartedAt = new Map<string, number>();
+
+  /** Phase 1 of pause-prune-fix-2026-05-08 — single, idempotent
+   *  `continuation_pending` writer. Replaces the two opposite-gated
+   *  writers that left the row unpersisted when a planned pause was
+   *  followed by an unplanned abort (the bug observed in run
+   *  mox8xixd-j8cr2o). One call site per outcome:
+   *    - planned pause, run finished cleanly → success branch calls
+   *      with `source: 'planned'`, `reason: <continuation reason>`.
+   *    - planned pause then thrown error → catch branch calls with
+   *      `source: 'planned'`, `reason: <continuation reason>`. Idempotent
+   *      against the success branch via `continuationRowsWritten`.
+   *    - unplanned mid-work abort (no hint set) → catch branch calls
+   *      with `source: 'unplanned'`, `reason: 'unplanned_abort'`.
+   *
+   *  Logs `continuation.row_persisted` on success and
+   *  `continuation.row_skipped { reason: 'already_written' }` on the
+   *  no-op second call. Dedupe + write are atomic w.r.t. this set, so
+   *  concurrent error/success races cannot double-write. */
+  const persistContinuationRow = (params: {
+    id: string;
+    designId: string;
+    db: BetterSqlite3.Database;
+    t0: number;
+    modelId: string;
+    source: 'planned' | 'unplanned';
+    reason: import('@open-codesign/core').ContinuationReason | 'unplanned_abort';
+    outputTokensOverride?: number;
+    decisionRecapOverride?: string;
+  }): void => {
+    const wallClockMs = Date.now() - (generationStartedAt.get(params.id) ?? params.t0);
+    const contextUsedPctFinal = estimateContextUsedPct(
+      {
+        initialPromptBytes: initialPromptBytes.get(params.id) ?? 0,
+        outputBytes: cumulativeOutputBytes.get(params.id) ?? 0,
+        toolResultBytes: cumulativeToolResultBytes.get(params.id) ?? 0,
+      },
+      params.modelId,
+    );
+    const recap = buildAbortContinuationRecap(params.db, params.designId);
+    const outputTokens = params.outputTokensOverride ?? 0;
+    persistContinuationRowOnce(
+      continuationRowsWritten,
+      logIpc,
+      {
+        generationId: params.id,
+        source: params.source,
+        reason: params.reason,
+        outputTokens,
+        wallClockMs,
+        hasTodos: recap.todoSnapshotSeq !== undefined,
+        hasBrief: recap.lastUserBrief !== undefined,
+      },
+      () => {
+        appendChatMessage(params.db, {
+          designId: params.designId,
+          kind: 'continuation_pending',
+          payload: {
+            reason: params.reason,
+            decisionRecap: params.decisionRecapOverride ?? recap.decisionRecap,
+            outputTokens,
+            contextUsedPct: contextUsedPctFinal,
+            wallClockMs,
+            ...(recap.todoSnapshotSeq !== undefined
+              ? { todoSnapshotSeq: recap.todoSnapshotSeq }
+              : {}),
+            ...(recap.lastUserBrief !== undefined ? { lastUserBrief: recap.lastUserBrief } : {}),
+          },
+        });
+      },
+    );
+  };
 
   /** Promise-level dedup so an accidental double-IPC of the same generation
    *  collapses to one provider call. See generate-dedup.ts for the strategy. */
@@ -2345,57 +2448,28 @@ function registerIpcHandlers(db: Database | null): void {
         // Integration E — when the continuation hint tripped during
         // this run, persist a `continuation_pending` chat row so the
         // renderer can show the Run-paused panel and offer a Continue
-        // button. The hint is consumed here so a subsequent retry of
-        // the same generationId starts fresh.
+        // button. Phase 1 of pause-prune-fix-2026-05-08 — call into
+        // the idempotent helper instead of inlining the write, so the
+        // catch path can also write without risk of double-writing.
         const continuationReason = continuationHints.get(id);
         if (continuationReason !== undefined && payload.designId !== undefined && db !== null) {
-          try {
-            const wallClockMs = Date.now() - (generationStartedAt.get(id) ?? t0);
-            // Integration G — recompute the exact contextUsedPct at row-
-            // write time so the persisted payload reflects the final
-            // cumulative state, not whatever the trigger turn saw.
-            const contextUsedPctFinal = estimateContextUsedPct(
-              {
-                initialPromptBytes: initialPromptBytes.get(id) ?? 0,
-                outputBytes: cumulativeOutputBytes.get(id) ?? 0,
-                toolResultBytes: cumulativeToolResultBytes.get(id) ?? 0,
-              },
-              active.model.modelId,
-            );
-            const recapForPlanned = buildAbortContinuationRecap(db, payload.designId);
-            appendChatMessage(db, {
-              designId: payload.designId,
-              kind: 'continuation_pending',
-              payload: {
-                reason: continuationReason,
-                decisionRecap: finalResult.message ?? recapForPlanned.decisionRecap,
-                outputTokens: finalResult.outputTokens,
-                contextUsedPct: contextUsedPctFinal,
-                wallClockMs,
-                ...(recapForPlanned.todoSnapshotSeq !== undefined
-                  ? { todoSnapshotSeq: recapForPlanned.todoSnapshotSeq }
-                  : {}),
-                ...(recapForPlanned.lastUserBrief !== undefined
-                  ? { lastUserBrief: recapForPlanned.lastUserBrief }
-                  : {}),
-              },
-            });
-            logIpc.info('continuation.row_persisted', {
-              generationId: id,
-              reason: continuationReason,
-              wallClockMs,
-              outputTokens: finalResult.outputTokens,
-              hasBrief: recapForPlanned.lastUserBrief !== undefined,
-            });
-          } catch (cpErr) {
-            logIpc.warn('continuation.persist.fail', {
-              generationId: id,
-              message: cpErr instanceof Error ? cpErr.message : String(cpErr),
-            });
-          }
+          persistContinuationRow({
+            id,
+            designId: payload.designId,
+            db,
+            t0,
+            modelId: active.model.modelId,
+            source: 'planned',
+            reason: continuationReason,
+            outputTokensOverride: finalResult.outputTokens,
+            ...(finalResult.message !== undefined
+              ? { decisionRecapOverride: finalResult.message }
+              : {}),
+          });
         }
         // Drain the hint maps regardless of whether we wrote a row.
         continuationHints.delete(id);
+        continuationRowsWritten.delete(id);
         cumulativeOutputBytes.delete(id);
         cumulativeToolResultBytes.delete(id);
         initialPromptBytes.delete(id);
@@ -2437,60 +2511,53 @@ function registerIpcHandlers(db: Database | null): void {
         // (with the Resume CTA) for unplanned upstream stream cuts.
         const classifiedErr = classifyAbortError(err, controller.signal);
         const rethrow = classifiedErr ?? err;
-        // 2026-05-07 — when an unplanned mid-work abort happens after the
-        // model has already produced tool_calls, persist a continuation
-        // marker so the renderer can offer a one-click Resume. We only
-        // write this if no continuation_pending row already exists for
-        // the run (the soft-cancel path above writes its own).
+        // Phase 1 of pause-prune-fix-2026-05-08 — write a continuation
+        // marker for any pause-shaped abort (planned or unplanned). The
+        // helper is idempotent against the success-path write so the
+        // double-write race is impossible. Three cases:
+        //   - PAUSE_AT_SAFE_BOUNDARY: streamFn refused dispatch because
+        //     the hint was set at turn_end. Always planned.
+        //   - STREAM_INTERRUPTED with hint set: turn_end signalled a
+        //     planned pause but the next turn raced + got cancelled.
+        //     Treat as planned — that's what the user actually saw.
+        //   - STREAM_INTERRUPTED with no hint: a true unplanned mid-
+        //     work abort.
         const isStreamInterruption =
           rethrow instanceof CodesignError && rethrow.code === ERROR_CODES.STREAM_INTERRUPTED;
-        if (
-          isStreamInterruption &&
+        const isPauseAtSafeBoundary =
+          rethrow instanceof CodesignError && rethrow.code === ERROR_CODES.PAUSE_AT_SAFE_BOUNDARY;
+        const shouldPersistContinuation =
+          (isStreamInterruption || isPauseAtSafeBoundary) &&
+          payload.designId !== undefined &&
+          db !== null;
+        if (shouldPersistContinuation && payload.designId !== undefined && db !== null) {
+          const hintAtAbort = continuationHints.get(id);
+          const reason = hintAtAbort ?? 'unplanned_abort';
+          const source: 'planned' | 'unplanned' =
+            isPauseAtSafeBoundary || hintAtAbort !== undefined ? 'planned' : 'unplanned';
+          persistContinuationRow({
+            id,
+            designId: payload.designId,
+            db,
+            t0,
+            modelId: active.model.modelId,
+            source,
+            reason,
+          });
+        } else if (
           payload.designId !== undefined &&
           db !== null &&
-          !continuationHints.has(id)
+          !continuationRowsWritten.has(id)
         ) {
-          try {
-            const recap = buildAbortContinuationRecap(db, payload.designId);
-            const wallClockMs = Date.now() - (generationStartedAt.get(id) ?? t0);
-            const contextUsedPctFinal = estimateContextUsedPct(
-              {
-                initialPromptBytes: initialPromptBytes.get(id) ?? 0,
-                outputBytes: cumulativeOutputBytes.get(id) ?? 0,
-                toolResultBytes: cumulativeToolResultBytes.get(id) ?? 0,
-              },
-              active.model.modelId,
-            );
-            appendChatMessage(db, {
-              designId: payload.designId,
-              kind: 'continuation_pending',
-              payload: {
-                reason: 'unplanned_abort',
-                decisionRecap: recap.decisionRecap,
-                outputTokens: 0,
-                contextUsedPct: contextUsedPctFinal,
-                wallClockMs,
-                ...(recap.todoSnapshotSeq !== undefined
-                  ? { todoSnapshotSeq: recap.todoSnapshotSeq }
-                  : {}),
-                ...(recap.lastUserBrief !== undefined
-                  ? { lastUserBrief: recap.lastUserBrief }
-                  : {}),
-              },
-            });
-            logIpc.info('continuation.row_persisted', {
-              generationId: id,
-              reason: 'unplanned_abort',
-              wallClockMs,
-              hasTodos: recap.todoSnapshotSeq !== undefined,
-              hasBrief: recap.lastUserBrief !== undefined,
-            });
-          } catch (cpErr) {
-            logIpc.warn('continuation.persist.fail', {
-              generationId: id,
-              message: cpErr instanceof Error ? cpErr.message : String(cpErr),
-            });
-          }
+          // Phase 4 of pause-prune-fix-2026-05-08 — regression alarm.
+          // If we exit through catch with a non-pause error AND no row
+          // was written by the success path either, log it loudly so
+          // the next time Bug A returns it will be greppable.
+          logIpc.info('continuation.row_skipped', {
+            generationId: id,
+            reason: 'no_path_matched',
+            errCode: rethrow instanceof CodesignError ? rethrow.code : 'unknown',
+          });
         }
         logIpc.error('generate.fail', {
           generationId: id,
@@ -2528,6 +2595,9 @@ function registerIpcHandlers(db: Database | null): void {
       // the failure path too. The success path inside the IPC handler
       // already drains; this catches the abort / error short-circuit.
       continuationHints.delete(id);
+      // Phase 1 of pause-prune-fix-2026-05-08 — drain the
+      // already-written set alongside the hint map.
+      continuationRowsWritten.delete(id);
       cumulativeOutputBytes.delete(id);
       cumulativeToolResultBytes.delete(id);
       initialPromptBytes.delete(id);
