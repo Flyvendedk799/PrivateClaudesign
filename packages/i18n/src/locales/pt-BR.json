@@ -1204,6 +1204,7 @@
     "PROVIDER_UPSTREAM_ERROR": "O provedor retornou um erro inesperado. Detalhes estão no log.",
     "PROVIDER_ABORTED": "Geração cancelada.",
     "STREAM_INTERRUPTED": "O fluxo do modelo foi interrompido antes de terminar. Seu progresso foi salvo — clique em Continuar para retomar.",
+    "PAUSE_AT_SAFE_BOUNDARY": "Execução pausada em um ponto seguro. Clique em Continuar para retomar.",
     "PROVIDER_RETRY_EXHAUSTED": "O provedor falhou após várias tentativas. Verifique sua conexão e tente novamente.",
     "CLAUDE_CODE_OAUTH_ONLY": "Seu login no Claude Code usa uma assinatura Anthropic (Pro/Max). Apps de terceiros não podem reutilizar a cota da assinatura — gere uma chave de API em console.anthropic.com e use aqui.",
     "INPUT_EMPTY_PROMPT": "O prompt não pode estar vazio.",

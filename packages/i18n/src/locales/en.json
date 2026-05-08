@@ -1263,6 +1263,7 @@
     "PROVIDER_GATEWAY_INCOMPATIBLE": "Your gateway returned 'not implemented' for the Messages API. Try switching wire to openai-chat in Settings, or use a gateway that supports the Anthropic Messages API.",
     "PROVIDER_ABORTED": "Generation was cancelled.",
     "STREAM_INTERRUPTED": "The model's stream was interrupted before it finished. Your work was saved — click Resume to continue.",
+    "PAUSE_AT_SAFE_BOUNDARY": "Run paused at a safe boundary. Click Resume to continue.",
     "PROVIDER_RETRY_EXHAUSTED": "The provider failed after several retries. Check your connection and try again.",
     "CLAUDE_CODE_OAUTH_ONLY": "Your Claude Code login uses an Anthropic subscription (Pro/Max). Third-party apps cannot reuse the subscription quota — generate an API key at console.anthropic.com and use it here.",
     "CODEX_TOKEN_PARSE_FAILED": "Local ChatGPT login is corrupted. Please re-login in Settings.",

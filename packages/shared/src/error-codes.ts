@@ -29,6 +29,12 @@ export const ERROR_CODES = {
   PROVIDER_GATEWAY_INCOMPATIBLE: 'PROVIDER_GATEWAY_INCOMPATIBLE',
   PROVIDER_ABORTED: 'PROVIDER_ABORTED',
   STREAM_INTERRUPTED: 'STREAM_INTERRUPTED',
+  /** Sentinel — the streamFn refused to dispatch a turn because a
+   *  continuation hint was already set. Carries the planned-pause
+   *  reason in the error message; the IPC catch handler converts this
+   *  into a `continuation_pending` row with `source: 'planned'`. Never
+   *  surfaced to the user as an error. */
+  PAUSE_AT_SAFE_BOUNDARY: 'PAUSE_AT_SAFE_BOUNDARY',
   PROVIDER_RETRY_EXHAUSTED: 'PROVIDER_RETRY_EXHAUSTED',
   PROVIDER_OVERLOADED: 'PROVIDER_OVERLOADED',
   PROVIDER_RATE_LIMITED: 'PROVIDER_RATE_LIMITED',
@@ -197,6 +203,11 @@ export const ERROR_CODE_DESCRIPTIONS: Record<CodesignErrorCode, ErrorCodeDescrip
     userFacing:
       "The model's stream was interrupted before it finished. Your work was saved — click Resume to continue.",
     userFacingKey: 'err.STREAM_INTERRUPTED',
+    category: 'generation',
+  },
+  PAUSE_AT_SAFE_BOUNDARY: {
+    userFacing: 'Run paused at a safe boundary. Click Resume to continue.',
+    userFacingKey: 'err.PAUSE_AT_SAFE_BOUNDARY',
     category: 'generation',
   },
   PROVIDER_RETRY_EXHAUSTED: {
