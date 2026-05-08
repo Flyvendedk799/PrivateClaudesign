@@ -7,6 +7,8 @@ const TABS: Array<{ id: GameProjectTab; label: string }> = [
   { id: 'files', label: 'Files' },
   { id: 'sprites', label: 'Sprites' },
   { id: 'animations', label: 'Animations' },
+  { id: 'levels', label: 'Levels' },
+  { id: 'world', label: 'World' },
 ];
 
 /** game-artifacts §2 — top-level tab bar for game-mode designs. Mounted
@@ -32,12 +34,17 @@ export function GameProjectTabs() {
     () => (artifacts ?? []).filter((a) => a.kind === 'animation'),
     [artifacts],
   );
+  const levels = useMemo(() => (artifacts ?? []).filter((a) => a.kind === 'level'), [artifacts]);
+  const worlds = useMemo(() => (artifacts ?? []).filter((a) => a.kind === 'world'), [artifacts]);
 
   const counts: Record<GameProjectTab, number | null> = {
     preview: null,
     files: null,
     sprites: sprites.length,
     animations: animations.length,
+    levels: levels.length,
+    // World is a singleton; show 1 if present (registered) else 0.
+    world: worlds.length,
   };
 
   return (

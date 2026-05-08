@@ -24,7 +24,9 @@ import { CommentBubble } from './comment/CommentBubble';
 import { PinOverlay } from './comment/PinOverlay';
 import { AnimationsTabView } from './game/AnimationsTabView';
 import { GameProjectTabs } from './game/GameProjectTabs';
+import { LevelsTabView } from './game/LevelsTabView';
 import { SpritesTabView } from './game/SpritesTabView';
+import { WorldDesignerTabView } from './game/WorldDesignerTabView';
 import { MotionCompositionsView } from './motion/MotionCompositionsView';
 import { MotionPreviewPane } from './motion/MotionPreviewPane';
 import { MotionProjectTabs } from './motion/MotionProjectTabs';
@@ -812,6 +814,10 @@ export function PreviewPane({ onPickStarter }: PreviewPaneProps) {
     body = <SpritesTabView />;
   } else if (isGameMode && activeProjectTab === 'animations') {
     body = <AnimationsTabView />;
+  } else if (isGameMode && activeProjectTab === 'levels') {
+    body = <LevelsTabView />;
+  } else if (isGameMode && activeProjectTab === 'world') {
+    body = <WorldDesignerTabView />;
   } else if (isGameMode && activeProjectTab === 'files' && previewHtml) {
     body = <FilesTabView />;
   } else if (isMotionMode && activeMotionTab === 'compositions') {

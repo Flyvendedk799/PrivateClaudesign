@@ -167,11 +167,14 @@ export const GAME_ASPECT_DIMS: Record<GameAspect, { width: number; height: numbe
 // a 'file' tab is purely UI state — it does NOT delete anything.
 export type CanvasTab = { kind: 'files' } | { kind: 'file'; path: string };
 
-/** game-artifacts §2 — top-level project tabs surfaced for game-mode designs.
- *  Mounted above the iframe; replaces the file-only canvas tab concept for
- *  game projects. Design-mode designs ignore this and keep their existing
- *  CanvasTabBar inside the Files tab. */
-export type GameProjectTab = 'preview' | 'files' | 'sprites' | 'animations';
+/** game-artifacts §2 + level-and-world-designer §Phase 2 — top-level
+ *  project tabs surfaced for game-mode designs. Mounted above the iframe;
+ *  replaces the file-only canvas tab concept for game projects. Design-mode
+ *  designs ignore this and keep their existing CanvasTabBar inside the
+ *  Files tab. Levels + World are net-new in the level-and-world-designer
+ *  feature; they read from the same `gameArtifactsByDesign` store slice
+ *  that powers Sprites + Animations, filtering by kind. */
+export type GameProjectTab = 'preview' | 'files' | 'sprites' | 'animations' | 'levels' | 'world';
 
 /** motion-graphics-plan §0.4 — top-level project tabs surfaced for motion-
  *  mode designs. Mirrors GameProjectTab but smaller (Assets is deferred to
