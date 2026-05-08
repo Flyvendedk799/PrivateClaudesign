@@ -1179,10 +1179,15 @@ export async function generateViaAgent(
     defaultTools.push(
       makeDeclareTweakSchemaTool(deps.fs) as unknown as AgentTool<TSchema, unknown>,
     );
-    if (deps.renderPreview !== undefined) {
+    if (deps.renderPreview !== undefined && !isGameMode) {
       // Self-verification screenshot tool. Only registered when the host
       // can actually render (Electron BrowserWindow); vitest / headless
       // CI runs simply omit it. See backlog-2 #5.
+      // may9 Phase 9b — gated off for game mode. The FPS Wave Defense run
+      // showed 5 render_preview calls per design despite Gameimprove
+      // flagging it as vestigial; verify_artifact + validate_game_scene
+      // + playtest_game cover the same use cases without the screenshot
+      // round-trip cost. Design + motion modes keep it.
       defaultTools.push(
         makeRenderPreviewTool(deps.fs, deps.renderPreview) as unknown as AgentTool<
           TSchema,
