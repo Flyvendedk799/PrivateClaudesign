@@ -686,7 +686,7 @@ function applyAdditiveMigrations(db: Database): void {
         id                 TEXT PRIMARY KEY,
         schema_version     INTEGER NOT NULL DEFAULT 1,
         design_id          TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
-        kind               TEXT NOT NULL CHECK(kind IN ('sprite','animation')),
+        kind               TEXT NOT NULL CHECK(kind IN ('sprite','animation','level','world')),
         name               TEXT NOT NULL,
         slug               TEXT NOT NULL,
         prompt_alias       TEXT NOT NULL,
@@ -742,7 +742,7 @@ function applyAdditiveMigrations(db: Database): void {
         snapshot_id        TEXT NOT NULL REFERENCES design_snapshots(id) ON DELETE CASCADE,
         artifact_id        TEXT NOT NULL,
         design_id          TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
-        kind               TEXT NOT NULL CHECK(kind IN ('sprite','animation')),
+        kind               TEXT NOT NULL CHECK(kind IN ('sprite','animation','level','world')),
         name               TEXT NOT NULL,
         slug               TEXT NOT NULL,
         prompt_alias       TEXT NOT NULL,
@@ -783,6 +783,98 @@ function applyAdditiveMigrations(db: Database): void {
       'game_artifacts_v1',
       new Date().toISOString(),
     );
+  }
+
+  // level-and-world-designer §Phase 1 — relax the kind CHECK constraint
+  // on game_artifacts + game_artifact_snapshots so 'level' and 'world'
+  // rows can land. SQLite doesn't support ALTER TABLE … ALTER CHECK, so
+  // we follow the SQLite 12-step migration recipe: disable foreign keys,
+  // rename/create/copy/drop, then re-enable + verify. Idempotent via the
+  // db_meta marker. Without the FK toggle, child tables (game_artifact_files,
+  // game_animation_bindings) keep FK targets pointing at the renamed
+  // shadow table and break inserts after DROP.
+  const gameArtifactsV2 = db
+    .prepare('SELECT value FROM db_meta WHERE key = ?')
+    .get('game_artifacts_v2') as { value?: string } | undefined;
+  if (gameArtifactsV2 === undefined) {
+    db.pragma('foreign_keys = OFF');
+    // SQLite 3.25+ rewrites FK target names in child tables when the
+    // parent is RENAMED. If we rename game_artifacts and DROP the
+    // shadow, the child tables' FK strings still point at the dropped
+    // shadow. legacy_alter_table=1 disables that rewrite so the child
+    // FK strings stay literal "game_artifacts" and resolve to the new
+    // table after the recreate.
+    db.pragma('legacy_alter_table = 1');
+    try {
+      db.exec(`
+        ALTER TABLE game_artifacts RENAME TO game_artifacts_v1_old;
+        CREATE TABLE game_artifacts (
+          id                 TEXT PRIMARY KEY,
+          schema_version     INTEGER NOT NULL DEFAULT 1,
+          design_id          TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+          kind               TEXT NOT NULL CHECK(kind IN ('sprite','animation','level','world')),
+          name               TEXT NOT NULL,
+          slug               TEXT NOT NULL,
+          prompt_alias       TEXT NOT NULL,
+          status             TEXT NOT NULL DEFAULT 'ready'
+                                CHECK(status IN ('ready','generating','error','archived')),
+          engine             TEXT CHECK(engine IN ('three','phaser','pygame','godot')),
+          primary_file_path  TEXT,
+          preview_file_path  TEXT,
+          thumbnail_path     TEXT,
+          metadata_json      TEXT NOT NULL DEFAULT '{}',
+          provenance_json    TEXT NOT NULL DEFAULT '{}',
+          created_at         TEXT NOT NULL,
+          updated_at         TEXT NOT NULL,
+          UNIQUE(design_id, slug),
+          UNIQUE(design_id, prompt_alias)
+        );
+        INSERT INTO game_artifacts SELECT * FROM game_artifacts_v1_old;
+        DROP TABLE game_artifacts_v1_old;
+        CREATE INDEX IF NOT EXISTS idx_game_artifacts_design_kind
+          ON game_artifacts(design_id, kind, updated_at DESC);
+
+        ALTER TABLE game_artifact_snapshots RENAME TO game_artifact_snapshots_v1_old;
+        CREATE TABLE game_artifact_snapshots (
+          id                 TEXT PRIMARY KEY,
+          schema_version     INTEGER NOT NULL DEFAULT 1,
+          snapshot_id        TEXT NOT NULL REFERENCES design_snapshots(id) ON DELETE CASCADE,
+          artifact_id        TEXT NOT NULL,
+          design_id          TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+          kind               TEXT NOT NULL CHECK(kind IN ('sprite','animation','level','world')),
+          name               TEXT NOT NULL,
+          slug               TEXT NOT NULL,
+          prompt_alias       TEXT NOT NULL,
+          status             TEXT NOT NULL,
+          engine             TEXT,
+          primary_file_path  TEXT,
+          preview_file_path  TEXT,
+          thumbnail_path     TEXT,
+          metadata_json      TEXT NOT NULL,
+          provenance_json    TEXT NOT NULL,
+          created_at         TEXT NOT NULL,
+          updated_at         TEXT NOT NULL
+        );
+        INSERT INTO game_artifact_snapshots SELECT * FROM game_artifact_snapshots_v1_old;
+        DROP TABLE game_artifact_snapshots_v1_old;
+        CREATE INDEX IF NOT EXISTS idx_game_artifact_snapshots_snapshot
+          ON game_artifact_snapshots(snapshot_id);
+      `);
+      db.prepare('INSERT INTO db_meta (key, value) VALUES (?, ?)').run(
+        'game_artifacts_v2',
+        new Date().toISOString(),
+      );
+      // Sanity — verify FK targets resolve cleanly. Throws if not.
+      const violations = db.pragma('foreign_key_check') as Array<unknown>;
+      if (violations.length > 0) {
+        throw new Error(
+          `foreign_key_check after game_artifacts_v2 migration: ${JSON.stringify(violations).slice(0, 200)}`,
+        );
+      }
+    } finally {
+      db.pragma('legacy_alter_table = 0');
+      db.pragma('foreign_keys = ON');
+    }
   }
 
   // motion-graphics-plan §1 — registry of `<Composition>` rows the agent

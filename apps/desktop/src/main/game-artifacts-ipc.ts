@@ -43,10 +43,22 @@ import {
   updateGameArtifact,
 } from './game-artifacts-db';
 import { getLogger } from './logger';
+import { upsertDesignFile } from './snapshots-db';
 
 type Database = BetterSqlite3.Database;
 
 const logger = getLogger('game-artifacts-ipc');
+
+/** Reject paths outside `assets/levels/` and `assets/world/` so the
+ *  artifact-file IPC channel can't be used to clobber arbitrary files
+ *  (e.g. index.html, sidecar JS) — those go through the agent's
+ *  text_editor or the dedicated upsertDesignFile path inside core. */
+function isLevelOrWorldArtifactPath(path: string): boolean {
+  if (path.includes('..') || path.includes('\\')) return false;
+  if (path.startsWith('assets/levels/')) return true;
+  if (path.startsWith('assets/world/')) return true;
+  return false;
+}
 
 function requireSchemaV1(r: Record<string, unknown>, channel: string): void {
   if (r['schemaVersion'] !== 1) {
@@ -302,6 +314,91 @@ export function registerGameArtifactsIpc(db: Database): void {
     },
   );
 
+  // level-and-world-designer §Phase 1 — direct read/write of an
+  // artifact-file path within `design_files`. Used by the schema-driven
+  // form editor (Phase 3) so primitive edits don't have to go through
+  // the agent. Path validation: only allow paths under `assets/levels/`
+  // or `assets/world/` so we can't be tricked into clobbering
+  // index.html / other non-artifact files via this channel.
+  ipcMain.handle(
+    'game-artifacts:v1:read-file',
+    (_e: unknown, raw: unknown): { path: string; content: string } => {
+      const r = asRecord(raw, 'game-artifacts:v1:read-file');
+      requireSchemaV1(r, 'game-artifacts:v1:read-file');
+      const designId = requireString(r, 'designId', 'game-artifacts:v1:read-file');
+      const path = requireString(r, 'path', 'game-artifacts:v1:read-file');
+      if (!isLevelOrWorldArtifactPath(path)) {
+        throw new CodesignError(
+          'game-artifacts:v1:read-file: path must be under assets/levels/ or assets/world/',
+          ERROR_CODES.IPC_BAD_INPUT,
+        );
+      }
+      const row = db
+        .prepare('SELECT content FROM design_files WHERE design_id = ? AND path = ?')
+        .get(designId, path) as { content?: unknown } | undefined;
+      if (row === undefined) {
+        throw new CodesignError(`File not found: ${path}`, ERROR_CODES.IPC_NOT_FOUND);
+      }
+      const content =
+        typeof row.content === 'string'
+          ? row.content
+          : Buffer.isBuffer(row.content)
+            ? row.content.toString('utf8')
+            : '';
+      return { path, content };
+    },
+  );
+
+  ipcMain.handle(
+    'game-artifacts:v1:write-file',
+    (_e: unknown, raw: unknown): { path: string; bytesWritten: number } => {
+      const r = asRecord(raw, 'game-artifacts:v1:write-file');
+      requireSchemaV1(r, 'game-artifacts:v1:write-file');
+      const designId = requireString(r, 'designId', 'game-artifacts:v1:write-file');
+      const path = requireString(r, 'path', 'game-artifacts:v1:write-file');
+      const content = r['content'];
+      if (typeof content !== 'string') {
+        throw new CodesignError(
+          'game-artifacts:v1:write-file requires "content" string',
+          ERROR_CODES.IPC_BAD_INPUT,
+        );
+      }
+      if (!isLevelOrWorldArtifactPath(path)) {
+        throw new CodesignError(
+          'game-artifacts:v1:write-file: path must be under assets/levels/ or assets/world/',
+          ERROR_CODES.IPC_BAD_INPUT,
+        );
+      }
+      try {
+        upsertDesignFile(db, designId, path, content);
+        // Re-index so a kind-change in level.json (e.g. tilemap-2d → scene-3d)
+        // updates the metadata row and the count on the registry.
+        // Idempotent for unchanged metadata.
+        if (
+          path === 'assets/world/world.json' ||
+          /^assets\/levels\/[^/]+\/level\.json$/.test(path)
+        ) {
+          try {
+            indexGameArtifactsFromFiles(db, designId);
+            regenerateArtifactsRegistry(db, designId);
+          } catch (err) {
+            logger.warn('artifact.write_file.reindex.fail', {
+              designId,
+              path,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+        logger.info('artifact.write_file', { designId, path, bytes: content.length });
+        return { path, bytesWritten: content.length };
+      } catch (err) {
+        throw new CodesignError('Failed to write artifact file', ERROR_CODES.IPC_DB_ERROR, {
+          cause: err,
+        });
+      }
+    },
+  );
+
   ipcMain.handle(
     'game-artifacts:v1:import-files',
     (_e: unknown, raw: unknown): GameArtifactListResult => {
@@ -358,5 +455,9 @@ export function registerGameArtifactsIpc(db: Database): void {
  * imports lazily so that vitest runs that exercise the IPC layer don't
  * pull in the renderer-only inference helpers.
  */
-import { importGameArtifactFiles, regenerateArtifactsRegistry } from './game-artifacts-import';
+import {
+  importGameArtifactFiles,
+  indexGameArtifactsFromFiles,
+  regenerateArtifactsRegistry,
+} from './game-artifacts-import';
 export type { ImportArtifactFilesResult } from './game-artifacts-import';

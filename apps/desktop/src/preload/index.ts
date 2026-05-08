@@ -273,7 +273,7 @@ const api = {
      *  compact artifact context block injected into the agent's user
      *  message. */
     gameArtifactContext?: {
-      activeTab?: 'preview' | 'files' | 'sprites' | 'animations';
+      activeTab?: 'preview' | 'files' | 'sprites' | 'animations' | 'levels' | 'world';
       selectedSpriteId?: string;
       selectedAnimationId?: string;
       animationTargetSpriteId?: string;
@@ -907,6 +907,27 @@ const api = {
         schemaVersion: 1,
         ...input,
       }) as Promise<GameArtifactListResult>,
+    /** level-and-world-designer §Phase 1 — read the contents of an
+     *  artifact file (level.json, world.json, _schema.json, etc.).
+     *  Path must live under assets/levels/ or assets/world/; other
+     *  paths reject with IPC_BAD_INPUT. */
+    readFile: (designId: string, path: string) =>
+      ipcRenderer.invoke('game-artifacts:v1:read-file', {
+        schemaVersion: 1,
+        designId,
+        path,
+      }) as Promise<{ path: string; content: string }>,
+    /** Direct write of an artifact file. Renderer-driven schema-form
+     *  edits go through this rather than the agent's text_editor so
+     *  primitive field tweaks don't pay token cost. Same path
+     *  constraint as readFile. */
+    writeFile: (designId: string, path: string, content: string) =>
+      ipcRenderer.invoke('game-artifacts:v1:write-file', {
+        schemaVersion: 1,
+        designId,
+        path,
+        content,
+      }) as Promise<{ path: string; bytesWritten: number }>,
   },
   godot: {
     /** gameplan §D — surface the cached Godot CLI detection result. The

@@ -15,9 +15,12 @@ import type {
   GameArtifactCreateInput,
   GameArtifactFileRefInput,
   GameArtifactKind,
+  LevelArtifactMetadata,
+  LevelDocKind,
   SpriteArtifactMetadata,
+  WorldArtifactMetadata,
 } from '@open-codesign/shared';
-import { slugifyArtifactName } from '@open-codesign/shared';
+import { inferLevelKind, slugifyArtifactName } from '@open-codesign/shared';
 import type BetterSqlite3 from 'better-sqlite3';
 import { createAnimationBinding, createGameArtifact, getGameArtifact } from './game-artifacts-db';
 import { upsertDesignFile } from './snapshots-db';
@@ -88,6 +91,14 @@ function inferRole(ext: string, kind: GameArtifactKind): GameArtifactFileRefInpu
     if (ext === 'json') return 'animation';
     if (ext === 'glb' || ext === 'gltf') return 'animation';
     if (ext === 'png' || ext === 'webp' || ext === 'jpg' || ext === 'jpeg') return 'spritesheet';
+    return 'source';
+  }
+  if (kind === 'level' || kind === 'world') {
+    // Levels + world: the canonical pair is level.json / world.json (metadata)
+    // and an optional preview.png (thumbnail). Native authoring sources (Tiled
+    // .tmx, Godot .tscn, etc.) drop into 'source'.
+    if (ext === 'json') return 'metadata';
+    if (ext === 'png' || ext === 'webp' || ext === 'jpg' || ext === 'jpeg') return 'thumbnail';
     return 'source';
   }
   if (ext === 'glb' || ext === 'gltf') return 'model';
@@ -240,7 +251,7 @@ export function importGameArtifactFiles(
 export function indexGameArtifactsFromFiles(
   db: Database,
   designId: string,
-): { spritesAdded: number; animationsAdded: number } {
+): { spritesAdded: number; animationsAdded: number; levelsAdded: number; worldAdded: number } {
   const files = db
     .prepare('SELECT path FROM design_files WHERE design_id = ?')
     .all(designId) as Array<{ path: string }>;
@@ -331,10 +342,153 @@ export function indexGameArtifactsFromFiles(
     animationsAdded += 1;
   }
 
-  if (spritesAdded > 0 || animationsAdded > 0) {
+  // level-and-world-designer §Phase 1 — index `assets/levels/<slug>/...`
+  // and the singleton `assets/world/...` into game_artifacts. Levels carry
+  // a denormalized `levelKind` discriminator on the metadata so list views
+  // can render a chip without re-reading every level.json. World gets a
+  // single row with `slug='world'`.
+  const levelBuckets = new Map<string, string[]>();
+  const worldFiles: string[] = [];
+  for (const f of files) {
+    const lvlMatch = f.path.match(/^assets\/levels\/([^/]+)\/(.+)$/);
+    if (lvlMatch !== null) {
+      const slug = lvlMatch[1] ?? '';
+      // Reserved sentinel paths under assets/levels/ are not levels themselves.
+      // _schema.json declares the per-design schema; _registry.json is a derived
+      // manifest. Skip them so they don't become artifact rows.
+      if (slug.startsWith('_')) continue;
+      if (!levelBuckets.has(slug)) levelBuckets.set(slug, []);
+      levelBuckets.get(slug)?.push(f.path);
+      continue;
+    }
+    if (f.path.startsWith('assets/world/')) {
+      worldFiles.push(f.path);
+    }
+  }
+
+  let levelsAdded = 0;
+  for (const [slug, paths] of levelBuckets.entries()) {
+    if (paths.length === 0) continue;
+    const existing = db
+      .prepare("SELECT 1 FROM game_artifacts WHERE design_id = ? AND kind = 'level' AND slug = ?")
+      .get(designId, slug);
+    if (existing !== undefined) continue;
+    const primaryPath = paths.find((p) => p.endsWith('/level.json')) ?? paths[0] ?? null;
+    if (primaryPath === null) continue;
+    // Best-effort kind inference: read the level.json content to set
+    // `levelKind` on the metadata. Failures fall through to 'unknown'
+    // and the renderer's JsonRenderer fallback handles it.
+    let levelKind: LevelDocKind | 'unknown' = 'unknown';
+    if (primaryPath.endsWith('/level.json')) {
+      try {
+        const row = db
+          .prepare('SELECT content FROM design_files WHERE design_id = ? AND path = ?')
+          .get(designId, primaryPath) as { content?: unknown } | undefined;
+        const raw =
+          typeof row?.content === 'string'
+            ? row.content
+            : Buffer.isBuffer(row?.content)
+              ? row.content.toString('utf8')
+              : null;
+        if (raw !== null) {
+          const parsed = JSON.parse(raw) as unknown;
+          levelKind = inferLevelKind(parsed);
+        }
+      } catch {
+        levelKind = 'unknown';
+      }
+    }
+    const metadata: LevelArtifactMetadata = {
+      version: 1,
+      kind: 'level',
+      levelKind,
+      tags: [],
+    };
+    const previewPath = paths.find((p) => p.endsWith('/preview.png')) ?? null;
+    createGameArtifact(db, {
+      designId,
+      kind: 'level',
+      name: slug,
+      slug,
+      metadata,
+      primaryFilePath: primaryPath,
+      ...(previewPath !== null ? { previewFilePath: previewPath, thumbnailPath: previewPath } : {}),
+      fileRefs: paths.map((p) => ({ path: p, role: inferRole(fileExt(p), 'level') })),
+      provenance: { source: 'indexed-from-files' },
+    });
+    levelsAdded += 1;
+  }
+
+  let worldAdded = 0;
+  if (worldFiles.length > 0) {
+    const existing = db
+      .prepare("SELECT 1 FROM game_artifacts WHERE design_id = ? AND kind = 'world' AND slug = ?")
+      .get(designId, 'world');
+    if (existing === undefined) {
+      const primaryPath = worldFiles.find((p) => p === 'assets/world/world.json') ?? null;
+      if (primaryPath !== null) {
+        let levelCount = 0;
+        let transitionCount = 0;
+        let startLevelSlug: string | null = null;
+        try {
+          const row = db
+            .prepare('SELECT content FROM design_files WHERE design_id = ? AND path = ?')
+            .get(designId, primaryPath) as { content?: unknown } | undefined;
+          const raw =
+            typeof row?.content === 'string'
+              ? row.content
+              : Buffer.isBuffer(row?.content)
+                ? row.content.toString('utf8')
+                : null;
+          if (raw !== null) {
+            const parsed = JSON.parse(raw) as {
+              levels?: unknown[];
+              transitions?: unknown[];
+              startLevelSlug?: unknown;
+            };
+            if (Array.isArray(parsed?.levels)) levelCount = parsed.levels.length;
+            if (Array.isArray(parsed?.transitions)) transitionCount = parsed.transitions.length;
+            if (typeof parsed?.startLevelSlug === 'string') {
+              startLevelSlug = parsed.startLevelSlug;
+            }
+          }
+        } catch {
+          // Swallow — worldArtifact still registers with zeroed counts.
+        }
+        const metadata: WorldArtifactMetadata = {
+          version: 1,
+          kind: 'world',
+          tags: [],
+          levelCount,
+          transitionCount,
+          startLevelSlug,
+        };
+        const previewPath = worldFiles.find((p) => p === 'assets/world/preview.png') ?? null;
+        createGameArtifact(db, {
+          designId,
+          kind: 'world',
+          name: 'world',
+          slug: 'world',
+          metadata,
+          primaryFilePath: primaryPath,
+          ...(previewPath !== null
+            ? { previewFilePath: previewPath, thumbnailPath: previewPath }
+            : {}),
+          fileRefs: worldFiles.map((p) => ({
+            path: p,
+            role: inferRole(fileExt(p), 'world'),
+          })),
+          provenance: { source: 'indexed-from-files' },
+        });
+        worldAdded = 1;
+      }
+    }
+  }
+
+  if (spritesAdded > 0 || animationsAdded > 0 || levelsAdded > 0 || worldAdded > 0) {
     regenerateArtifactsRegistry(db, designId);
   }
-  return { spritesAdded, animationsAdded };
+  return { spritesAdded, animationsAdded, levelsAdded, worldAdded };
 }
 
 /**

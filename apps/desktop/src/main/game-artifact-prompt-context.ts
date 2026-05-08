@@ -48,7 +48,14 @@ export interface BuildArtifactContextResult {
 
 function summarizeArtifact(artifact: GameArtifact): string {
   const meta = artifact.metadata;
-  const visual = meta.kind === 'sprite' ? meta.visualType : meta.animationType;
+  const visual =
+    meta.kind === 'sprite'
+      ? meta.visualType
+      : meta.kind === 'animation'
+        ? meta.animationType
+        : meta.kind === 'level'
+          ? meta.levelKind
+          : 'world-graph';
   const path = artifact.primaryFilePath ?? '(no primary file)';
   return `  - ${artifact.promptAlias} (${artifact.kind}, ${visual}) → ${path}`;
 }

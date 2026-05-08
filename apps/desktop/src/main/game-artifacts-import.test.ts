@@ -90,6 +90,141 @@ describe('indexGameArtifactsFromFiles', () => {
     expect(second.spritesAdded).toBe(0);
     expect(second.animationsAdded).toBe(0);
   });
+
+  it('promotes assets/levels/<slug>/level.json into level artifact rows with kind inferred', () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'fixture');
+    upsertDesignFile(
+      db,
+      design.id,
+      'assets/levels/wave-1/level.json',
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: 'wave-script',
+        waves: [],
+      }),
+    );
+    upsertDesignFile(
+      db,
+      design.id,
+      'assets/levels/tutorial/level.json',
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: 'tilemap-2d',
+        size: { cols: 8, rows: 8 },
+        layers: [],
+      }),
+    );
+
+    const result = indexGameArtifactsFromFiles(db, design.id);
+    expect(result.levelsAdded).toBe(2);
+    const levels = listGameArtifacts(db, design.id, { kind: 'level' });
+    expect(levels.map((l) => l.slug).sort()).toEqual(['tutorial', 'wave-1']);
+    const wave = levels.find((l) => l.slug === 'wave-1');
+    expect(wave?.metadata.kind).toBe('level');
+    if (wave?.metadata.kind === 'level') {
+      expect(wave.metadata.levelKind).toBe('wave-script');
+    }
+    const tutorial = levels.find((l) => l.slug === 'tutorial');
+    if (tutorial?.metadata.kind === 'level') {
+      expect(tutorial.metadata.levelKind).toBe('tilemap-2d');
+    }
+  });
+
+  it('skips reserved sentinel paths under assets/levels/ (_schema, _registry)', () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'fixture');
+    upsertDesignFile(
+      db,
+      design.id,
+      'assets/levels/_schema.json',
+      JSON.stringify({ schemaVersion: 1, kind: 'tilemap-2d' }),
+    );
+    upsertDesignFile(
+      db,
+      design.id,
+      'assets/levels/level-1/level.json',
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: 'tilemap-2d',
+        size: { cols: 4, rows: 4 },
+        layers: [],
+      }),
+    );
+    const result = indexGameArtifactsFromFiles(db, design.id);
+    expect(result.levelsAdded).toBe(1);
+    const levels = listGameArtifacts(db, design.id, { kind: 'level' });
+    expect(levels.map((l) => l.slug)).toEqual(['level-1']);
+  });
+
+  it('promotes assets/world/world.json as a singleton world artifact with denormalized counts', () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'fixture');
+    upsertDesignFile(
+      db,
+      design.id,
+      'assets/world/world.json',
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: 'world-graph',
+        startLevelSlug: 'a',
+        levels: [{ slug: 'a' }, { slug: 'b' }, { slug: 'c' }],
+        transitions: [
+          { id: 't1', from: 'a', to: 'b' },
+          { id: 't2', from: 'b', to: 'c' },
+        ],
+      }),
+    );
+    const result = indexGameArtifactsFromFiles(db, design.id);
+    expect(result.worldAdded).toBe(1);
+    const worlds = listGameArtifacts(db, design.id, { kind: 'world' });
+    expect(worlds).toHaveLength(1);
+    expect(worlds[0]?.slug).toBe('world');
+    if (worlds[0]?.metadata.kind === 'world') {
+      expect(worlds[0].metadata.levelCount).toBe(3);
+      expect(worlds[0].metadata.transitionCount).toBe(2);
+      expect(worlds[0].metadata.startLevelSlug).toBe('a');
+    }
+  });
+
+  it("falls back to levelKind='unknown' when level.json fails to parse", () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'fixture');
+    upsertDesignFile(db, design.id, 'assets/levels/broken/level.json', 'this is not json');
+    const result = indexGameArtifactsFromFiles(db, design.id);
+    expect(result.levelsAdded).toBe(1);
+    const lvl = listGameArtifacts(db, design.id, { kind: 'level' })[0];
+    if (lvl?.metadata.kind === 'level') {
+      expect(lvl.metadata.levelKind).toBe('unknown');
+    }
+  });
+
+  it('idempotent: re-running does not duplicate level/world rows', () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'fixture');
+    upsertDesignFile(
+      db,
+      design.id,
+      'assets/levels/x/level.json',
+      JSON.stringify({ schemaVersion: 1, kind: 'freeform-json', data: {} }),
+    );
+    upsertDesignFile(
+      db,
+      design.id,
+      'assets/world/world.json',
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: 'world-graph',
+        levels: [],
+        transitions: [],
+      }),
+    );
+    const first = indexGameArtifactsFromFiles(db, design.id);
+    expect(first.levelsAdded + first.worldAdded).toBe(2);
+    const second = indexGameArtifactsFromFiles(db, design.id);
+    expect(second.levelsAdded).toBe(0);
+    expect(second.worldAdded).toBe(0);
+  });
 });
 
 describe('regenerateArtifactsRegistry', () => {

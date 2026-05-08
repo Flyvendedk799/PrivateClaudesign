@@ -282,7 +282,7 @@ export function registerSnapshotsIpc(db: Database): void {
     // the agent just authored into artifact rows BEFORE we capture the
     // snapshot, then regenerate the registry file. Idempotent and cheap
     // for design-mode (no assets dirs → no-op).
-    let indexed = { spritesAdded: 0, animationsAdded: 0 };
+    let indexed = { spritesAdded: 0, animationsAdded: 0, levelsAdded: 0, worldAdded: 0 };
     if (input.artifactType === 'game') {
       try {
         indexed = runDb('create.index-artifacts', () =>
@@ -410,7 +410,7 @@ export function registerSnapshotsIpc(db: Database): void {
       message: 'Promoted to game mode',
     };
 
-    let indexed = { spritesAdded: 0, animationsAdded: 0 };
+    let indexed = { spritesAdded: 0, animationsAdded: 0, levelsAdded: 0, worldAdded: 0 };
     try {
       indexed = runDb('promote.index-artifacts', () => indexGameArtifactsFromFiles(db, designId));
       runDb('promote.regenerate-registry', () => regenerateArtifactsRegistry(db, designId));
@@ -435,6 +435,8 @@ export function registerSnapshotsIpc(db: Database): void {
       filesSnapshot: filesCount,
       artifactsIndexedSprites: indexed.spritesAdded,
       artifactsIndexedAnimations: indexed.animationsAdded,
+      artifactsIndexedLevels: indexed.levelsAdded,
+      artifactsIndexedWorld: indexed.worldAdded,
       artifactsSnapshot: artifactCount.artifacts,
       bindingsSnapshot: artifactCount.bindings,
       engine,

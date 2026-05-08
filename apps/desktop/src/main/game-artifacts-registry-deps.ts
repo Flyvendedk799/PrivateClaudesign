@@ -27,9 +27,28 @@ import { regenerateArtifactsRegistry } from './game-artifacts-import';
 
 type Database = BetterSqlite3.Database;
 
-function summarize(a: GameArtifact): CompactArtifact {
+/** Restricted to sprite/animation — the agent's CompactArtifact tool
+ *  surface doesn't include levels/world (those go through text_editor
+ *  on the canonical paths). Caller filters by `isAgentVisible` first. */
+function isAgentVisible(a: GameArtifact): a is GameArtifact & {
+  kind: 'sprite' | 'animation';
+} {
+  return a.kind === 'sprite' || a.kind === 'animation';
+}
+
+function summarize(a: GameArtifact): CompactArtifact | null {
+  if (!isAgentVisible(a)) return null;
   const meta = a.metadata;
-  const visual = meta.kind === 'sprite' ? meta.visualType : meta.animationType;
+  let visual: string;
+  if (meta.kind === 'sprite') {
+    visual = meta.visualType;
+  } else if (meta.kind === 'animation') {
+    visual = meta.animationType;
+  } else {
+    // Defense in depth: a.kind narrowed to sprite|animation but metadata
+    // could in principle be any kind. Bail if they don't agree.
+    return null;
+  }
   return {
     id: a.id,
     alias: a.promptAlias,
@@ -42,7 +61,9 @@ function summarize(a: GameArtifact): CompactArtifact {
   };
 }
 
-function detail(db: Database, designId: string, a: GameArtifact): DetailedArtifact {
+function detail(db: Database, designId: string, a: GameArtifact): DetailedArtifact | null {
+  const summary = summarize(a);
+  if (summary === null) return null;
   const bindings =
     a.kind === 'animation'
       ? listAnimationBindings(db, designId, { animationId: a.id }).map((b) => ({
@@ -56,7 +77,7 @@ function detail(db: Database, designId: string, a: GameArtifact): DetailedArtifa
           bindingStatus: b.bindingStatus,
         }));
   return {
-    ...summarize(a),
+    ...summary,
     metadata: a.metadata as unknown as Record<string, unknown>,
     files: a.files.map((f) => ({ path: f.path, role: f.role })),
     bindings,
@@ -72,7 +93,9 @@ export function buildArtifactRegistryDeps(
       const opts: { kind?: 'sprite' | 'animation'; includeArchived?: boolean } = {};
       if (filter.kind !== undefined) opts.kind = filter.kind;
       if (filter.includeArchived === true) opts.includeArchived = true;
-      return listGameArtifacts(db, designId, opts).map(summarize);
+      return listGameArtifacts(db, designId, opts)
+        .map(summarize)
+        .filter((s): s is CompactArtifact => s !== null);
     },
     inspect: (artifactId) => {
       const a = getGameArtifact(db, designId, artifactId);
@@ -130,7 +153,16 @@ export function buildArtifactRegistryDeps(
           })) ?? [],
       });
       regenerateArtifactsRegistry(db, designId);
-      return detail(db, designId, created);
+      const summary = detail(db, designId, created);
+      if (summary === null) {
+        // create() type signature only accepts kind='sprite'|'animation', so
+        // this is unreachable. Throw rather than return null which the
+        // GameArtifactRegistryDeps interface doesn't permit.
+        throw new Error(
+          `unreachable: created artifact ${created.id} has agent-invisible kind ${created.kind}`,
+        );
+      }
+      return summary;
     },
     update: (input) => {
       const updated = updateGameArtifact(db, {
@@ -162,7 +194,13 @@ export function buildArtifactRegistryDeps(
         ...(input.fileRefsRemove !== undefined ? { fileRefsRemove: input.fileRefsRemove } : {}),
       });
       regenerateArtifactsRegistry(db, designId);
-      return detail(db, designId, updated);
+      const summary = detail(db, designId, updated);
+      if (summary === null) {
+        throw new Error(
+          `unreachable: updated artifact ${updated.id} has agent-invisible kind ${updated.kind}`,
+        );
+      }
+      return summary;
     },
     bindAnimation: (input) => {
       const binding = createAnimationBinding(db, {
