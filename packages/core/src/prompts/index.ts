@@ -1262,7 +1262,7 @@ window.addEventListener('beforeunload', () => renderer.dispose());
 - Keyboard: \`window.addEventListener('keydown' / 'keyup', e => …)\`.
 - Mouse / pointer: \`canvas.addEventListener('pointerdown' / 'pointermove' / 'pointerup', …)\`.
 - Gamepad: \`navigator.getGamepads()\` polled in the RAF loop.
-- Pointer lock (FPS-style): \`canvas.requestPointerLock()\` on user gesture; game previews permit pointer lock. If it rejects (sandbox policy or user denial), fall back to tracking pointer deltas via \`pointermove\` while a button is held — \`movementX/Y\` is non-zero on Chromium even without an active lock.
+- Pointer lock (FPS-style): the game-files iframe sandbox grants \`allow-pointer-lock\` + \`allow-fullscreen\`. Acquire via \`canvas.requestPointerLock()\` on a user gesture, BUT after Esc-driven exit Chromium throws \`SecurityError: Pointer lock cannot be acquired immediately after the user has exited the lock\` if you re-acquire within ~1.25s. Wait for at least 1250 ms after a \`pointerlockchange\` exit before re-requesting. If acquire is rejected (sandbox policy, user denial, or cooldown active), fall back to tracking pointer deltas via \`pointermove\` while a button is held — \`movementX/Y\` is non-zero on Chromium even without an active lock.
 
 ## Asset loading
 
