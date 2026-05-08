@@ -72,6 +72,7 @@ export function SpritesTabView() {
   const archive = useCodesignStore((s) => s.archiveGameArtifact);
   const importSpriteFiles = useCodesignStore((s) => s.importSpriteFiles);
   const appendArtifactRef = useCodesignStore((s) => s.appendArtifactRefToPrompt);
+  const setPromptDraft = useCodesignStore((s) => s.setPromptDraft);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [importing, setImporting] = useState(false);
 
@@ -131,7 +132,12 @@ export function SpritesTabView() {
           />
         </div>
         {artifacts.length === 0 ? (
-          <SpriteEmptyState onImport={onPickFiles} />
+          <SpriteEmptyState
+            onImport={onPickFiles}
+            onSeedExtractionPrompt={() => {
+              setPromptDraft(SPRITE_EXTRACTION_BRIEF);
+            }}
+          />
         ) : (
           <ul className="flex-1 overflow-y-auto px-[var(--space-2)] pb-[var(--space-2)]">
             {artifacts.map((sprite) => (
@@ -162,18 +168,64 @@ export function SpritesTabView() {
   );
 }
 
-function SpriteEmptyState({ onImport }: { onImport: () => void }) {
+/**
+ * Pre-filled brief that the "Extract from existing artwork" empty-state
+ * button drops into the prompt draft. Tight scoping is intentional —
+ * historically the agent has rewritten the whole game when given any
+ * weapon/HUD-shaped prompt (see .claude/workspace/2026-05-08-pause-prune-
+ * continuation-fix.md). The brief explicitly names the slugs, points at
+ * canonical paths the indexer recognises (assets/sprites/<slug>/sprite.svg),
+ * and forbids touching unrelated game logic.
+ */
+const SPRITE_EXTRACTION_BRIEF = [
+  'Decompose the inline weapon / character viewmodels in `index.html` into',
+  'sprite files so the Sprites tab can index them.',
+  '',
+  'For each major `<svg>` block representing a discrete asset, extract the markup',
+  'into a new file at `assets/sprites/<slug>/sprite.svg` (slug = stable kebab-case',
+  'name, e.g. `m4a1`, `desert-eagle`, `knife`, `enemy-grunt`).',
+  '',
+  'Hard rules:',
+  '- DO NOT rewrite unrelated parts of `index.html`. Make targeted edits only.',
+  '- Keep the in-game render working — either reference the sprite via `<img>` /',
+  '  fetch + inline, or duplicate the markup. Visual parity is mandatory.',
+  '- After each extraction call `verify_artifact` and `render_preview` to confirm',
+  '  the game still loads. If a render shows the scene gone, revert that edit.',
+  '- Do NOT change game logic, weapon switching, melee combos, or animations.',
+  '- After all extractions, call `done`.',
+].join('\n');
+
+function SpriteEmptyState({
+  onImport,
+  onSeedExtractionPrompt,
+}: {
+  onImport: () => void;
+  onSeedExtractionPrompt: () => void;
+}) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-[var(--space-2)] p-[var(--space-3)] text-center text-[12px] text-[var(--color-text-muted)]">
       <p>No sprites yet.</p>
-      <p className="text-[11px]">Import an image, GLB, or atlas — or ask the agent to make one.</p>
-      <button
-        type="button"
-        onClick={onImport}
-        className="rounded-[var(--radius-sm)] bg-[var(--color-accent)] px-[var(--space-3)] py-[var(--space-1)] text-[12px] text-white hover:opacity-90"
-      >
-        Import sprite files
-      </button>
+      <p className="text-[11px]">
+        Import an image / GLB / atlas, or extract sprites from this design's existing inline
+        artwork.
+      </p>
+      <div className="flex flex-wrap items-center justify-center gap-[var(--space-2)]">
+        <button
+          type="button"
+          onClick={onImport}
+          className="rounded-[var(--radius-sm)] bg-[var(--color-accent)] px-[var(--space-3)] py-[var(--space-1)] text-[12px] text-white hover:opacity-90"
+        >
+          Import sprite files
+        </button>
+        <button
+          type="button"
+          onClick={onSeedExtractionPrompt}
+          title="Seed the prompt with a pre-flighted brief that asks the agent to extract inline SVG / canvas art into assets/sprites/<slug>/ without rewriting the game"
+          className="rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background-secondary)] px-[var(--space-3)] py-[var(--space-1)] text-[12px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+        >
+          Extract from existing artwork
+        </button>
+      </div>
     </div>
   );
 }

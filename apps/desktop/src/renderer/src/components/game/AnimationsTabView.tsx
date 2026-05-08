@@ -72,6 +72,7 @@ export function AnimationsTabView() {
   const bindAnimation = useCodesignStore((s) => s.bindAnimationToSprite);
   const unbindAnimation = useCodesignStore((s) => s.unbindAnimationFromSprite);
   const appendArtifactRef = useCodesignStore((s) => s.appendArtifactRefToPrompt);
+  const setPromptDraft = useCodesignStore((s) => s.setPromptDraft);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [importing, setImporting] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -161,7 +162,13 @@ export function AnimationsTabView() {
           />
         </div>
         {visibleAnimations.length === 0 ? (
-          <AnimationsEmptyState hasTarget={targetSpriteId !== null} onImport={onPickFiles} />
+          <AnimationsEmptyState
+            hasTarget={targetSpriteId !== null}
+            onImport={onPickFiles}
+            onSeedExtractionPrompt={() => {
+              setPromptDraft(ANIMATION_EXTRACTION_BRIEF);
+            }}
+          />
         ) : (
           <ul className="flex-1 overflow-y-auto px-[var(--space-2)] pb-[var(--space-2)]">
             {visibleAnimations.map((anim) => (
@@ -207,12 +214,45 @@ export function AnimationsTabView() {
   );
 }
 
+/** Pre-filled brief for the "Extract from existing artwork" empty-state
+ *  button on the Animations tab. Mirrors the sprite version's tight
+ *  scoping: explicit slugs, canonical paths the indexer recognises
+ *  (`assets/animations/<slug>/clip.json`), and a hard ban on rewriting
+ *  unrelated game logic. */
+const ANIMATION_EXTRACTION_BRIEF = [
+  'Decompose the inline animation cycles in `index.html` into animation clips so the',
+  'Animations tab can index them.',
+  '',
+  'For each distinct cycle (reload, fire, melee combos, ADS, jump, vault, idle breathing),',
+  'extract the keyframe data + timing into a new file at',
+  '`assets/animations/<slug>/clip.json` (slug = stable kebab-case name, e.g.',
+  '`reload-m4`, `melee-combo-0`, `melee-combo-1`, `idle-breathing`).',
+  '',
+  'Each clip JSON should follow this minimal shape:',
+  '```',
+  '{ "name": "<slug>", "durationMs": <number>, "fps": 60,',
+  '  "tracks": [ { "target": "<bone>", "property": "<rotation|position|scale>",',
+  '                "values": [{ "tMs": 0, "value": [...] }, ...] } ] }',
+  '```',
+  '',
+  'Hard rules:',
+  '- DO NOT rewrite unrelated parts of `index.html`. Make targeted edits only.',
+  '- Keep the in-game animations playing — extract the data; reference the clip',
+  '  files from `index.html` or duplicate the data inline. Visual parity is mandatory.',
+  '- After each extraction call `verify_artifact` and `render_preview` to confirm',
+  '  the game still renders. If a render shows the scene gone, revert that edit.',
+  '- Do NOT change game logic, weapon switching, or sprite geometry.',
+  '- After all extractions, call `done`.',
+].join('\n');
+
 function AnimationsEmptyState({
   hasTarget,
   onImport,
+  onSeedExtractionPrompt,
 }: {
   hasTarget: boolean;
   onImport: () => void;
+  onSeedExtractionPrompt: () => void;
 }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-[var(--space-2)] p-[var(--space-3)] text-center text-[12px] text-[var(--color-text-muted)]">
@@ -220,15 +260,26 @@ function AnimationsEmptyState({
       {hasTarget ? (
         <>
           <p className="text-[11px]">
-            Import a clip JSON, GLB, or spritesheet — or ask the agent to make one.
+            Import a clip JSON / GLB / spritesheet, or extract animation cycles from this design's
+            existing inline code.
           </p>
-          <button
-            type="button"
-            onClick={onImport}
-            className="rounded-[var(--radius-sm)] bg-[var(--color-accent)] px-[var(--space-3)] py-[var(--space-1)] text-[12px] text-white hover:opacity-90"
-          >
-            Import animation
-          </button>
+          <div className="flex flex-wrap items-center justify-center gap-[var(--space-2)]">
+            <button
+              type="button"
+              onClick={onImport}
+              className="rounded-[var(--radius-sm)] bg-[var(--color-accent)] px-[var(--space-3)] py-[var(--space-1)] text-[12px] text-white hover:opacity-90"
+            >
+              Import animation
+            </button>
+            <button
+              type="button"
+              onClick={onSeedExtractionPrompt}
+              title="Seed the prompt with a pre-flighted brief that asks the agent to extract inline animation cycles into assets/animations/<slug>/ without rewriting the game"
+              className="rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background-secondary)] px-[var(--space-3)] py-[var(--space-1)] text-[12px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+            >
+              Extract from existing artwork
+            </button>
+          </div>
         </>
       ) : (
         <p className="text-[11px]">
