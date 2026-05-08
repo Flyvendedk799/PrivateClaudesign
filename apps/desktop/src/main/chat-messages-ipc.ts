@@ -35,6 +35,19 @@ const VALID_KINDS: ChatMessageKind[] = [
   'error',
   // Backlog-3 §5 — checkpoint rows persist mid-run state for resume.
   'checkpoint',
+  // Phase 2 — adaptive-thinking rollup. Schema added 2026-05-07; this
+  // IPC validator was missed in that PR, so every reasoning_summary
+  // append throws "kind must be one of: ..." and the row is silently
+  // dropped (writer logs `appendChatMessage failed` and moves on).
+  // Run mow70baw-4q4ni4 (claude-opus-4-7, 2026-05-08) hit this 30+
+  // times — every thinking burst rollup was rejected, which is why
+  // the FPS-game design's reasoning history is empty in the DB
+  // despite Opus emitting plenty of thinking_delta events.
+  'reasoning_summary',
+  // Phase 4 — continuation_pending rows mark a clean pause point so
+  // resume can rehydrate brief + plan + recap. Same omission story
+  // as reasoning_summary above.
+  'continuation_pending',
 ];
 
 function requireSchemaV1(r: Record<string, unknown>, channel: string): void {

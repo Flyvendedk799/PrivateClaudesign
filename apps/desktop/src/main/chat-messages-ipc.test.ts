@@ -136,6 +136,122 @@ describe('chat:update-tool-status:v1', () => {
   });
 });
 
+describe('chat:v1:append — VALID_KINDS coverage (regression for 2026-05-08 incident)', () => {
+  // Run mow70baw-4q4ni4 (claude-opus-4-7, FPS-game design ba2adf62…)
+  // produced 30+ "kind must be one of: ..." failures because the IPC
+  // validator's allowlist hadn't been updated when reasoning_summary
+  // and continuation_pending were added to the schema. Every thinking
+  // burst rollup was silently dropped; the user saw the AI proceed
+  // without context. This block locks every kind currently declared
+  // in the schema.
+  it('accepts reasoning_summary rows', () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'T');
+    registerChatMessagesIpc(db);
+    expect(() =>
+      invoke('chat:v1:append', {
+        schemaVersion: 1,
+        designId: design.id,
+        kind: 'reasoning_summary',
+        payload: {
+          fullText: 'I should plan the hero before writing it.',
+          durationMs: 12_400,
+          tokenEstimate: 11,
+          finalisedAt: '2026-05-08T01:00:00.000Z',
+        },
+      }),
+    ).not.toThrow();
+    const list = listChatMessages(db, design.id);
+    expect(list).toHaveLength(1);
+    expect(list[0]?.kind).toBe('reasoning_summary');
+  });
+
+  it('accepts continuation_pending rows', () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'T');
+    registerChatMessagesIpc(db);
+    expect(() =>
+      invoke('chat:v1:append', {
+        schemaVersion: 1,
+        designId: design.id,
+        kind: 'continuation_pending',
+        payload: {
+          reason: 'wallclock',
+          decisionRecap: 'Stopped mid-section to keep the run within budget.',
+          outputTokens: 8000,
+          contextUsedPct: 65,
+          wallClockMs: 290_000,
+        },
+      }),
+    ).not.toThrow();
+    const list = listChatMessages(db, design.id);
+    expect(list).toHaveLength(1);
+    expect(list[0]?.kind).toBe('continuation_pending');
+  });
+
+  it('accepts every kind currently declared by the shared schema', () => {
+    // If a new kind is added to ChatMessageKind without updating
+    // VALID_KINDS, this test fails with a descriptive message instead
+    // of producing a silent runtime drop in production.
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'T');
+    registerChatMessagesIpc(db);
+    const minimalPayloads: Record<string, unknown> = {
+      user: { text: 'hi' },
+      assistant_text: { text: 'hi' },
+      tool_call: {
+        toolName: 'text_editor',
+        args: {},
+        status: 'done',
+        startedAt: '2026-05-08T00:00:00.000Z',
+        verbGroup: 'Working',
+      },
+      artifact_delivered: { createdAt: '2026-05-08T00:00:00.000Z' },
+      error: { message: 'boom', code: 'GENERATION_FAILED' },
+      checkpoint: { reason: 'manual', createdAt: '2026-05-08T00:00:00.000Z' },
+      reasoning_summary: {
+        fullText: 'x',
+        durationMs: 1,
+        tokenEstimate: 1,
+        finalisedAt: '2026-05-08T00:00:00.000Z',
+      },
+      continuation_pending: {
+        reason: 'wallclock',
+        decisionRecap: 'x',
+        outputTokens: 1,
+        contextUsedPct: 1,
+        wallClockMs: 1,
+      },
+    };
+    for (const [kind, payload] of Object.entries(minimalPayloads)) {
+      expect(
+        () =>
+          invoke('chat:v1:append', {
+            schemaVersion: 1,
+            designId: design.id,
+            kind,
+            payload,
+          }),
+        `kind="${kind}" should be accepted by chat:v1:append validator`,
+      ).not.toThrow();
+    }
+  });
+
+  it('still rejects an unknown kind with the standard error', () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'T');
+    registerChatMessagesIpc(db);
+    expect(() =>
+      invoke('chat:v1:append', {
+        schemaVersion: 1,
+        designId: design.id,
+        kind: 'totally_made_up',
+        payload: {},
+      }),
+    ).toThrow(/kind must be one of/);
+  });
+});
+
 describe('chat:v1:new-session + chat:v1:current-session', () => {
   it('returns 0 from current-session for a fresh design', () => {
     const db = initInMemoryDb();
