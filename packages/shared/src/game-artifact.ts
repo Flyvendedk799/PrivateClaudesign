@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 export const GAME_ARTIFACT_SCHEMA_VERSION = 1 as const;
 
-export const GameArtifactKind = z.enum(['sprite', 'animation']);
+export const GameArtifactKind = z.enum(['sprite', 'animation', 'level', 'world']);
 export type GameArtifactKind = z.infer<typeof GameArtifactKind>;
 
 export const GameArtifactStatus = z.enum(['ready', 'generating', 'error', 'archived']);
@@ -84,9 +84,45 @@ export const AnimationArtifactMetadata = GameArtifactBaseMetadata.extend({
 });
 export type AnimationArtifactMetadata = z.infer<typeof AnimationArtifactMetadata>;
 
+/** Per-level metadata stored on the `game_artifacts` row for `kind='level'`.
+ *  The actual level *content* (geometry, tiles, spawns, etc.) lives in
+ *  `assets/levels/<slug>/level.json` and is described by `LevelDoc` in
+ *  `./level-schema.ts`. This metadata only carries cataloging fields the
+ *  registry needs without re-parsing the document. */
+export const LevelArtifactMetadata = GameArtifactBaseMetadata.extend({
+  kind: z.literal('level'),
+  /** The discriminator from LevelDoc.kind — duplicated here so the
+   *  registry / list view can show a chip without parsing every level
+   *  file. Tracks the canonical kinds + 'freeform-json' fallback +
+   *  'unknown' for files that haven't been validated yet. */
+  levelKind: z
+    .enum(['tilemap-2d', 'scene-3d', 'node-graph', 'wave-script', 'freeform-json', 'unknown'])
+    .default('unknown'),
+  /** Which world position (sequencePosition) this level holds, if any.
+   *  Mirrors `world.json.levels[].sequencePosition`; pre-computed at
+   *  index time so list views can sort without joining. */
+  sequencePosition: z.number().int().optional(),
+  /** Free-form genre/biome tag — e.g. 'forest', 'tutorial', 'boss'. */
+  biome: z.string().optional(),
+});
+export type LevelArtifactMetadata = z.infer<typeof LevelArtifactMetadata>;
+
+/** Singleton metadata for `kind='world'` artifacts. The actual world
+ *  graph lives in `assets/world/world.json` and is described by
+ *  `WorldDoc` in `./level-schema.ts`. */
+export const WorldArtifactMetadata = GameArtifactBaseMetadata.extend({
+  kind: z.literal('world'),
+  levelCount: z.number().int().nonnegative().default(0),
+  transitionCount: z.number().int().nonnegative().default(0),
+  startLevelSlug: z.string().nullable().default(null),
+});
+export type WorldArtifactMetadata = z.infer<typeof WorldArtifactMetadata>;
+
 export const GameArtifactMetadata = z.discriminatedUnion('kind', [
   SpriteArtifactMetadata,
   AnimationArtifactMetadata,
+  LevelArtifactMetadata,
+  WorldArtifactMetadata,
 ]);
 export type GameArtifactMetadata = z.infer<typeof GameArtifactMetadata>;
 
@@ -276,8 +312,13 @@ export function aliasForArtifact(kind: GameArtifactKind, slug: string): string {
 }
 
 /** Match an artifact's alias against a piece of free-form text. Returns the
- *  slug when matched, null otherwise. Used by the prompt resolver. */
-export function parseArtifactAlias(text: string): { kind: GameArtifactKind; slug: string } | null {
+ *  slug when matched, null otherwise. Used by the prompt resolver. The
+ *  agent's @-syntax only covers sprites + animations today (levels +
+ *  worlds go through the file system), so the return type narrows
+ *  rather than widening to the full GameArtifactKind union. */
+export function parseArtifactAlias(
+  text: string,
+): { kind: 'sprite' | 'animation'; slug: string } | null {
   const sprite = text.match(/^@sprite:([a-z0-9][a-z0-9-]*)$/);
   if (sprite?.[1] !== undefined) return { kind: 'sprite', slug: sprite[1] };
   const anim = text.match(/^@animation:([a-z0-9][a-z0-9-]*)$/);

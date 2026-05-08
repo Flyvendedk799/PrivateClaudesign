@@ -206,10 +206,11 @@ export type GeneratePayload = z.infer<typeof GeneratePayload>;
 export type LegacyGeneratePayload = GeneratePayload;
 
 export const GameArtifactPromptContextPayload = z.object({
-  activeTab: z.enum(['preview', 'files', 'sprites', 'animations']).optional(),
+  activeTab: z.enum(['preview', 'files', 'sprites', 'animations', 'levels', 'world']).optional(),
   selectedSpriteId: z.string().optional(),
   selectedAnimationId: z.string().optional(),
   animationTargetSpriteId: z.string().optional(),
+  selectedLevelSlug: z.string().optional(),
   mentionedAliases: z.array(z.string()).max(32).default([]),
 });
 export type GameArtifactPromptContextPayload = z.infer<typeof GameArtifactPromptContextPayload>;
@@ -452,6 +453,21 @@ export { DesignTokenV1, DesignTokenSet } from './design-token';
 export type { DesignToken } from './design-token';
 
 export {
+  FreeformJsonLevelDoc,
+  LEVEL_DOC_SCHEMA_VERSION,
+  LevelDoc,
+  LevelDocKind,
+  LevelSchemaDeclaration,
+  NodeGraphLevelDoc,
+  Scene3DLevelDoc,
+  Tilemap2DLevelDoc,
+  WaveScriptLevelDoc,
+  WORLD_DOC_SCHEMA_VERSION,
+  WorldDoc,
+  inferLevelKind,
+} from './level-schema';
+
+export {
   GAME_ARTIFACT_SCHEMA_VERSION,
   GameAnimationBinding,
   GameAnimationBindingStatus,
@@ -471,7 +487,9 @@ export {
   AnimationArtifactMetadata,
   GameArtifactBaseMetadata,
   GameArtifactMetadata,
+  LevelArtifactMetadata,
   SpriteArtifactMetadata,
+  WorldArtifactMetadata,
   aliasForArtifact,
   extractArtifactAliases,
   parseArtifactAlias,
