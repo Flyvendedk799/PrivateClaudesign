@@ -719,6 +719,28 @@ export function createRuntimeTextEditorFs({
   if (previousHtml && previousHtml.trim().length > 0) {
     fsMap.set('index.html', previousHtml);
   }
+  // Seed every existing design_files row into the runtime fs so the
+  // agent can read non-index.html artefacts the user (or a prior run)
+  // placed inside the design — reference docs, sidecar JS/CSS,
+  // restoration notes, etc. Without this seed, only `index.html`
+  // (via previousHtml) was reachable; any docs/<x>.md or src/<y>.js the
+  // user added directly to design_files surfaced as "Path not found"
+  // when the agent tried to view them. Skip 'index.html' to avoid
+  // overwriting the previousHtml the IPC layer just resolved (which
+  // may include in-flight inlining).
+  if (db !== null && designId !== null) {
+    try {
+      for (const file of listDesignFiles(db, designId)) {
+        if (file.path === 'index.html') continue;
+        fsMap.set(file.path, file.content);
+      }
+    } catch (err) {
+      logger.error('runtime.fs.seed_design_files.fail', {
+        designId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   // Backlog-3 §8 — frame + skill templates (~250KB combined) are loaded
   // lazily and seeded into the fs map. Synchronous fast path: if they
   // were already loaded by a prior generation, copy from the cached
