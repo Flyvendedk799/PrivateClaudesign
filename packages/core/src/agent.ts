@@ -1115,7 +1115,10 @@ export async function generateViaAgent(
       >,
     );
     defaultTools.push(
-      makeChooseEngineTool(deps.gameMode.setEngine) as unknown as AgentTool<TSchema, unknown>,
+      makeChooseEngineTool(deps.gameMode.setEngine, deps.gameMode.getSpec) as unknown as AgentTool<
+        TSchema,
+        unknown
+      >,
     );
   }
   // motion-graphics-plan §3 — choose_remotion_style is the agent's first

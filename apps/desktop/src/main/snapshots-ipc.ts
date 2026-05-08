@@ -25,6 +25,12 @@ import {
   snapshotGameArtifactsForSnapshot,
 } from './game-artifacts-db';
 import { indexGameArtifactsFromFiles, regenerateArtifactsRegistry } from './game-artifacts-import';
+// may9 Phase 4 — pull the latest GameSpec the agent recorded for this
+// design (via declare_game_spec / amend_game_spec) so spec_json
+// round-trips through every snapshot. Lives in its own sidecar module
+// so this file does not transitively import the Electron-bound
+// side-effects in `./index.ts` (which break vitest module-load).
+import { getLastSeenGameSpec } from './game-spec-cache';
 import { getLogger } from './logger';
 import {
   createDesign,
@@ -297,7 +303,20 @@ export function registerSnapshotsIpc(db: Database): void {
       }
     }
 
-    const snapshot = runDb('create', () => createSnapshot(db, input));
+    // may9 Phase 4 — splice in the latest GameSpec for this design
+    // so spec_json persists across edits. Falls back to the input's
+    // existing specJson when the renderer or a test passes one
+    // explicitly; otherwise consults the in-memory cache populated
+    // by the agent's declare_game_spec / amend_game_spec calls.
+    const inputWithSpec: typeof input =
+      input.specJson === undefined
+        ? (() => {
+            if (input.artifactType !== 'game') return input;
+            const spec = getLastSeenGameSpec(input.designId);
+            return spec === null ? input : { ...input, specJson: JSON.stringify(spec) };
+          })()
+        : input;
+    const snapshot = runDb('create', () => createSnapshot(db, inputWithSpec));
     // Multi-file artifacts — copy the design's live `design_files`
     // tree into `design_snapshot_files` so a future restore can rewind
     // every sidecar (`.css` / `.js` / `.png` / etc.), not just the

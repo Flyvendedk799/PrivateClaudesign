@@ -18,6 +18,13 @@ export const DesignSnapshotV1 = z.object({
    *  '0.170.0' for Three.js, '3.88.0' for Phaser, '2.5.5' for pygame-ce,
    *  '4.3' for Godot. */
   engineVersion: z.string().nullable().optional(),
+  /** may9 Phase 4 — serialized GameSpec JSON. Round-trips through the
+   *  snapshot row so follow-up turns can re-inject the spec into the
+   *  system prompt without the user re-stating it. NULL on design +
+   *  motion runs. Validated against the GameSpec schema in `game-spec.ts`
+   *  on read; on parse failure callers should treat it as absent
+   *  (forward-compat). */
+  specJson: z.string().nullable().optional(),
 });
 export type DesignSnapshot = z.infer<typeof DesignSnapshotV1>;
 
@@ -340,6 +347,12 @@ export interface SnapshotCreateInput {
   /** Game-mode only — engine pin for the snapshot. (gameplan §6) */
   engine?: 'three' | 'phaser' | 'pygame' | 'godot' | null;
   engineVersion?: string | null;
+  /** may9 Phase 4 — serialized GameSpec JSON. Persisted alongside the
+   *  snapshot so the next follow-up turn can re-inject the spec into
+   *  the system prompt and `amend_game_spec` can patch it. Validated
+   *  via the GameSpec Zod schema in `@open-codesign/shared/game-spec`
+   *  on read; null for design + motion runs. */
+  specJson?: string | null;
 }
 
 // ---------------------------------------------------------------------------

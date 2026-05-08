@@ -1040,6 +1040,8 @@ interface SnapshotRow {
   /** gameplan §6 — engine pin (NULL on design-mode snapshots). */
   engine: string | null;
   engine_version: string | null;
+  /** may9 Phase 4 — serialized GameSpec JSON (NULL on design + motion). */
+  spec_json: string | null;
 }
 
 interface MessageRow {
@@ -1098,6 +1100,7 @@ function rowToSnapshot(row: SnapshotRow): DesignSnapshot {
     ...(row.message !== null ? { message: row.message } : {}),
     engine: (row.engine as DesignSnapshot['engine']) ?? null,
     engineVersion: row.engine_version ?? null,
+    specJson: row.spec_json ?? null,
   };
 }
 
@@ -1297,8 +1300,8 @@ export function createSnapshot(db: Database, input: SnapshotCreateInput): Design
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO design_snapshots
-       (id, schema_version, design_id, parent_id, type, prompt, artifact_type, artifact_source, created_at, message, engine, engine_version)
-     VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, schema_version, design_id, parent_id, type, prompt, artifact_type, artifact_source, created_at, message, engine, engine_version, spec_json)
+     VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     input.designId,
@@ -1311,6 +1314,7 @@ export function createSnapshot(db: Database, input: SnapshotCreateInput): Design
     input.message ?? null,
     input.engine ?? null,
     input.engineVersion ?? null,
+    input.specJson ?? null,
   );
   // Bump the parent design's updated_at so clients can sort designs by activity.
   db.prepare('UPDATE designs SET updated_at = ? WHERE id = ?').run(now, input.designId);

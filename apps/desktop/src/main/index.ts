@@ -64,6 +64,7 @@ import {
   CodesignError,
   ERROR_CODES,
   type GameEngine,
+  GameSpec,
   GeneratePayload,
   GeneratePayloadV1,
   classifyAbortKind,
@@ -117,6 +118,7 @@ import {
   resolveGameFilesRequest,
 } from './game-files-protocol';
 import { makeGameFilesSynthesizer } from './game-files-synthesize';
+import { setLastSeenGameSpec } from './game-spec-cache';
 import { findInFlightDuplicate, generateDedupKey, hashContentKey } from './generate-dedup';
 import {
   armGenerationTimeout,
@@ -179,6 +181,7 @@ import {
   listChatMessages,
   listDailyUsage,
   listDesignFiles,
+  listSnapshots,
   listUserSkills,
   normalizeDesignFilePath,
   pruneDiagnosticEvents,
@@ -1364,11 +1367,38 @@ function registerIpcHandlers(db: Database | null): void {
         input.engine !== undefined ? (input.engine as GameEngine) : null;
       const artifactRegistry: GameModeDeps['artifactRegistry'] | undefined =
         designId !== null && db !== null ? buildArtifactRegistryDeps(db, designId) : undefined;
+      // may9 Phase 4 — spec carry-forward. Load the most recent
+      // snapshot's spec_json so amend_game_spec can patch it; the
+      // mutable is updated by declare_game_spec / amend_game_spec.
+      // The mutation is also published via runSpecRefs so the post-run
+      // snapshot-write path (downstream of this IIFE) can pull the
+      // latest value when assembling SnapshotCreateInput.
+      let currentSpec: import('@open-codesign/shared').GameSpec | undefined = (() => {
+        if (designId === null || db === null) return undefined;
+        try {
+          const latest = listSnapshots(db, designId)[0];
+          const json = latest?.specJson;
+          if (typeof json !== 'string' || json.length === 0) return undefined;
+          const parsed = GameSpec.safeParse(JSON.parse(json));
+          return parsed.success ? parsed.data : undefined;
+        } catch {
+          return undefined;
+        }
+      })();
+      runSpecRefs.set(id, () => currentSpec);
       return {
         setEngine(engine) {
           currentEngine = engine as GameEngine;
         },
         getCurrentEngine: () => currentEngine,
+        setSpec: (spec) => {
+          currentSpec = spec;
+          // Phase 4 — publish to game-spec-cache so snapshots-ipc can
+          // forward into spec_json on the next createSnapshot call.
+          // designId is null for headless paths; skip publishing then.
+          if (designId !== null) setLastSeenGameSpec(designId, spec);
+        },
+        getSpec: () => currentSpec,
         validate: async (engine, files) => {
           const { getEngineAdapter } = await import('@open-codesign/runtime');
           const adapter = getEngineAdapter(engine as GameEngine);
@@ -1865,6 +1895,13 @@ function registerIpcHandlers(db: Database | null): void {
    *  post-run handler writes a `continuation_pending` row with the
    *  right cause. */
   const continuationHints = new Map<string, import('@open-codesign/core').ContinuationReason>();
+  /** may9 Phase 4 — per-run getter that returns the current GameSpec
+   *  (after declare_game_spec / amend_game_spec mutations). The
+   *  game-mode IIFE below writes here on construction; downstream
+   *  hooks read via runSpecRefs.get(runId)?.(). The Map entry is
+   *  cleaned up in the post-run finally block (alongside
+   *  continuationHints + checkpointHints). */
+  const runSpecRefs = new Map<string, () => import('@open-codesign/shared').GameSpec | undefined>();
   /** Phase 1 of pause-prune-fix-2026-05-08 — per-generation flag that a
    *  `continuation_pending` chat row has already been appended for this
    *  run. Read by `persistContinuationRow` to make the writer
