@@ -316,6 +316,13 @@ export interface GenerateOutput {
    * "no silent fallbacks" escape hatch for best-effort substeps.
    */
   warnings?: string[];
+  /** may9 Phase 3 — count of inter-tool narration offenses the agent's
+   *  narration-detector logged (not "dropped" — the detector logs and
+   *  steers; renderer hides the prose). The host writes this into
+   *  `run_usage.narration_dropped` so eval comparisons can track the
+   *  metric across releases. Only populated for game runs (the detector
+   *  is gated behind isGameMode); zero / absent on design + motion. */
+  narrationsTotal?: number;
 }
 
 interface Collected {

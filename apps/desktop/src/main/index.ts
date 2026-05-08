@@ -2552,6 +2552,11 @@ function registerIpcHandlers(db: Database | null): void {
               // has its own recordRunUsage write below. Here we tag
               // the basic "the run did not finish cleanly" case.
               abortKind: finalResult.interrupted ? 'wall_clock' : undefined,
+              // may9 Phase 3 follow-up #20 — narration offense count
+              // bubbled out by agent.ts so eval baselines can track
+              // it across releases. Always >= 0; 0 / absent means
+              // either no narration or design / motion run.
+              narrationDropped: finalResult.narrationsTotal ?? 0,
             });
           } catch (err) {
             logIpc.warn('run_usage.persist.fail', {

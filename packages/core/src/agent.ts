@@ -1561,6 +1561,12 @@ export async function generateViaAgent(
   const isGameModeRun = isGameMode;
   let narrationSteerEmitted = false;
   let narrationTurnIndex = -1;
+  // may9 Phase 3 follow-up #20 — bubble the running narration offense
+  // count out via GenerateOutput.narrationsTotal so the host populates
+  // run_usage.narration_dropped (Phase 0 column). Captured here as a
+  // closure, snapshotted into the final return at the bottom of the
+  // generateViaAgent function.
+  let runNarrationsTotal = 0;
   if (isGameModeRun) {
     const detector = createNarrationDetector();
     agent.subscribe((event) => {
@@ -1587,6 +1593,7 @@ export async function generateViaAgent(
       }
       if (event.type === 'turn_end') {
         const result = detector.endTurn();
+        runNarrationsTotal = result.totalOffenses;
         if (result.narrations.length === 0) return;
         log.warn('[generate] step=narration_violation', {
           ...ctx,
@@ -2527,6 +2534,7 @@ export async function generateViaAgent(
     cacheCreationInputTokens: aggregated.cacheWrite,
     costUsd: aggregated.costUsd,
     interrupted: isWallClockCheckpoint,
+    ...(runNarrationsTotal > 0 ? { narrationsTotal: runNarrationsTotal } : {}),
   };
   return skillResult.warnings.length > 0
     ? { ...output, warnings: [...(output.warnings ?? []), ...skillResult.warnings] }
