@@ -26,7 +26,7 @@ describe('GameSpec — Zod round-trip', () => {
       },
     });
     expect(parsed.genre).toBe('fps');
-    expect(parsed.features.vault?.trigger).toBe('manual');
+    expect(parsed.features['vault']?.['trigger']).toBe('manual');
   });
 
   it('rejects an invalid genre', () => {
@@ -84,12 +84,12 @@ describe('applyGameSpecPatch — feature carry-forward (FPS vault case)', () => 
       },
       reason: 'User asked for press-jump-to-vault, directional, smooth anim',
     });
-    expect(after.features.vault?.trigger).toBe('manual');
-    expect(after.features.vault?.directional).toBe(true);
-    expect(after.features.vault?.animated).toBe(true);
+    expect(after.features['vault']?.['trigger']).toBe('manual');
+    expect(after.features['vault']?.['directional']).toBe(true);
+    expect(after.features['vault']?.['animated']).toBe(true);
     // Melee feature must survive verbatim.
-    expect(after.features.melee?.weapon).toBe('knife');
-    expect(after.features.melee?.binding).toBe('v');
+    expect(after.features['melee']?.['weapon']).toBe('knife');
+    expect(after.features['melee']?.['binding']).toBe('v');
   });
 
   it('amend without features keeps all features intact', () => {
@@ -106,8 +106,8 @@ describe('applyGameSpecPatch — feature carry-forward (FPS vault case)', () => 
     });
     const after = applyGameSpecPatch(prior, { numActors: 4 });
     expect(after.numActors).toBe(4);
-    expect(after.features.jump?.height).toBe(5);
-    expect(after.features.dash?.distance).toBe(3);
+    expect(after.features['jump']?.['height']).toBe(5);
+    expect(after.features['dash']?.['distance']).toBe(3);
   });
 });
 

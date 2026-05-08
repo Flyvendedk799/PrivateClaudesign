@@ -305,6 +305,56 @@ export function slugifyArtifactName(input: string): string {
   return hyphenated;
 }
 
+/** may9 Phase 15 — strict slug validator. Used at the IPC boundary
+ *  before persisting an artifact. The slugifier above is permissive
+ *  (it normalizes any input); this rejects inputs that would still
+ *  collide with reserved names or break our path conventions.
+ *
+ *  Rules:
+ *   - 1-64 chars
+ *   - lowercase letter first (no leading digit / hyphen / underscore)
+ *   - subsequent chars: lowercase letters, digits, hyphen, underscore
+ *   - cannot equal a reserved name
+ */
+export const SLUG_REGEX = /^[a-z][a-z0-9_-]{0,63}$/;
+
+/** Reserved names that would collide with our path conventions. The
+ *  `__preview/*` synthesised inspector iframes, the `_build/*` ephemeral
+ *  builds, and a handful of canonical entry filenames must never be
+ *  used as artifact slugs. Match is case-insensitive and exact. */
+export const RESERVED_SLUGS: readonly string[] = [
+  '__preview',
+  '_build',
+  'index',
+  'main',
+  'manifest',
+  'project',
+  'autoload',
+  'global',
+  'admin',
+  'system',
+];
+
+export interface SlugValidation {
+  ok: boolean;
+  reason?: string;
+}
+
+export function isValidSlug(input: string | null | undefined): SlugValidation {
+  if (typeof input !== 'string') return { ok: false, reason: 'not a string' };
+  if (input.length === 0) return { ok: false, reason: 'empty' };
+  if (input.length > 64) return { ok: false, reason: 'over 64 chars' };
+  if (!SLUG_REGEX.test(input))
+    return {
+      ok: false,
+      reason:
+        'must start with a lowercase letter and contain only lowercase letters, digits, hyphen, underscore',
+    };
+  if (RESERVED_SLUGS.includes(input.toLowerCase()))
+    return { ok: false, reason: `'${input}' is reserved` };
+  return { ok: true };
+}
+
 /** Build the canonical prompt alias for an artifact kind + slug. The slug is
  *  expected to already be slugified — caller's responsibility. */
 export function aliasForArtifact(kind: GameArtifactKind, slug: string): string {

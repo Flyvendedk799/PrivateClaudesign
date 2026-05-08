@@ -490,11 +490,15 @@ export {
   LevelArtifactMetadata,
   SpriteArtifactMetadata,
   WorldArtifactMetadata,
+  RESERVED_SLUGS,
+  SLUG_REGEX,
   aliasForArtifact,
   extractArtifactAliases,
+  isValidSlug,
   parseArtifactAlias,
   slugifyArtifactName,
 } from './game-artifact';
+export type { SlugValidation } from './game-artifact';
 export type {
   GameArtifactPreviewManifest,
   GameArtifactRegistry,
