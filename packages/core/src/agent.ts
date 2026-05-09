@@ -1230,6 +1230,8 @@ export async function generateViaAgent(
         input.artifactType,
         deps.getParentArtifactBytes,
         input.prompt,
+        () => validateGameSceneCount,
+        () => playtestGameCount,
       ) as unknown as AgentTool<TSchema, unknown>,
     );
     // gameplan §A5 — validate_game_scene needs both fs (to read the bundle)
@@ -1671,6 +1673,11 @@ export async function generateViaAgent(
   const maxWallClockMs = input.agentBudget?.maxWallClockMs ?? adaptiveDefault;
   let budgetReason: 'tool_calls' | 'wall_clock' | null = null;
   let toolCallCount = 0;
+  // may9 Phase 9b #24 — per-session counters for the mandatory pre-done
+  // gate. done.ts reads these via the validateCalled / playtestCalled
+  // callbacks below so a game-mode `done` rejects when either is 0.
+  let validateGameSceneCount = 0;
+  let playtestGameCount = 0;
   // Defer wall_clock-triggered aborts to the next `turn_end` boundary
   // (the safe point identified in pi-agent-core/dist/agent-loop.js:121,
   // between turn_end and the next turn_start). Aborting mid-stream
@@ -1708,6 +1715,16 @@ export async function generateViaAgent(
     }
     if (event.type === 'tool_execution_start' && budgetReason === null) {
       toolCallCount += 1;
+      // may9 Phase 9b follow-up #24 — track validate_game_scene and
+      // playtest_game invocation counts so done.ts can require both
+      // before accepting a game-mode artifact. The FPS Wave Defense
+      // run logged 1 of each across 28 snapshots; the gate ensures
+      // the agent actually exercises the validators.
+      const ev = event as { toolName?: string };
+      if (typeof ev.toolName === 'string') {
+        if (ev.toolName === 'validate_game_scene') validateGameSceneCount += 1;
+        else if (ev.toolName === 'playtest_game') playtestGameCount += 1;
+      }
       // Backlog-3 §3 — track whether turn 0 actually emitted any tool
       // calls. If it didn't AND the assistant emitted text, we re-issue
       // with forced tools on turn 1 (one extra round-trip in the bad

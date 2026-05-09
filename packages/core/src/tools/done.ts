@@ -41,6 +41,19 @@ import type { TextEditorFsCallbacks } from './text-editor.js';
  *  destructive-edit advisory pass undefined. */
 export type GetParentArtifactBytesFn = () => Promise<number | null> | number | null;
 
+/** may9 Phase 9b follow-up #24 — host-supplied counter callbacks for
+ *  the mandatory pre-done validation gate. Each returns the current
+ *  per-session invocation count for the named tool. The done tool
+ *  rejects (with a recoverable error in the result text, not a throw)
+ *  when game mode is active and either count is 0 — the FPS Wave
+ *  Defense run shipped with 1 validate_game_scene + 1 playtest_game
+ *  call across 28 snapshots; the gate ensures both are exercised at
+ *  least once per session.
+ *
+ *  Optional — vitest paths and design / motion runs leave undefined.
+ */
+export type GetToolCallCountFn = () => number;
+
 const DoneParams = Type.Object({
   summary: Type.Optional(Type.String()),
   path: Type.Optional(Type.String()),
@@ -497,6 +510,8 @@ export function makeDoneTool(
   artifactType?: 'design' | 'game' | 'motion',
   getParentArtifactBytes?: GetParentArtifactBytesFn,
   userPrompt?: string,
+  getValidateGameSceneCount?: GetToolCallCountFn,
+  getPlaytestGameCount?: GetToolCallCountFn,
 ): AgentTool<typeof DoneParams, DoneDetails> {
   // Per-tool-instance state. `makeDoneTool` is called once per `Agent`
   // construction (see generateViaAgent), so these counters are naturally
@@ -540,6 +555,49 @@ export function makeDoneTool(
       }
 
       const path = params.path ?? 'index.html';
+      // may9 Phase 9b #24 — mandatory pre-done validation gate. Game-mode
+      // runs must call validate_game_scene AND playtest_game at least once
+      // per session before done is accepted. Reject as has_errors with a
+      // steering message; the agent self-heals by emitting the missing
+      // call(s) and retries done. The FPS Wave Defense run shipped with
+      // 1 of each across 28 snapshots — this gate forces both into the
+      // critical path of every game run.
+      if (artifactType === 'game') {
+        const missing: string[] = [];
+        if (getValidateGameSceneCount !== undefined && getValidateGameSceneCount() === 0) {
+          missing.push(
+            'validate_game_scene (engine-specific lint — collisions wired, scene lifecycle present, no orphan asset keys)',
+          );
+        }
+        if (getPlaytestGameCount !== undefined && getPlaytestGameCount() === 0) {
+          missing.push(
+            'playtest_game (synthetic-input → state assertion — call get_playtest_playbook(genre) first to fetch a canonical step list)',
+          );
+        }
+        if (missing.length > 0) {
+          const details: DoneDetails = {
+            status: 'has_errors',
+            path,
+            errors: missing.map((m) => ({
+              message: `Mandatory pre-done call missing: ${m}`,
+              source: 'pre_done_gate',
+            })),
+            ...(params.summary !== undefined ? { summary: params.summary } : {}),
+          };
+          logger.warn('[done] step=pre_done_gate.missing_calls', {
+            missing: missing.length,
+          });
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `has_errors\n${missing.map((m) => `- pre_done_gate: call ${m} before done.`).join('\n')}\n\nThis is the may9 Phase 9b mandatory-validation gate (FPS Wave Defense logged 1 of each across 28 snapshots). Make these calls now and retry done.`,
+              },
+            ],
+            details,
+          };
+        }
+      }
       const file = fs.view(path);
       if (file === null) {
         const details: DoneDetails = {
