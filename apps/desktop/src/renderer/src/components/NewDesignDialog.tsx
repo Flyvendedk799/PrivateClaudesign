@@ -1,4 +1,5 @@
 import { useT } from '@open-codesign/i18n';
+import { filterGameExampleBriefs } from '@open-codesign/templates';
 import { Boxes, Film, FolderOpen, Gamepad2, Joystick, Sparkles } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { MotionStyle } from '../store';
@@ -103,6 +104,10 @@ export function NewDesignDialog() {
   const setView = useCodesignStore((s) => s.setView);
   const lastPickedMode = useCodesignStore((s) => s.lastPickedMode);
   const setPendingArtifactSelection = useCodesignStore((s) => s.setPendingArtifactSelection);
+  // may9 Phase 10 #33 — clicking a suggestion chip pre-fills the
+  // prompt input so the user lands on the canvas with a working
+  // brief.
+  const setPendingPromptDraft = useCodesignStore((s) => s.setPromptDraft);
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
@@ -339,6 +344,39 @@ export function NewDesignDialog() {
                   </option>
                 ))}
               </select>
+              {/* may9 Phase 10 follow-up #33 — example brief suggestions.
+                  Filtered by the picked engine + genre when both are
+                  set; otherwise shows everything matching the engine.
+                  Picking a card stages the brief into the store via
+                  setPendingPromptDraft so the canvas's prompt input
+                  picks it up after the dialog closes. */}
+              {(() => {
+                const filterOpts: Parameters<typeof filterGameExampleBriefs>[0] = {};
+                if (engine !== 'auto') filterOpts.engine = engine;
+                if (genre !== 'auto') filterOpts.genre = genre;
+                const suggestions = filterGameExampleBriefs(filterOpts).slice(0, 4);
+                if (suggestions.length === 0) return null;
+                return (
+                  <div className="space-y-1.5 pt-1">
+                    <p className="text-[var(--text-xs)] text-[var(--color-text-secondary)]">
+                      You might try
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {suggestions.map((s) => (
+                        <button
+                          key={s.slug}
+                          type="button"
+                          onClick={() => setPendingPromptDraft(s.brief)}
+                          className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[11px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)] hover:border-[var(--color-accent)]"
+                          title={s.brief}
+                        >
+                          {s.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         ) : (

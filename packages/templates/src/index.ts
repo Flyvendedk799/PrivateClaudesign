@@ -58,3 +58,7 @@ export function getDemo(id: string, locale?: string): DemoTemplate | undefined {
  * imports do not break while the renderer migrates to the locale-aware API.
  */
 export const BUILTIN_DEMOS: DemoTemplate[] = enDemos;
+
+// may9 Phase 10 follow-up #33 — bundled game-builder example briefs.
+export { GAME_EXAMPLE_BRIEFS, filterGameExampleBriefs } from './game-examples';
+export type { GameExampleBrief } from './game-examples';
