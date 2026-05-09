@@ -2393,6 +2393,18 @@ function registerIpcHandlers(db: Database | null): void {
         // resolve "this sprite" / "the selected animation" without
         // calling list/inspect tools first.
         let promptForRun = payload.prompt;
+        // may9 Phase 10 / task #32 — when the New-design dialog seeded a
+        // genre, prepend a small system-reminder so declare_game_spec's
+        // first call uses it as the typed default. Free-form string from
+        // the IPC; the agent validates against GameGenre when it builds
+        // the spec. Skips silently for design + motion runs.
+        if (
+          payload.gameGenre !== undefined &&
+          payload.gameGenre.length > 0 &&
+          payload.artifactMode === 'game'
+        ) {
+          promptForRun = `[seed] NewDesignDialog suggested genre='${payload.gameGenre}'. Use this as the typed \`genre\` in your declare_game_spec call unless the brief contradicts it.\n\n${promptForRun}`;
+        }
         if (
           payload.gameArtifactContext !== undefined &&
           payload.designId !== undefined &&

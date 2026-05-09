@@ -257,6 +257,13 @@ export const GeneratePayloadV1 = z.object({
    *  New-design dialog. When undefined and artifactMode === 'motion' the
    *  agent's first tool call is `choose_remotion_style`. */
   motionStyle: MotionStyle.optional(),
+  /** may9 Phase 10 — genre seed from the New-design dialog. Seeds the
+   *  agent's `declare_game_spec` first call so the spec gate runs with
+   *  a typed genre from turn 0 (vs. inferring from the brief). Free-form
+   *  string here so the renderer's curated dropdown can stay in sync
+   *  with the GameGenre Zod enum without a circular import. The agent
+   *  validates the value against GameGenre when it builds its spec. */
+  gameGenre: z.string().min(1).max(40).optional(),
 });
 export type GeneratePayloadV1 = z.infer<typeof GeneratePayloadV1>;
 

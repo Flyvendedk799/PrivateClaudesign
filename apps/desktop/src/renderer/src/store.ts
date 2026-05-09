@@ -2695,6 +2695,10 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       let pendingMode = get().pendingArtifactMode;
       const pendingEngine = get().pendingGameEngine;
       const pendingMotionStyle = get().pendingMotionStyle;
+      // may9 Phase 10 — genre seed picked in NewDesignDialog. Forwarded
+      // into the IPC payload so the agent's first declare_game_spec call
+      // starts with a typed genre instead of inferring it from the brief.
+      const pendingGameGenre = get().pendingGameGenre;
       get().clearPendingGameSelection();
       // Auto-route game-genre prompts (FPS / wave defense / platformer /
       // etc.) into game-mode when the user didn't explicitly pick a
@@ -2770,6 +2774,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           ...(pendingMode !== null ? { artifactMode: pendingMode } : {}),
           ...(pendingEngine !== null ? { gameEngine: pendingEngine } : {}),
           ...(pendingMotionStyle !== null ? { motionStyle: pendingMotionStyle } : {}),
+          ...(pendingGameGenre !== null ? { gameGenre: pendingGameGenre } : {}),
           ...(gameArtifactContext !== undefined ? { gameArtifactContext } : {}),
         },
         designIdAtStart,
