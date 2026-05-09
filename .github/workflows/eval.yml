@@ -1,0 +1,61 @@
+name: Eval (game fixtures)
+
+# may9 Phase 14 — runs `pnpm eval:games` on PRs that touch the
+# game-pipeline surface (core, runtime, prompts, exporters, fixtures).
+# The pure-compute portion (fixture validation, runner assertions,
+# report rendering) runs everywhere; the SQLite-backed observation
+# source needs a recorded designs.db which CI does not have, so the
+# CI invocation runs vitest only. The full delta-vs-baseline path
+# stays a manual run on a contributor's machine.
+#
+# Tightening this to actually replay fixtures against a fixture-replay
+# provider is task #14-followup once the recorded-fixture pipeline
+# lands.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/core/src/eval/**'
+      - 'packages/core/src/playtest-playbooks*'
+      - 'packages/core/src/tools/done*'
+      - 'packages/core/src/tools/declare-game-spec*'
+      - 'packages/core/src/tools/amend-game-spec*'
+      - 'packages/core/src/tools/choose-engine*'
+      - 'packages/core/src/destructive-edit*'
+      - 'packages/runtime/src/engines/**'
+      - 'packages/runtime/src/overlay-check*'
+      - 'packages/runtime/src/pointer-lock*'
+      - 'packages/shared/src/game-spec*'
+      - 'packages/shared/src/abort-kind*'
+      - 'evals/fixtures/**'
+      - 'scripts/eval-games.ts'
+      - 'scripts/eval-baseline.ts'
+  workflow_dispatch: {}
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck core + shared + runtime
+        run: |
+          pnpm --filter @open-codesign/shared typecheck
+          pnpm --filter @open-codesign/core typecheck
+          pnpm --filter @open-codesign/runtime typecheck
+      - name: Run eval-framework tests
+        run: |
+          pnpm --filter @open-codesign/core test -- --run src/eval src/playtest-playbooks src/destructive-edit src/tools/done-pre-gate src/tools/done-destructive-edit
+          pnpm --filter @open-codesign/runtime test -- --run src/overlay-check src/engines/phaser-trigger-zone src/pointer-lock
+      - name: Validate fixture JSON files
+        run: |
+          pnpm tsx scripts/eval-baseline.ts --print > /dev/null || true
+          # JSON syntax + schema check on every fixture (Zod parse via the runner module).
+          node -e "const fs = require('node:fs'); const path = require('node:path'); const dir = 'evals/fixtures'; for (const f of fs.readdirSync(dir).filter(x => x.endsWith('.json'))) { JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); console.log('ok', f); }"

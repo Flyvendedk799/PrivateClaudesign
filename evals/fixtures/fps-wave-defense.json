@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "FPS Wave Defense (ba2adf62 baseline)",
+  "slug": "fps-wave-defense",
+  "description": "Replays the May-6→May-8 ba2adf62 case. Baseline: 28 snapshots, 1 validate_game_scene + 1 playtest_game across the whole arc, 93 set_todos calls, 5 render_preview calls, $26 of generation. Post-V2 must hold every Phase 9b cap.",
+  "brief": "Create a simple 3D first-person shooter where the player fights through waves of enemies inside a building. Each final wave unlocks the exit and advances to the next level.",
+  "playtestPlaybook": "fps",
+  "assertions": {
+    "expectedEngine": "three",
+    "expectedGenre": "fps",
+    "requiredFiles": ["index.html"],
+    "requiredAudio": true,
+    "maxInputTokens": 1400000,
+    "maxStrReplaceFailureRate": 0.05,
+    "maxSetTodosCalls": 8,
+    "minValidateGameSceneCalls": 1,
+    "minPlaytestGameCalls": 1,
+    "maxRenderPreviewCalls": 0,
+    "maxCorrections": 2
+  }
+}

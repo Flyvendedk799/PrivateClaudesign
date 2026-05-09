@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "Brawler — top-view 3D fighting (c44763af regression)",
+  "slug": "brawler-fight",
+  "description": "Replays the May-3 c44763af case. The original run took 6 corrections to recover from 'topview' -> orthographic + 'L/R hand' -> side-arc misreads. Post-V2 must converge with <= 2 corrections + checkEngineFit gate must reject pygame for fighting + 3d.",
+  "brief": "Create a topview 3D fighting game where two characters can punch with left and right hand attacks. Win when opponent HP hits zero.",
+  "playtestPlaybook": "fighting",
+  "assertions": {
+    "expectedEngine": "three",
+    "expectedGenre": "fighting",
+    "requiredFiles": ["index.html"],
+    "requiredAudio": true,
+    "maxInputTokens": 1400000,
+    "maxStrReplaceFailureRate": 0.05,
+    "maxSetTodosCalls": 8,
+    "minValidateGameSceneCalls": 1,
+    "minPlaytestGameCalls": 1,
+    "maxRenderPreviewCalls": 0,
+    "maxCorrections": 2
+  }
+}

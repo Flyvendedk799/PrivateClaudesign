@@ -30,6 +30,8 @@
     "docs:preview": "pnpm --filter open-codesign-website preview",
     "smoke": "tsx scripts/smoke-models.ts",
     "replay-prune": "tsx apps/desktop/src/main/replay-prune.ts",
+    "eval:baseline": "tsx scripts/eval-baseline.ts",
+    "eval:games": "tsx scripts/eval-games.ts",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "turbo run build && changeset publish"

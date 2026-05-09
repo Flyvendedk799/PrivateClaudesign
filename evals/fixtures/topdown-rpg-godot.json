@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "Top-down RPG skeleton (Godot)",
+  "slug": "topdown-rpg-godot",
+  "description": "Forces the checkEngineFit matrix on a brief that's a clear Godot win: top-down RPG with NPC dialog, save system, autoload state. Catches engine misroutes (e.g. agent picking three for tilemap-heavy 2D).",
+  "brief": "Create a top-down 2D RPG skeleton with player movement, an NPC that can be spoken to via dialog box, and a save/load slot. Use Godot 4.3.",
+  "playtestPlaybook": "topdown_arcade",
+  "assertions": {
+    "expectedEngine": "godot",
+    "expectedGenre": "rpg",
+    "requiredFiles": ["project.godot"],
+    "requiredAudio": false,
+    "maxInputTokens": 1200000,
+    "maxStrReplaceFailureRate": 0.05,
+    "maxSetTodosCalls": 8,
+    "minValidateGameSceneCalls": 1,
+    "minPlaytestGameCalls": 0,
+    "maxRenderPreviewCalls": 0,
+    "maxCorrections": 2
+  }
+}

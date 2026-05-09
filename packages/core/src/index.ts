@@ -36,6 +36,18 @@ export type { LoadAllSkillsOptions } from './skills/index.js';
 
 export { generateViaAgent } from './agent.js';
 export type { AgentEvent, GenerateViaAgentDeps } from './agent.js';
+
+// may9 Phase 14 — eval framework. The CLI script in scripts/eval-games.ts
+// imports these to evaluate fixtures against recorded designs.
+export {
+  EVAL_FIXTURE_SCHEMA_VERSION,
+  EvalAssertion,
+  EvalEngine,
+  EvalFixture,
+  evaluateFixture,
+  renderEvalReport,
+} from './eval/index.js';
+export type { EvalReport, EvalResult, RunObservation } from './eval/index.js';
 export {
   buildContinuationPrompt,
   CONTINUATION_THRESHOLDS,

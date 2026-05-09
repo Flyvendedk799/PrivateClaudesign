@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "Match-3 puzzle (Phaser)",
+  "slug": "match3-puzzle-phaser",
+  "description": "Phaser 2D puzzle baseline. Tests the puzzle playbook (tile interaction -> grid permutation -> match clears -> score increments) and the Phaser engine path. Catches 'score never increments' and 'match detection only one axis' regressions.",
+  "brief": "Create a match-3 puzzle game where tapping two adjacent tiles swaps them and three-in-a-row clears + adds to the score.",
+  "playtestPlaybook": "puzzle",
+  "assertions": {
+    "expectedEngine": "phaser",
+    "expectedGenre": "puzzle",
+    "requiredFiles": ["index.html"],
+    "requiredAudio": true,
+    "maxInputTokens": 800000,
+    "maxStrReplaceFailureRate": 0.05,
+    "maxSetTodosCalls": 6,
+    "minValidateGameSceneCalls": 1,
+    "minPlaytestGameCalls": 1,
+    "maxRenderPreviewCalls": 0,
+    "maxCorrections": 1
+  }
+}
