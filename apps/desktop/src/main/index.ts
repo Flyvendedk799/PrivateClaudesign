@@ -198,8 +198,20 @@ import {
   registerSnapshotsUnavailableIpc,
   registerWorkspaceIpc,
 } from './snapshots-ipc';
+import {
+  type SteamUploadResult,
+  registerSteamSettingsIpc,
+  resolveSteamConfig,
+  uploadBuildToSteam,
+} from './steam-settings';
 import { initStorageSettings } from './storage-settings';
-import { buildThreeDAssetProvider, resolveThreeDAssetConfig } from './threed-asset-settings';
+import {
+  buildThreeDAssetProvider,
+  registerThreeDAssetSettingsIpc,
+  resolveThreeDAssetConfig,
+} from './threed-asset-settings';
+import { type UnityBuildRequest, type UnityBuildResult, buildUnityProject } from './unity-build';
+import { discoverUnityEditors } from './unity-discovery';
 
 // ESM shim: package.json "type": "module" means the built bundle is ESM and
 // __dirname/__filename don't exist. Derive them from import.meta.url so the
@@ -1208,6 +1220,52 @@ function registerIpcHandlers(db: Database | null): void {
     const generate3dAsset = threeDAssetConfig
       ? buildThreeDAssetProvider(threeDAssetConfig)
       : undefined;
+    // UNITY_PIPELINE.md §U3 — register the Unity build callback only
+    // when the user has Unity Hub + at least one Editor installed.
+    // Without it the build_unity tool isn't visible to the agent and
+    // the project-export path applies (user opens the ZIP in Unity Hub
+    // by hand). Discovery is cached per agent invocation; refresh on
+    // each turn so a freshly installed Editor is picked up.
+    const unityDiscovery = discoverUnityEditors();
+    const buildUnity =
+      unityDiscovery.editors.length > 0 && designId !== null
+        ? async (req: UnityBuildRequest, signal?: AbortSignal): Promise<UnityBuildResult> => {
+            void signal;
+            return buildUnityProject(
+              {
+                files: req.files,
+                target: req.target,
+                outDir: req.outDir,
+                ...(req.development !== undefined ? { development: req.development } : {}),
+              },
+              {},
+            );
+          }
+        : undefined;
+    const resolveUnityOutDir =
+      designId !== null
+        ? (target: string) =>
+            join(app.getPath('userData'), 'designs', designId, 'unity-build', target)
+        : undefined;
+    // UNITY_PIPELINE.md §U4 — Steam upload callback is registered only
+    // when the user has filled in Steam settings AND steamcmd is on disk.
+    const steamConfig = cfg ? resolveSteamConfig(cfg) : null;
+    const uploadToSteam =
+      steamConfig !== null
+        ? async (
+            req: { contentRoot: string; steamGuardCode?: string; buildDescription?: string },
+            signal?: AbortSignal,
+          ): Promise<SteamUploadResult> => {
+            void signal;
+            return uploadBuildToSteam(steamConfig, {
+              contentRoot: req.contentRoot,
+              ...(req.steamGuardCode !== undefined ? { steamGuardCode: req.steamGuardCode } : {}),
+              ...(req.buildDescription !== undefined
+                ? { buildDescription: req.buildDescription }
+                : {}),
+            });
+          }
+        : undefined;
     const generateImageAsset = imageConfig
       ? async (
           request: GenerateImageAssetRequest,
@@ -1524,6 +1582,9 @@ function registerIpcHandlers(db: Database | null): void {
       setTodosCounter,
       getParentArtifactBytes,
       ...(generate3dAsset !== undefined ? { generate3dAsset } : {}),
+      ...(buildUnity !== undefined ? { buildUnity } : {}),
+      ...(resolveUnityOutDir !== undefined ? { resolveUnityOutDir } : {}),
+      ...(uploadToSteam !== undefined ? { uploadToSteam } : {}),
       ...(AUDIO_BANK_DIR !== undefined ? { audioBankDir: AUDIO_BANK_DIR } : {}),
       userSkills,
       ...(gameMode !== undefined ? { gameMode } : {}),
@@ -3649,6 +3710,8 @@ if (!IS_VITEST) {
       registerCodexOAuthIpc();
       registerPreferencesIpc();
       registerImageGenerationSettingsIpc();
+      registerThreeDAssetSettingsIpc();
+      registerSteamSettingsIpc();
       registerExporterIpc(
         () => mainWindow,
         () => (dbResult.ok ? dbResult.db : null),

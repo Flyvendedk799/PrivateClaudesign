@@ -5,7 +5,7 @@
  * pulling in the registry side-effects in the entry module.
  */
 
-export type GameEngineId = 'three' | 'phaser' | 'pygame' | 'godot';
+export type GameEngineId = 'three' | 'phaser' | 'pygame' | 'godot' | 'unity';
 
 export interface BootstrapOptions {
   /** UUID of the design row this game belongs to. Used to build the

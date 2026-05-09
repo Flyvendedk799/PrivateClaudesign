@@ -217,6 +217,8 @@
     "tabs": {
       "models": "Models",
       "images": "Image API",
+      "threed": "3D Models",
+      "steam": "Steam",
       "appearance": "Appearance",
       "storage": "Storage",
       "diagnostics": "Diagnostics",
@@ -247,6 +249,65 @@
         "loadFailed": "Failed to load image generation settings",
         "saved": "Image generation settings saved",
         "saveFailed": "Failed to save image generation settings"
+      }
+    },
+    "threedAsset": {
+      "tabTitle": "3D model generation",
+      "tabHint": "Let the design agent call a text-to-3D provider (Meshy by default) for game-mode runs that name real-world weapons, vehicles, or characters. Without a configured provider the agent falls back to procedural primitives.",
+      "title": "3D asset generation",
+      "hint": "When enabled, generate_3d_asset is registered for game-mode runs. Output GLBs land in assets/models/<slug>.glb.",
+      "enabled": "Enable 3D model generation",
+      "provider": "Provider",
+      "providerMeshy": "Meshy",
+      "providerTripo": "Tripo",
+      "apiKey": "API key",
+      "keyPlaceholder": "Leave empty to keep {{mask}}",
+      "newKeyPlaceholder": "Paste API key",
+      "baseUrl": "Base URL (optional)",
+      "baseUrlPlaceholder": "https://api.meshy.ai",
+      "status": {
+        "ready": "Ready",
+        "needsKey": "Needs API key",
+        "disabled": "Disabled"
+      },
+      "toast": {
+        "loadFailed": "Failed to load 3D asset settings",
+        "saved": "3D asset settings saved",
+        "saveFailed": "Failed to save 3D asset settings"
+      }
+    },
+    "steam": {
+      "tabTitle": "Steam distribution",
+      "tabHint": "Wire Steamworks credentials so Unity-mode runs can upload builds straight to your Steam app's Builds tab. Login + password stay local; password is encrypted in your config.toml.",
+      "title": "Steam upload pipeline",
+      "hint": "When enabled and steamcmd is on disk, the upload_to_steam tool is registered for game-mode runs. Upload-only — Valve review and live-promotion happen via the Steamworks dashboard.",
+      "enabled": "Enable Steam upload",
+      "username": "Steam username",
+      "password": "Steam password",
+      "passwordPlaceholder": "Leave empty to keep {{mask}}",
+      "newPasswordPlaceholder": "Paste Steam password",
+      "appId": "App ID",
+      "depotId": "Depot ID",
+      "steamcmdPath": "steamcmd path (optional)",
+      "steamcmdDetected": "Detected: {{path}}",
+      "steamcmdMissing": "steamcmd not found on $PATH or standard install locations.",
+      "buildDescription": "Build description",
+      "testLogin": "Test login",
+      "testLoginOk": "Login succeeded.",
+      "testLoginFail": "Login failed — check credentials, SteamGuard, and the log.",
+      "steamGuardPrompt": "SteamGuard 2FA code (sent to your email)",
+      "steamGuardConfirm": "Submit 2FA code",
+      "status": {
+        "ready": "Ready",
+        "needsCreds": "Needs credentials",
+        "missingSteamcmd": "Install steamcmd",
+        "disabled": "Disabled"
+      },
+      "toast": {
+        "loadFailed": "Failed to load Steam settings",
+        "saved": "Steam settings saved",
+        "saveFailed": "Failed to save Steam settings",
+        "testFailed": "Test login failed"
       }
     },
     "shell": {

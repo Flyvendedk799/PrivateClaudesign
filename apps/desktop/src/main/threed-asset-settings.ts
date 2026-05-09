@@ -2,6 +2,7 @@ import {
   type ThreeDAssetProvider,
   fakeThreeDAssetProvider,
   makeMeshyProvider,
+  makeTripoProvider,
 } from '@open-codesign/providers';
 /**
  * may9 step 1 — resolve a configured 3D-asset provider into a wired
@@ -14,8 +15,24 @@ import {
  * configured a 3D provider — the tool simply isn't registered for
  * that run.
  */
-import type { Config, ThreeDAssetProviderId, ThreeDAssetSettings } from '@open-codesign/shared';
-import { decryptSecret } from './keychain';
+import {
+  CodesignError,
+  type Config,
+  ERROR_CODES,
+  THREED_ASSET_SCHEMA_VERSION,
+  type ThreeDAssetProviderId,
+  ThreeDAssetProviderSchema,
+  type ThreeDAssetSettings,
+  ThreeDAssetSettingsSchema,
+  hydrateConfig,
+} from '@open-codesign/shared';
+import { writeConfig } from './config';
+import { ipcMain } from './electron-runtime';
+import { buildSecretRef, decryptSecret } from './keychain';
+import { getLogger } from './logger';
+import { getCachedConfig, setCachedConfig } from './onboarding-ipc';
+
+const log = getLogger('threed-asset');
 
 export interface ResolvedThreeDAssetConfig {
   provider: ThreeDAssetProviderId;
@@ -49,10 +66,12 @@ export function buildThreeDAssetProvider(cfg: ResolvedThreeDAssetConfig): ThreeD
       ...(cfg.baseUrl !== undefined ? { baseUrl: cfg.baseUrl } : {}),
     });
   }
-  // Tripo adapter is a follow-up. For now fall back to fake so a user
-  // who picks 'tripo' still gets a working tool path (returns the
-  // empty-scene GLB) instead of a hard failure. Settings UI surfaces
-  // "Tripo support coming soon" copy.
+  if (cfg.provider === 'tripo') {
+    return makeTripoProvider({
+      apiKey: cfg.apiKey,
+      ...(cfg.baseUrl !== undefined ? { baseUrl: cfg.baseUrl } : {}),
+    });
+  }
   return fakeThreeDAssetProvider;
 }
 
@@ -60,4 +79,125 @@ export function buildThreeDAssetProvider(cfg: ResolvedThreeDAssetConfig): ThreeD
  *  deterministic fake so vitest + dev-without-key both work. */
 export function buildFakeThreeDAssetProvider(): ThreeDAssetProvider {
   return fakeThreeDAssetProvider;
+}
+
+// ─── Settings view + IPC ─────────────────────────────────────────────────────
+
+export interface ThreeDAssetSettingsView {
+  enabled: boolean;
+  provider: ThreeDAssetProviderId;
+  baseUrl: string | null;
+  hasKey: boolean;
+  maskedKey: string | null;
+}
+
+interface ThreeDAssetUpdateInput {
+  enabled?: boolean;
+  provider?: ThreeDAssetProviderId;
+  baseUrl?: string | null;
+  apiKey?: string;
+}
+
+export function defaultThreeDAssetSettings(): ThreeDAssetSettings {
+  return ThreeDAssetSettingsSchema.parse({
+    schemaVersion: THREED_ASSET_SCHEMA_VERSION,
+    enabled: false,
+    provider: 'meshy',
+  });
+}
+
+export function threeDAssetSettingsToView(
+  settings: ThreeDAssetSettings | undefined,
+): ThreeDAssetSettingsView {
+  const parsed = ThreeDAssetSettingsSchema.parse(settings ?? defaultThreeDAssetSettings());
+  return {
+    enabled: parsed.enabled,
+    provider: parsed.provider,
+    baseUrl: parsed.baseUrl ?? null,
+    hasKey: parsed.apiKey !== undefined,
+    maskedKey: parsed.apiKey?.mask ?? null,
+  };
+}
+
+function parseUpdate(raw: unknown): ThreeDAssetUpdateInput {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new CodesignError('threed-asset:v1:update expects an object', ERROR_CODES.IPC_BAD_INPUT);
+  }
+  const r = raw as Record<string, unknown>;
+  const out: ThreeDAssetUpdateInput = {};
+  if (typeof r['enabled'] === 'boolean') out.enabled = r['enabled'];
+  if (typeof r['provider'] === 'string') {
+    out.provider = ThreeDAssetProviderSchema.parse(r['provider']);
+  }
+  if (r['baseUrl'] === null) {
+    out.baseUrl = null;
+  } else if (typeof r['baseUrl'] === 'string') {
+    const trimmed = r['baseUrl'].trim();
+    out.baseUrl = trimmed.length === 0 ? null : trimmed;
+  }
+  if (typeof r['apiKey'] === 'string') out.apiKey = r['apiKey'];
+  return out;
+}
+
+async function updateThreeDAssetSettings(
+  patch: ThreeDAssetUpdateInput,
+): Promise<ThreeDAssetSettingsView> {
+  const cfg = getCachedConfig();
+  if (cfg === null) {
+    throw new CodesignError('No configuration found', ERROR_CODES.CONFIG_MISSING);
+  }
+  const current = ThreeDAssetSettingsSchema.parse(cfg.threeDAsset ?? defaultThreeDAssetSettings());
+  let next: ThreeDAssetSettings = { ...current };
+  if (patch.enabled !== undefined) next.enabled = patch.enabled;
+  if (patch.provider !== undefined) next.provider = patch.provider;
+  if (patch.baseUrl !== undefined) {
+    if (patch.baseUrl === null) {
+      const { baseUrl: _removed, ...rest } = next;
+      next = rest;
+    } else {
+      next.baseUrl = patch.baseUrl;
+    }
+  }
+  if (patch.apiKey !== undefined) {
+    const trimmed = patch.apiKey.trim();
+    if (trimmed.length === 0) {
+      const { apiKey: _removed, ...rest } = next;
+      next = rest;
+    } else {
+      next.apiKey = buildSecretRef(trimmed);
+    }
+  }
+  const parsed = ThreeDAssetSettingsSchema.parse(next);
+  const config = hydrateConfig({
+    version: 3,
+    activeProvider: cfg.activeProvider,
+    activeModel: cfg.activeModel,
+    secrets: cfg.secrets,
+    providers: cfg.providers,
+    ...(cfg.designSystem !== undefined ? { designSystem: cfg.designSystem } : {}),
+    ...(cfg.imageGeneration !== undefined ? { imageGeneration: cfg.imageGeneration } : {}),
+    threeDAsset: parsed,
+  });
+  await writeConfig(config);
+  setCachedConfig(config);
+  log.info('settings.update.ok', {
+    enabled: parsed.enabled,
+    provider: parsed.provider,
+    hasKey: parsed.apiKey !== undefined,
+  });
+  return threeDAssetSettingsToView(parsed);
+}
+
+export function registerThreeDAssetSettingsIpc(): void {
+  ipcMain.handle('threed-asset:v1:get', async (): Promise<ThreeDAssetSettingsView> => {
+    const cfg = getCachedConfig();
+    return threeDAssetSettingsToView(cfg?.threeDAsset);
+  });
+
+  ipcMain.handle(
+    'threed-asset:v1:update',
+    async (_e, raw: unknown): Promise<ThreeDAssetSettingsView> => {
+      return updateThreeDAssetSettings(parseUpdate(raw));
+    },
+  );
 }

@@ -1,0 +1,142 @@
+# Unity engine guide (pinned to Unity 6 LTS — `m_EditorVersion: 6000.0`)
+
+Unity 6 is **project-download mode** in U1. The agent authors a clean Unity project tree (`Assets/`, `Packages/manifest.json`, `ProjectSettings/`) that the user opens in Unity Hub. Native + WebGL builds happen in U3 via `-batchmode`. Steam upload happens in U4 via `steamcmd`.
+
+**Do NOT** try to author `.unity` scene YAML by hand for anything beyond the empty placeholder scene — Unity's serialized YAML is fragile (GUIDs, file IDs, transform references) and one off-by-one breaks the whole project. Build scenes programmatically from a small `Assets/Editor/SceneBuilder.cs` script that uses `EditorSceneManager.NewScene()` + `GameObject.CreatePrimitive()` + component adds. Unity runs the script on first open via `[InitializeOnLoadMethod]`.
+
+**Live preview comes from a Three.js shadow scene the agent authors in parallel** (UNITY_PIPELINE.md §U2). The runtime renders `index.html` (the shadow scene) in the iframe; the Unity tree under `Assets/` is the export target. Both must be authored every Unity-mode run:
+
+- `index.html` — Three.js scene approximating the Unity scene. Same camera kind (first-person ↔ first-person), same named actors ("Player", "Enemy", etc.). The user iterates against this preview.
+- `Assets/` + `Packages/` + `ProjectSettings/` — the Unity project tree. The user opens this in Unity Hub for native + Steam builds.
+
+Before `done`, call `verify_unity_matches_preview` — it lints camera-kind drift and named-actor drift between the two artifacts. Drift means the preview lies about the export target.
+
+## Required project files
+
+```
+ProjectSettings/ProjectVersion.txt    # required — Unity Hub reads this
+Packages/manifest.json                # required — even { "dependencies": {} } works
+Assets/Scenes/Main.unity              # required — placeholder scene OK
+Assets/Editor/SceneBuilder.cs         # populates Main.unity on Editor open
+Assets/Scripts/                       # MonoBehaviour subclasses
+Assets/Resources/                     # runtime-loaded assets (Resources.Load path-relative)
+Assets/Prefabs/                       # reusable game objects
+```
+
+## ProjectSettings/ProjectVersion.txt — minimum shape
+
+```
+m_EditorVersion: 6000.0.23f1
+m_EditorVersionWithRevision: 6000.0.23f1 (a1b2c3d4)
+```
+
+## Packages/manifest.json — minimum shape
+
+```json
+{
+  "dependencies": {
+    "com.unity.render-pipelines.universal": "17.0.3",
+    "com.unity.inputsystem": "1.7.0"
+  }
+}
+```
+
+URP is the default. New Input System is the default. Don't use the deprecated `Input.GetKey`.
+
+## Scene authoring — the SceneBuilder pattern
+
+`Assets/Editor/SceneBuilder.cs`:
+
+```csharp
+using UnityEditor;
+using UnityEditor.SceneManagement;
+using UnityEngine;
+
+[InitializeOnLoad]
+public static class SceneBuilder {
+  static SceneBuilder() { EditorApplication.delayCall += BuildIfEmpty; }
+
+  static void BuildIfEmpty() {
+    var scene = EditorSceneManager.OpenScene("Assets/Scenes/Main.unity");
+    if (scene.rootCount > 1) return;
+
+    var camera = new GameObject("Main Camera");
+    camera.AddComponent<Camera>();
+    camera.tag = "MainCamera";
+    camera.transform.position = new Vector3(0, 5, -10);
+
+    var player = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+    player.name = "Player";
+    player.AddComponent<PlayerController>();
+    player.AddComponent<Rigidbody>();
+
+    var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
+    ground.name = "Ground";
+    ground.transform.localScale = new Vector3(5, 1, 5);
+
+    var lightGO = new GameObject("Directional Light");
+    lightGO.AddComponent<Light>().type = LightType.Directional;
+
+    EditorSceneManager.MarkSceneDirty(scene);
+    EditorSceneManager.SaveScene(scene);
+    AssetDatabase.Refresh();  // CRITICAL — without this the build runs against the empty scene
+  }
+}
+```
+
+The `AssetDatabase.Refresh()` call is mandatory. The validator warns when an Editor script writes assets without it.
+
+## MonoBehaviour patterns
+
+```csharp
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+[RequireComponent(typeof(Rigidbody))]
+public class PlayerController : MonoBehaviour {
+  [SerializeField] float moveSpeed = 5f;
+  Rigidbody rb;
+  Vector2 moveInput;
+
+  void Awake() { rb = GetComponent<Rigidbody>(); }
+  public void OnMove(InputValue v) { moveInput = v.Get<Vector2>(); }
+
+  void FixedUpdate() {
+    var move = new Vector3(moveInput.x, 0, moveInput.y) * moveSpeed;
+    rb.linearVelocity = new Vector3(move.x, rb.linearVelocity.y, move.z);
+  }
+}
+```
+
+Notice: `FixedUpdate` for physics. `linearVelocity` (Unity 6 name; `velocity` is deprecated).
+
+## Anti-patterns the validator catches
+
+- **`GameObject.Find("...")` inside `Update()` / `FixedUpdate()` / `LateUpdate()`** — string search every frame. Cache the reference in `Awake()` or `Start()`.
+- **`transform.Translate(speed)` without `Time.deltaTime`** — frame-rate-dependent. Multiply by `Time.deltaTime` in Update or use `Rigidbody.linearVelocity` in FixedUpdate.
+- **`Resources.Load("path")` for a missing asset** — runtime null. Path is relative to `Assets/Resources/`, no extension.
+- **Editor scripts that write assets without `AssetDatabase.Refresh()`** — next build won't see the new asset.
+- **`Debug.Log` in hot paths** — allocates strings every frame. Wrap in `#if UNITY_EDITOR` for production.
+
+## Build pipeline (U3)
+
+The host has wired `build_unity` for this run when Unity Editor is on the user's machine. Call it AFTER `verify_unity_matches_preview` reports OK and the project tree is complete:
+
+```
+build_unity({ target: "StandaloneOSX" | "StandaloneWindows64" | "StandaloneLinux64" | "WebGL", development?: true })
+```
+
+The host injects `Assets/Editor/CodesignBuilder.cs` and invokes Unity Editor in `-batchmode`. **Don't author CodesignBuilder.cs yourself** — duplicate type errors. Build time: 3–10 min depending on target. Failed builds return CS#### errors inline; fix them and call again.
+
+If `build_unity` is not registered (host couldn't find Unity Editor), the user opens the exported `game-unity-project` ZIP in Unity Hub by hand — still ships, just without the in-app build button.
+
+## Genre fit
+
+- **Fits well:** third-person combat, AAA-target FPS, vehicle sims, anything destined for Steam.
+- **Overkill:** puzzle, card, idle, arcade — the 5–15 min build loop is wasted iteration. Pick Three.js or Phaser instead.
+- **Steam target?** Unity is the right choice. Browser engines can't ship to Steam at all; Godot can but the asset ecosystem is narrower.
+
+## Silent failures to watch for
+
+- **License not activated.** Unity Editor in batch mode without a Unity ID errors out. The host detects this and surfaces an actionable message — don't try to work around with flags.
+- **Multiple Editor versions installed.** The host picks the version pinned in `ProjectVersion.txt`. If the user only has 2022.3 installed and the project pins 6000.0, the build refuses. Don't downgrade silently.

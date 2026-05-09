@@ -171,9 +171,33 @@ export interface EngineFit {
   reason: string;
 }
 
-export type GameEngineId = 'three' | 'phaser' | 'pygame' | 'godot';
+export type GameEngineId = 'three' | 'phaser' | 'pygame' | 'godot' | 'unity';
 
 export function checkEngineFit(spec: GameSpec, engine: GameEngineId): EngineFit {
+  // Unity is overkill for lightweight genres — the 5–15 min build loop
+  // wastes iteration. Reject when the brief is clearly browser-engine
+  // territory.
+  if (
+    engine === 'unity' &&
+    (spec.genre === 'idle' ||
+      spec.genre === 'topdown_arcade' ||
+      spec.genre === 'rhythm' ||
+      spec.genre === 'tycoon')
+  ) {
+    return {
+      verdict: 'reject',
+      reason:
+        "Unity's 5–15 min build loop is wasted iteration for idle / arcade / rhythm / tycoon briefs. Pick three or phaser.",
+    };
+  }
+  if (engine === 'unity' && spec.dimensions === '2d') {
+    return {
+      verdict: 'warn',
+      reason:
+        'Unity supports 2D, but Phaser ships faster for browser 2D and Three.js handles parallax fine. Pick unity only when Steam distribution is the goal.',
+    };
+  }
+
   // 3D briefs: pygame can't sustain ≥60 fps for any 3D scene of
   // interest; phaser is 2.5D-only.
   if (spec.dimensions === '3d') {
@@ -181,13 +205,13 @@ export function checkEngineFit(spec: GameSpec, engine: GameEngineId): EngineFit 
       return {
         verdict: 'reject',
         reason:
-          'Pygame on Pyodide cannot maintain ≥60 fps for 3D scenes. Pick three (preferred) or godot.',
+          'Pygame on Pyodide cannot maintain ≥60 fps for 3D scenes. Pick three (preferred), godot, or unity.',
       };
     }
     if (engine === 'phaser') {
       return {
         verdict: 'warn',
-        reason: 'Phaser supports 2.5D layering only. For real 3D pick three.',
+        reason: 'Phaser supports 2.5D layering only. For real 3D pick three or unity.',
       };
     }
   }

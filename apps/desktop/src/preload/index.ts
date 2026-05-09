@@ -43,11 +43,15 @@ import type {
   TestEndpointResponse,
 } from '../main/connection-ipc';
 import type { ImageGenerationSettingsView } from '../main/image-generation-settings';
+import type { SteamSettingsView } from '../main/steam-settings';
+import type { ThreeDAssetSettingsView } from '../main/threed-asset-settings';
 
 export type { ConnectionTestError, ConnectionTestResult, ModelsListResponse, TestEndpointResponse };
 export type { ClaudeCodeUserType, ExternalConfigsDetection };
 export type { CodexOAuthStatus };
 export type { ImageGenerationSettingsView };
+export type { SteamSettingsView };
+export type { ThreeDAssetSettingsView };
 
 export interface ValidateKeyResult {
   ok: true;
@@ -520,6 +524,31 @@ const api = {
         'image-generation:v1:update',
         patch,
       ) as Promise<ImageGenerationSettingsView>,
+  },
+  threeDAsset: {
+    get: () => ipcRenderer.invoke('threed-asset:v1:get') as Promise<ThreeDAssetSettingsView>,
+    update: (
+      patch: Partial<Omit<ThreeDAssetSettingsView, 'hasKey' | 'maskedKey'>> & {
+        apiKey?: string;
+      },
+    ) => ipcRenderer.invoke('threed-asset:v1:update', patch) as Promise<ThreeDAssetSettingsView>,
+  },
+  steam: {
+    get: () => ipcRenderer.invoke('steam:v1:get') as Promise<SteamSettingsView>,
+    update: (patch: {
+      enabled?: boolean;
+      username?: string | null;
+      password?: string;
+      appId?: number | null;
+      depotId?: number | null;
+      steamcmdPath?: string | null;
+      buildDescription?: string | null;
+    }) => ipcRenderer.invoke('steam:v1:update', patch) as Promise<SteamSettingsView>,
+    testLogin: (steamGuardCode?: string) =>
+      ipcRenderer.invoke('steam:v1:test-login', { steamGuardCode }) as Promise<{
+        ok: boolean;
+        log: string;
+      }>,
   },
   codexOAuth: {
     status: () => ipcRenderer.invoke('codex-oauth:v1:status') as Promise<CodexOAuthStatus>,

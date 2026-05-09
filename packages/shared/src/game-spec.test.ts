@@ -170,4 +170,56 @@ describe('checkEngineFit — gating matrix', () => {
     });
     expect(checkEngineFit(spec, 'three').verdict).toBe('warn');
   });
+
+  it('OKs Unity for 3D third-person combat (the AAA-target case)', () => {
+    const spec = GameSpec.parse({
+      genre: 'tps',
+      dimensions: '3d',
+      perspective: 'third_person',
+      cameraKind: 'follow_3d',
+      primaryInputs: ['keyboard', 'mouse'],
+      numActors: 4,
+      winCondition: 'Defeat the boss.',
+      loseCondition: 'HP zero.',
+    });
+    expect(checkEngineFit(spec, 'unity').verdict).toBe('ok');
+  });
+
+  it('REJECTS Unity for idle / topdown_arcade / rhythm / tycoon (build loop overkill)', () => {
+    const baseSpec = {
+      dimensions: '2d' as const,
+      perspective: 'top_down' as const,
+      cameraKind: 'static' as const,
+      primaryInputs: ['keyboard' as const],
+      numActors: 1,
+      winCondition: 'win',
+      loseCondition: 'lose',
+    };
+    expect(checkEngineFit(GameSpec.parse({ ...baseSpec, genre: 'idle' }), 'unity').verdict).toBe(
+      'reject',
+    );
+    expect(
+      checkEngineFit(GameSpec.parse({ ...baseSpec, genre: 'topdown_arcade' }), 'unity').verdict,
+    ).toBe('reject');
+    expect(checkEngineFit(GameSpec.parse({ ...baseSpec, genre: 'rhythm' }), 'unity').verdict).toBe(
+      'reject',
+    );
+    expect(checkEngineFit(GameSpec.parse({ ...baseSpec, genre: 'tycoon' }), 'unity').verdict).toBe(
+      'reject',
+    );
+  });
+
+  it('WARNs Unity for 2D briefs (Phaser ships faster)', () => {
+    const spec = GameSpec.parse({
+      genre: 'platformer',
+      dimensions: '2d',
+      perspective: 'side_scroll',
+      cameraKind: 'follow_horizontal',
+      primaryInputs: ['keyboard'],
+      numActors: 2,
+      winCondition: 'Reach the flag.',
+      loseCondition: 'Out of lives.',
+    });
+    expect(checkEngineFit(spec, 'unity').verdict).toBe('warn');
+  });
 });

@@ -19,6 +19,7 @@ const FORMAT_FILTERS: Record<ExporterFormat, Electron.FileFilter[]> = {
   'game-godot-project': [{ name: 'Godot project (zip)', extensions: ['zip'] }],
   'game-godot-web': [{ name: 'Godot web build (zip)', extensions: ['zip'] }],
   'game-py': [{ name: 'Pygame project (zip)', extensions: ['zip'] }],
+  'game-unity-project': [{ name: 'Unity project (zip)', extensions: ['zip'] }],
 };
 
 export interface ExportRequest {

@@ -430,6 +430,25 @@ export function makeGameFilesSynthesizer(db: Database.Database): GameFilesSynthe
 
     const engine = getDesignEngine(db, designId);
     if (engine === null) return null;
+
+    // UNITY_PIPELINE.md §U2 — when engine=unity AND the agent hasn't yet
+    // authored an index.html shadow scene, serve the Unity project-shell
+    // bootstrap. Once the agent writes index.html (the Three.js scene)
+    // the design_files lookup wins and this branch never fires.
+    if (engine.engine === 'unity' && path === 'index.html') {
+      const adapter = getEngineAdapter('unity');
+      if (adapter === null) return null;
+      const html = adapter.bootstrap({
+        designId,
+        gameBaseUrl: `game-files://designs/${designId}/`,
+        ...(engine.version !== null ? { pinnedVersion: engine.version } : {}),
+      });
+      return {
+        contentType: 'text/html',
+        body: new TextEncoder().encode(html),
+      };
+    }
+
     if (engine.engine !== 'pygame') return null;
 
     if (path === 'index.html') {

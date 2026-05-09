@@ -73,6 +73,7 @@ import { createNarrationDetector } from './narration-detector.js';
 import { composeSystemPrompt } from './prompts/index.js';
 import { type GetGameSpecFn, makeAmendGameSpecTool } from './tools/amend-game-spec.js';
 import { makeAssertGameInvariantsTool } from './tools/assert-game-invariants.js';
+import { type BuildUnityFn, makeBuildUnityTool } from './tools/build-unity.js';
 import { createCameraGuard } from './tools/camera-pin.js';
 // gameplan §A5 — game-builder tools (registered when deps.gameMode is set).
 import { type ChooseEngineFn, makeChooseEngineTool } from './tools/choose-engine.js';
@@ -132,6 +133,7 @@ import {
 import { type RenderPreviewer, makeRenderPreviewTool } from './tools/render-preview.js';
 import { makeSetTodosTool } from './tools/set-todos.js';
 import { type TextEditorFsCallbacks, makeTextEditorTool } from './tools/text-editor.js';
+import { type UploadToSteamFn, makeUploadToSteamTool } from './tools/upload-to-steam.js';
 import {
   type ValidateEngine,
   type ValidateGameSceneFn,
@@ -141,6 +143,7 @@ import {
   type ValidateMotionCompositionFn,
   makeValidateMotionCompositionTool,
 } from './tools/validate-motion-composition.js';
+import { makeVerifyUnityMatchesPreviewTool } from './tools/verify-unity-matches-preview.js';
 import { makeViewSkillRuleTool } from './tools/view-skill-rule.js';
 
 /** Local mirror of the assistant message shape that pi-agent-core emits (via
@@ -925,6 +928,21 @@ export interface GenerateViaAgentDeps {
    *  Phase 12 D7 anti-slop bullet still steers the agent toward
    *  generate_image_asset for billboard textures. */
   generate3dAsset?: Generate3dAssetFn | undefined;
+  /** UNITY_PIPELINE.md §U3 — host-wired Unity build callback. Spawns
+   *  Unity Editor in batch mode against the agent's authored project
+   *  tree and returns the produced binary path. When undefined (Unity
+   *  not detected on the user's machine, or a non-game design) the
+   *  build_unity tool is not registered. */
+  buildUnity?: BuildUnityFn | undefined;
+  /** UNITY_PIPELINE.md §U3 — resolves the directory where the Unity
+   *  build's output should land for the current design. Required
+   *  alongside buildUnity. */
+  resolveUnityOutDir?: ((target: string) => string) | undefined;
+  /** UNITY_PIPELINE.md §U4 — host-wired Steam upload callback. Spawns
+   *  steamcmd against a previously-built binary directory and reports
+   *  the result. Registered only when the user has configured Steam
+   *  settings (app ID + depot ID + login) AND steamcmd is on disk. */
+  uploadToSteam?: UploadToSteamFn | undefined;
   /** may9 step 1.5 fix (Defect Q) — host-supplied audio-bank source
    *  directory. The host (apps/desktop) resolves the absolute path of
    *  packages/core/src/audio-bank via require.resolve so the bundled
@@ -1398,6 +1416,66 @@ export async function generateViaAgent(
           unknown
         >,
       );
+    }
+    // UNITY_PIPELINE.md §U2 — verify_unity_matches_preview lints the
+    // Three.js shadow scene against the Unity project tree. Registered
+    // for every game-mode run that has fs callbacks; the tool is only
+    // useful when engine=unity but registering broadly keeps the agent's
+    // tool set stable across engine choices.
+    if (isGameMode && deps.fs !== undefined) {
+      const fs = deps.fs;
+      const listAuthoredFiles = (): Array<{ path: string; content: string }> => {
+        // Walk the in-memory virtual FS the same way assert_game_invariants
+        // does — BFS over directories, collecting (path, content) for
+        // every readable file.
+        const out: Array<{ path: string; content: string }> = [];
+        const queue: string[] = [''];
+        const visited = new Set<string>();
+        while (queue.length > 0) {
+          const dir = queue.shift();
+          if (dir === undefined) break;
+          if (visited.has(dir)) continue;
+          visited.add(dir);
+          let entries: string[] = [];
+          try {
+            entries = fs.listDir(dir);
+          } catch {
+            continue;
+          }
+          for (const entry of entries) {
+            const rel = entry.startsWith(dir) ? entry : dir.length > 0 ? `${dir}/${entry}` : entry;
+            const file = fs.view(rel);
+            if (file !== null) out.push({ path: rel, content: file.content });
+            else if (!visited.has(rel)) queue.push(rel);
+          }
+        }
+        return out;
+      };
+      defaultTools.push(
+        makeVerifyUnityMatchesPreviewTool({
+          listFiles: listAuthoredFiles,
+        }) as unknown as AgentTool<TSchema, unknown>,
+      );
+      // UNITY_PIPELINE.md §U3 — build_unity is registered only when the
+      // host has wired both the build callback AND the out-dir resolver
+      // (i.e. Unity is detected on the user's machine).
+      if (deps.buildUnity !== undefined && deps.resolveUnityOutDir !== undefined) {
+        const resolveOutDir = deps.resolveUnityOutDir;
+        defaultTools.push(
+          makeBuildUnityTool(
+            deps.buildUnity,
+            { listFiles: listAuthoredFiles, resolveOutDir },
+            log,
+          ) as unknown as AgentTool<TSchema, unknown>,
+        );
+      }
+      // UNITY_PIPELINE.md §U4 — register upload_to_steam only when the
+      // host has configured Steam (app ID, depot ID, login, steamcmd).
+      if (deps.uploadToSteam !== undefined) {
+        defaultTools.push(
+          makeUploadToSteamTool(deps.uploadToSteam, log) as unknown as AgentTool<TSchema, unknown>,
+        );
+      }
     }
   }
   if (deps.generateImageAsset) {

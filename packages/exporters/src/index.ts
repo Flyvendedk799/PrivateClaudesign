@@ -24,6 +24,7 @@ export const EXPORTER_FORMATS = [
   'game-godot-web',
   'game-py',
   'game-pyodide-html',
+  'game-unity-project',
 ] as const;
 export type ExporterFormat = (typeof EXPORTER_FORMATS)[number];
 
@@ -37,6 +38,7 @@ export const GAME_EXPORTER_FORMATS = [
   'game-godot-web',
   'game-py',
   'game-pyodide-html',
+  'game-unity-project',
   'markdown',
 ] as const;
 export type DesignExporterFormat = (typeof DESIGN_EXPORTER_FORMATS)[number];
@@ -67,6 +69,7 @@ export type { ExportGameGodotProjectOptions } from './game-godot-project';
 export type { ExportGameGodotWebOptions } from './game-godot-web';
 export type { ExportGamePyOptions } from './game-py';
 export type { ExportGamePyodideHtmlOptions } from './game-pyodide-html';
+export type { ExportGameUnityProjectOptions } from './game-unity-project';
 export { htmlToMarkdown } from './markdown';
 
 export async function exportHtml(
@@ -125,7 +128,8 @@ export async function exportArtifact(
     format === 'game-godot-project' ||
     format === 'game-godot-web' ||
     format === 'game-py' ||
-    format === 'game-pyodide-html'
+    format === 'game-pyodide-html' ||
+    format === 'game-unity-project'
   ) {
     throw new CodesignError(
       `Format "${format}" is a game-mode exporter — call exportGameArtifact() with the multi-file bundle instead of exportArtifact() with one HTML string.`,
@@ -149,7 +153,7 @@ export async function exportGameArtifact(
   opts: {
     files: import('./zip').ZipAsset[];
     designName?: string;
-    engine?: 'three' | 'phaser' | 'pygame' | 'godot';
+    engine?: 'three' | 'phaser' | 'pygame' | 'godot' | 'unity';
     engineVersion?: string;
     /** Required for game-html (engine bundle inlining target). Ignored
      *  for game-zip / markdown. */
@@ -218,6 +222,21 @@ export async function exportGameArtifact(
     if (opts.designName !== undefined) pyOpts.designName = opts.designName;
     if (opts.engineVersion !== undefined) pyOpts.engineVersion = opts.engineVersion;
     return mod.exportGamePy(destinationPath, pyOpts);
+  }
+  if (format === 'game-unity-project') {
+    if (opts.engine !== 'unity' && opts.engine !== undefined) {
+      throw new CodesignError(
+        `game-unity-project requires engine='unity' (got "${opts.engine}"). Use game-html / game-zip for the JS engines.`,
+        ERROR_CODES.EXPORTER_FORMAT_REJECTED,
+      );
+    }
+    const mod = await import('./game-unity-project');
+    const unityOpts: import('./game-unity-project').ExportGameUnityProjectOptions = {
+      files: opts.files,
+    };
+    if (opts.designName !== undefined) unityOpts.designName = opts.designName;
+    if (opts.engineVersion !== undefined) unityOpts.engineVersion = opts.engineVersion;
+    return mod.exportGameUnityProject(destinationPath, unityOpts);
   }
   if (format === 'game-pyodide-html') {
     if (opts.engine !== 'pygame' && opts.engine !== undefined) {

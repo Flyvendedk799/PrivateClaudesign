@@ -30,6 +30,7 @@ const ChooseEngineParams = Type.Object({
     Type.Literal('phaser'),
     Type.Literal('pygame'),
     Type.Literal('godot'),
+    Type.Literal('unity'),
   ]),
   rationale: Type.String({
     description:
@@ -38,7 +39,7 @@ const ChooseEngineParams = Type.Object({
   }),
 });
 
-export type ChooseEngineEngine = 'three' | 'phaser' | 'pygame' | 'godot';
+export type ChooseEngineEngine = 'three' | 'phaser' | 'pygame' | 'godot' | 'unity';
 
 export interface ChooseEngineDetails {
   engine: ChooseEngineEngine;
@@ -66,9 +67,10 @@ export function makeChooseEngineTool(
     description:
       'Pick the game engine for this run AFTER declare_game_spec. ' +
       'Match to the brief: 3D / WebGL / parallax → three; 2D arcade / platformer / top-down / puzzle → phaser; ' +
-      'retro / Python source / generative → pygame; "real RPG" / dialog-heavy / tilemap-heavy → godot. ' +
+      'retro / Python source / generative → pygame; "real RPG" / dialog-heavy / tilemap-heavy → godot; ' +
+      'AAA-target / Steam / open-world / third-person combat → unity (project-download only; live preview deferred). ' +
       'The host validates (genre, dimensions, perspective) against the engine via checkEngineFit; obvious ' +
-      'misfits (e.g. fighting + 3d + pygame) are rejected. The choice is persisted on the next snapshot.',
+      'misfits (e.g. fighting + 3d + pygame, or puzzle + unity) are rejected. The choice is persisted on the next snapshot.',
     parameters: ChooseEngineParams,
     async execute(_toolCallId, params): Promise<AgentToolResult<ChooseEngineDetails>> {
       const engine = params.engine;

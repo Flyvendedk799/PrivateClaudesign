@@ -13,12 +13,14 @@ import { Button } from '@open-codesign/ui';
 import {
   AlertCircle,
   AlertTriangle,
+  Box as BoxIcon,
   Check,
   CheckCircle,
   ChevronDown,
   Cpu,
   DollarSign,
   FolderOpen,
+  Gamepad2,
   Globe,
   Image as ImageIcon,
   Loader2,
@@ -38,7 +40,9 @@ import type {
   ImageGenerationSettingsView,
   Preferences,
   ProviderRow,
+  SteamSettingsView,
   StorageKind,
+  ThreeDAssetSettingsView,
 } from '../../../preload/index';
 import { recordAction } from '../lib/action-timeline';
 import { useCodesignStore } from '../store';
@@ -46,11 +50,22 @@ import { AddCustomProviderModal } from './AddCustomProviderModal';
 import { ChatgptLoginCard } from './ChatgptLoginCard';
 import { DiagnosticsPanel } from './settings/DiagnosticsPanel';
 
-type Tab = 'models' | 'images' | 'appearance' | 'storage' | 'diagnostics' | 'advanced' | 'budgets';
+type Tab =
+  | 'models'
+  | 'images'
+  | 'threed'
+  | 'steam'
+  | 'appearance'
+  | 'storage'
+  | 'diagnostics'
+  | 'advanced'
+  | 'budgets';
 
 const TABS: ReadonlyArray<{ id: Tab; icon: typeof Cpu }> = [
   { id: 'models', icon: Cpu },
   { id: 'images', icon: ImageIcon },
+  { id: 'threed', icon: BoxIcon },
+  { id: 'steam', icon: Gamepad2 },
   { id: 'appearance', icon: Palette },
   { id: 'storage', icon: FolderOpen },
   { id: 'budgets', icon: DollarSign },
@@ -1341,6 +1356,516 @@ function ImageGenerationTab() {
         </p>
       </div>
       <ImageGenerationPanel />
+    </div>
+  );
+}
+
+function ThreeDAssetPanel() {
+  const t = useT();
+  const pushToast = useCodesignStore((s) => s.pushToast);
+  const [settings, setSettings] = useState<ThreeDAssetSettingsView | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+
+  useEffect(() => {
+    if (!window.codesign?.threeDAsset) return;
+    void window.codesign.threeDAsset
+      .get()
+      .then((next) => {
+        setSettings(next);
+        setBaseUrl(next.baseUrl ?? '');
+      })
+      .catch((err) => {
+        pushToast({
+          variant: 'error',
+          title: t('settings.threedAsset.toast.loadFailed'),
+          description: err instanceof Error ? err.message : t('settings.common.unknownError'),
+        });
+      });
+  }, [pushToast, t]);
+
+  async function save(
+    patch: Partial<Omit<ThreeDAssetSettingsView, 'hasKey' | 'maskedKey'>> & { apiKey?: string },
+  ) {
+    if (!window.codesign?.threeDAsset) return;
+    setSaving(true);
+    try {
+      const next = await window.codesign.threeDAsset.update(patch);
+      setSettings(next);
+      setBaseUrl(next.baseUrl ?? '');
+      setApiKey('');
+      pushToast({
+        variant: 'success',
+        title: t('settings.threedAsset.toast.saved'),
+      });
+    } catch (err) {
+      pushToast({
+        variant: 'error',
+        title: t('settings.threedAsset.toast.saveFailed'),
+        description: err instanceof Error ? err.message : t('settings.common.unknownError'),
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (settings === null) {
+    return (
+      <div className="rounded-[var(--radius-md)] border border-[var(--color-border-muted)] bg-[var(--color-surface)] p-[var(--space-4)] text-[var(--text-sm)] text-[var(--color-text-muted)]">
+        {t('settings.common.loading')}
+      </div>
+    );
+  }
+
+  const status: 'ready' | 'needsKey' | 'disabled' = !settings.enabled
+    ? 'disabled'
+    : settings.hasKey
+      ? 'ready'
+      : 'needsKey';
+
+  const statusStyles: Record<typeof status, string> = {
+    ready:
+      'bg-[color-mix(in_oklab,var(--color-success)_14%,transparent)] text-[var(--color-success)] border-[color-mix(in_oklab,var(--color-success)_32%,transparent)]',
+    needsKey:
+      'bg-[color-mix(in_oklab,var(--color-warning)_14%,transparent)] text-[var(--color-warning)] border-[color-mix(in_oklab,var(--color-warning)_32%,transparent)]',
+    disabled:
+      'bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] border-[var(--color-border-muted)]',
+  };
+
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--color-border-muted)] bg-[var(--color-surface)] p-[var(--space-4)] space-y-[var(--space-4)]">
+      <div className="flex items-start justify-between gap-[var(--space-3)]">
+        <div className="min-w-0 flex items-start gap-[var(--space-2)]">
+          <BoxIcon className="w-4 h-4 mt-0.5 text-[var(--color-text-secondary)]" aria-hidden />
+          <div className="min-w-0">
+            <div className="flex items-center gap-[var(--space-2)]">
+              <SectionTitle>{t('settings.threedAsset.title')}</SectionTitle>
+              <span
+                className={`inline-flex items-center h-5 px-1.5 rounded-full border text-[var(--text-xs)] font-medium tracking-wide uppercase ${statusStyles[status]}`}
+              >
+                {t(`settings.threedAsset.status.${status}`)}
+              </span>
+            </div>
+            <p className="text-[var(--text-xs)] text-[var(--color-text-muted)] mt-0.5 leading-[var(--leading-body)]">
+              {t('settings.threedAsset.hint')}
+            </p>
+          </div>
+        </div>
+        <label className="inline-flex items-center gap-[var(--space-2)] shrink-0 text-[var(--text-xs)] text-[var(--color-text-secondary)] select-none">
+          <span>{t('settings.threedAsset.enabled')}</span>
+          <input
+            type="checkbox"
+            checked={settings.enabled}
+            disabled={saving}
+            onChange={(e) => void save({ enabled: e.target.checked })}
+            className="h-4 w-4 accent-[var(--color-accent)]"
+          />
+        </label>
+      </div>
+
+      <Row label={t('settings.threedAsset.provider')}>
+        <NativeSelect
+          value={settings.provider}
+          disabled={saving}
+          options={[
+            { value: 'meshy', label: t('settings.threedAsset.providerMeshy') },
+            { value: 'tripo', label: t('settings.threedAsset.providerTripo') },
+          ]}
+          onChange={(value) =>
+            void save({ provider: value as ThreeDAssetSettingsView['provider'] })
+          }
+        />
+      </Row>
+
+      <div className="space-y-[var(--space-1)]">
+        <Label>{t('settings.threedAsset.apiKey')}</Label>
+        <div className="flex items-center gap-[var(--space-2)]">
+          <input
+            type="password"
+            value={apiKey}
+            disabled={saving}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder={
+              settings.maskedKey
+                ? t('settings.threedAsset.keyPlaceholder', { mask: settings.maskedKey })
+                : t('settings.threedAsset.newKeyPlaceholder')
+            }
+            className="min-w-0 flex-1 h-8 px-3 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-primary)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] disabled:opacity-50"
+          />
+          <button
+            type="button"
+            disabled={saving || apiKey.trim().length === 0}
+            onClick={() => void save({ apiKey })}
+            className="h-8 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {t('common.save')}
+          </button>
+        </div>
+      </div>
+
+      <label className="block min-w-0">
+        <Label>{t('settings.threedAsset.baseUrl')}</Label>
+        <input
+          type="url"
+          value={baseUrl}
+          disabled={saving}
+          onChange={(e) => setBaseUrl(e.target.value)}
+          placeholder={t('settings.threedAsset.baseUrlPlaceholder')}
+          className="mt-1 w-full h-8 px-3 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-primary)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] disabled:opacity-50"
+        />
+      </label>
+
+      <div className="flex justify-end pt-[var(--space-1)] border-t border-[var(--color-border-muted)]">
+        <button
+          type="button"
+          disabled={saving || baseUrl.trim() === (settings.baseUrl ?? '')}
+          onClick={() =>
+            void save({ baseUrl: baseUrl.trim().length === 0 ? null : baseUrl.trim() })
+          }
+          className="h-8 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {t('common.save')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ThreeDAssetTab() {
+  const t = useT();
+  return (
+    <div className="space-y-[var(--space-4)]">
+      <div>
+        <SectionTitle>{t('settings.threedAsset.tabTitle')}</SectionTitle>
+        <p className="text-[var(--text-xs)] text-[var(--color-text-muted)] mt-1 leading-[var(--leading-body)]">
+          {t('settings.threedAsset.tabHint')}
+        </p>
+      </div>
+      <ThreeDAssetPanel />
+    </div>
+  );
+}
+
+function SteamPanel() {
+  const t = useT();
+  const pushToast = useCodesignStore((s) => s.pushToast);
+  const [settings, setSettings] = useState<SteamSettingsView | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [password, setPassword] = useState('');
+  const [appIdInput, setAppIdInput] = useState('');
+  const [depotIdInput, setDepotIdInput] = useState('');
+  const [usernameInput, setUsernameInput] = useState('');
+  const [steamcmdInput, setSteamcmdInput] = useState('');
+  const [descInput, setDescInput] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [guardCode, setGuardCode] = useState('');
+  const [guardModalOpen, setGuardModalOpen] = useState(false);
+  const [lastTestLog, setLastTestLog] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!window.codesign?.steam) return;
+    void window.codesign.steam
+      .get()
+      .then((next) => {
+        setSettings(next);
+        setUsernameInput(next.username ?? '');
+        setAppIdInput(next.appId !== null ? String(next.appId) : '');
+        setDepotIdInput(next.depotId !== null ? String(next.depotId) : '');
+        setSteamcmdInput(next.steamcmdPath ?? '');
+        setDescInput(next.buildDescription ?? '');
+      })
+      .catch((err) => {
+        pushToast({
+          variant: 'error',
+          title: t('settings.steam.toast.loadFailed'),
+          description: err instanceof Error ? err.message : t('settings.common.unknownError'),
+        });
+      });
+  }, [pushToast, t]);
+
+  type SteamUpdatePatch = {
+    enabled?: boolean;
+    username?: string | null;
+    password?: string;
+    appId?: number | null;
+    depotId?: number | null;
+    steamcmdPath?: string | null;
+    buildDescription?: string | null;
+  };
+  async function save(patch: SteamUpdatePatch) {
+    if (!window.codesign?.steam) return;
+    setSaving(true);
+    try {
+      const next = await window.codesign.steam.update(patch);
+      setSettings(next);
+      setUsernameInput(next.username ?? '');
+      setAppIdInput(next.appId !== null ? String(next.appId) : '');
+      setDepotIdInput(next.depotId !== null ? String(next.depotId) : '');
+      setSteamcmdInput(next.steamcmdPath ?? '');
+      setDescInput(next.buildDescription ?? '');
+      setPassword('');
+      pushToast({ variant: 'success', title: t('settings.steam.toast.saved') });
+    } catch (err) {
+      pushToast({
+        variant: 'error',
+        title: t('settings.steam.toast.saveFailed'),
+        description: err instanceof Error ? err.message : t('settings.common.unknownError'),
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function testLogin(code?: string) {
+    if (!window.codesign?.steam) return;
+    setTesting(true);
+    try {
+      const result = await window.codesign.steam.testLogin(code);
+      setLastTestLog(result.log);
+      if (result.ok) {
+        pushToast({ variant: 'success', title: t('settings.steam.testLoginOk') });
+        setGuardModalOpen(false);
+      } else if (/Steam Guard|two-factor/i.test(result.log)) {
+        // Surface the modal to capture a 2FA code.
+        setGuardModalOpen(true);
+      } else {
+        pushToast({
+          variant: 'error',
+          title: t('settings.steam.testLoginFail'),
+          description: result.log.split('\n').slice(-3).join(' '),
+        });
+      }
+    } catch (err) {
+      pushToast({
+        variant: 'error',
+        title: t('settings.steam.toast.testFailed'),
+        description: err instanceof Error ? err.message : t('settings.common.unknownError'),
+      });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  if (settings === null) {
+    return (
+      <div className="rounded-[var(--radius-md)] border border-[var(--color-border-muted)] bg-[var(--color-surface)] p-[var(--space-4)] text-[var(--text-sm)] text-[var(--color-text-muted)]">
+        {t('settings.common.loading')}
+      </div>
+    );
+  }
+
+  const status: 'ready' | 'needsCreds' | 'missingSteamcmd' | 'disabled' = !settings.enabled
+    ? 'disabled'
+    : settings.steamcmdDetectedPath === null && settings.steamcmdPath === null
+      ? 'missingSteamcmd'
+      : !(
+            settings.hasPassword &&
+            settings.username !== null &&
+            settings.appId !== null &&
+            settings.depotId !== null
+          )
+        ? 'needsCreds'
+        : 'ready';
+
+  const statusStyles: Record<typeof status, string> = {
+    ready:
+      'bg-[color-mix(in_oklab,var(--color-success)_14%,transparent)] text-[var(--color-success)] border-[color-mix(in_oklab,var(--color-success)_32%,transparent)]',
+    needsCreds:
+      'bg-[color-mix(in_oklab,var(--color-warning)_14%,transparent)] text-[var(--color-warning)] border-[color-mix(in_oklab,var(--color-warning)_32%,transparent)]',
+    missingSteamcmd:
+      'bg-[color-mix(in_oklab,var(--color-warning)_14%,transparent)] text-[var(--color-warning)] border-[color-mix(in_oklab,var(--color-warning)_32%,transparent)]',
+    disabled:
+      'bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] border-[var(--color-border-muted)]',
+  };
+
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--color-border-muted)] bg-[var(--color-surface)] p-[var(--space-4)] space-y-[var(--space-4)]">
+      <div className="flex items-start justify-between gap-[var(--space-3)]">
+        <div className="min-w-0 flex items-start gap-[var(--space-2)]">
+          <Gamepad2 className="w-4 h-4 mt-0.5 text-[var(--color-text-secondary)]" aria-hidden />
+          <div className="min-w-0">
+            <div className="flex items-center gap-[var(--space-2)]">
+              <SectionTitle>{t('settings.steam.title')}</SectionTitle>
+              <span
+                className={`inline-flex items-center h-5 px-1.5 rounded-full border text-[var(--text-xs)] font-medium tracking-wide uppercase ${statusStyles[status]}`}
+              >
+                {t(`settings.steam.status.${status}`)}
+              </span>
+            </div>
+            <p className="text-[var(--text-xs)] text-[var(--color-text-muted)] mt-0.5 leading-[var(--leading-body)]">
+              {t('settings.steam.hint')}
+            </p>
+          </div>
+        </div>
+        <label className="inline-flex items-center gap-[var(--space-2)] shrink-0 text-[var(--text-xs)] text-[var(--color-text-secondary)] select-none">
+          <span>{t('settings.steam.enabled')}</span>
+          <input
+            type="checkbox"
+            checked={settings.enabled}
+            disabled={saving}
+            onChange={(e) => void save({ enabled: e.target.checked })}
+            className="h-4 w-4 accent-[var(--color-accent)]"
+          />
+        </label>
+      </div>
+
+      {settings.steamcmdDetectedPath === null && settings.steamcmdPath === null ? (
+        <p className="text-[var(--text-xs)] text-[var(--color-warning)] leading-[var(--leading-body)]">
+          {t('settings.steam.steamcmdMissing')}
+        </p>
+      ) : null}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-[var(--space-3)]">
+        <label className="min-w-0">
+          <Label>{t('settings.steam.username')}</Label>
+          <input
+            type="text"
+            value={usernameInput}
+            disabled={saving}
+            onChange={(e) => setUsernameInput(e.target.value)}
+            onBlur={() =>
+              void save({ username: usernameInput.length === 0 ? null : usernameInput })
+            }
+            className="mt-1 w-full h-8 px-3 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-primary)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] disabled:opacity-50"
+          />
+        </label>
+        <label className="min-w-0">
+          <Label>{t('settings.steam.password')}</Label>
+          <input
+            type="password"
+            value={password}
+            disabled={saving}
+            onChange={(e) => setPassword(e.target.value)}
+            onBlur={() => password.length > 0 && void save({ password })}
+            placeholder={
+              settings.passwordMask
+                ? t('settings.steam.passwordPlaceholder', { mask: settings.passwordMask })
+                : t('settings.steam.newPasswordPlaceholder')
+            }
+            className="mt-1 w-full h-8 px-3 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-primary)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] disabled:opacity-50"
+          />
+        </label>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-[var(--space-3)]">
+        <label className="min-w-0">
+          <Label>{t('settings.steam.appId')}</Label>
+          <input
+            type="number"
+            value={appIdInput}
+            disabled={saving}
+            onChange={(e) => setAppIdInput(e.target.value)}
+            onBlur={() => {
+              const n = Number.parseInt(appIdInput, 10);
+              void save({ appId: Number.isFinite(n) && n > 0 ? n : null });
+            }}
+            className="mt-1 w-full h-8 px-3 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-primary)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] disabled:opacity-50"
+          />
+        </label>
+        <label className="min-w-0">
+          <Label>{t('settings.steam.depotId')}</Label>
+          <input
+            type="number"
+            value={depotIdInput}
+            disabled={saving}
+            onChange={(e) => setDepotIdInput(e.target.value)}
+            onBlur={() => {
+              const n = Number.parseInt(depotIdInput, 10);
+              void save({ depotId: Number.isFinite(n) && n > 0 ? n : null });
+            }}
+            className="mt-1 w-full h-8 px-3 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-primary)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] disabled:opacity-50"
+          />
+        </label>
+      </div>
+
+      <label className="block min-w-0">
+        <Label>{t('settings.steam.steamcmdPath')}</Label>
+        <input
+          type="text"
+          value={steamcmdInput}
+          disabled={saving}
+          onChange={(e) => setSteamcmdInput(e.target.value)}
+          onBlur={() =>
+            void save({ steamcmdPath: steamcmdInput.length === 0 ? null : steamcmdInput })
+          }
+          placeholder={
+            settings.steamcmdDetectedPath !== null
+              ? t('settings.steam.steamcmdDetected', { path: settings.steamcmdDetectedPath })
+              : '/usr/local/bin/steamcmd'
+          }
+          className="mt-1 w-full h-8 px-3 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-primary)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] disabled:opacity-50"
+        />
+      </label>
+
+      <label className="block min-w-0">
+        <Label>{t('settings.steam.buildDescription')}</Label>
+        <input
+          type="text"
+          value={descInput}
+          disabled={saving}
+          onChange={(e) => setDescInput(e.target.value)}
+          onBlur={() => void save({ buildDescription: descInput.length === 0 ? null : descInput })}
+          className="mt-1 w-full h-8 px-3 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-primary)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] disabled:opacity-50"
+        />
+      </label>
+
+      {guardModalOpen ? (
+        <div className="rounded-[var(--radius-md)] border border-[var(--color-warning)] bg-[color-mix(in_oklab,var(--color-warning)_8%,transparent)] p-[var(--space-3)] space-y-[var(--space-2)]">
+          <Label>{t('settings.steam.steamGuardPrompt')}</Label>
+          <div className="flex items-center gap-[var(--space-2)]">
+            <input
+              type="text"
+              value={guardCode}
+              onChange={(e) => setGuardCode(e.target.value.toUpperCase())}
+              maxLength={8}
+              className="flex-1 h-8 px-3 rounded-[var(--radius-md)] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-primary)] font-mono"
+            />
+            <button
+              type="button"
+              disabled={testing || guardCode.length === 0}
+              onClick={() => void testLogin(guardCode)}
+              className="h-8 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] transition-colors disabled:opacity-50"
+            >
+              {t('settings.steam.steamGuardConfirm')}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="flex justify-between items-center pt-[var(--space-1)] border-t border-[var(--color-border-muted)]">
+        <span className="text-[var(--text-xs)] text-[var(--color-text-muted)] truncate">
+          {lastTestLog !== null
+            ? lastTestLog
+                .split('\n')
+                .filter((l) => l.length > 0)
+                .slice(-1)[0]
+            : ''}
+        </span>
+        <button
+          type="button"
+          disabled={testing || !settings.enabled || !settings.hasPassword}
+          onClick={() => void testLogin()}
+          className="h-8 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] text-[var(--text-sm)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {t('settings.steam.testLogin')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SteamTab() {
+  const t = useT();
+  return (
+    <div className="space-y-[var(--space-4)]">
+      <div>
+        <SectionTitle>{t('settings.steam.tabTitle')}</SectionTitle>
+        <p className="text-[var(--text-xs)] text-[var(--color-text-muted)] mt-1 leading-[var(--leading-body)]">
+          {t('settings.steam.tabHint')}
+        </p>
+      </div>
+      <SteamPanel />
     </div>
   );
 }
@@ -3053,6 +3578,8 @@ export function Settings() {
         <section className="flex flex-col min-h-0 overflow-y-auto p-[var(--space-6)]">
           {tab === 'models' ? <ModelsTab /> : null}
           {tab === 'images' ? <ImageGenerationTab /> : null}
+          {tab === 'threed' ? <ThreeDAssetTab /> : null}
+          {tab === 'steam' ? <SteamTab /> : null}
           {tab === 'appearance' ? <AppearanceTab /> : null}
           {tab === 'storage' ? <StorageTab /> : null}
           {tab === 'budgets' ? <BudgetsTab /> : null}

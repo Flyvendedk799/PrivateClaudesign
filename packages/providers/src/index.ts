@@ -662,14 +662,16 @@ export type {
 //   completeWithRetry(model, messages, opts, { maxRetries, baseDelayMs })
 //   completeWithPdf(pdfBase64, prompt, opts)
 
-// may9 step 1 — 3D asset providers (Meshy reference impl + fake for tests).
+// may9 step 1 — 3D asset providers (Meshy + Tripo, plus fake for tests).
 export {
   fakeThreeDAssetProvider,
   makeMeshyProvider,
+  makeTripoProvider,
   type MeshyAdapterConfig,
   type ThreeDAssetProvider,
   type ThreeDAssetPurpose,
   type ThreeDAssetRequest,
   type ThreeDAssetResult,
   type ThreeDAssetStyle,
+  type TripoAdapterConfig,
 } from './threed-asset';

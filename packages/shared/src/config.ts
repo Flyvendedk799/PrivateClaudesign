@@ -178,6 +178,26 @@ export const ThreeDAssetSettingsSchema = z.object({
 });
 export type ThreeDAssetSettings = z.infer<typeof ThreeDAssetSettingsSchema>;
 
+// UNITY_PIPELINE.md §U4 — Steam distribution settings. BYOK only;
+// Steam credentials live alongside other secrets in config.toml under
+// the 'steam' block. The renderer's Settings panel reads/writes the
+// view via IPC and never sees the plaintext password.
+export const STEAM_SCHEMA_VERSION = 1 as const;
+export const SteamSettingsSchema = z.object({
+  schemaVersion: z.literal(STEAM_SCHEMA_VERSION),
+  enabled: z.boolean().default(false),
+  username: z.string().min(1).optional(),
+  password: SecretRef.optional(),
+  appId: z.number().int().positive().optional(),
+  depotId: z.number().int().positive().optional(),
+  /** Override the steamcmd path. When undefined, host discovery
+   *  searches PATH + standard install locations. */
+  steamcmdPath: z.string().optional(),
+  /** Free-text build description Steamworks shows in the Builds tab. */
+  buildDescription: z.string().optional(),
+});
+export type SteamSettings = z.infer<typeof SteamSettingsSchema>;
+
 export const ProviderEntrySchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -354,6 +374,7 @@ export const ConfigV3Schema = z.object({
   designSystem: StoredDesignSystem.optional(),
   imageGeneration: ImageGenerationSettingsSchema.optional(),
   threeDAsset: ThreeDAssetSettingsSchema.optional(),
+  steam: SteamSettingsSchema.optional(),
 });
 export type ConfigV3 = z.infer<typeof ConfigV3Schema>;
 
@@ -469,6 +490,7 @@ export function toPersistedV3(cfg: Config | ConfigV3): ConfigV3 {
     ...(cfg.designSystem !== undefined ? { designSystem: cfg.designSystem } : {}),
     ...(cfg.imageGeneration !== undefined ? { imageGeneration: cfg.imageGeneration } : {}),
     ...(cfg.threeDAsset !== undefined ? { threeDAsset: cfg.threeDAsset } : {}),
+    ...(cfg.steam !== undefined ? { steam: cfg.steam } : {}),
   };
 }
 

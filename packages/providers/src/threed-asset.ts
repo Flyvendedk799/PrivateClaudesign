@@ -263,6 +263,166 @@ export function makeMeshyProvider(config: MeshyAdapterConfig): ThreeDAssetProvid
 }
 
 // ---------------------------------------------------------------------
+// Tripo3D adapter
+// ---------------------------------------------------------------------
+//
+// Tripo's text-to-model API at https://platform.tripo3d.ai
+//   POST /v2/openapi/task
+//     body: { type: 'text_to_model', model_version, prompt, style?, ... }
+//     resp: { code: 0, data: { task_id } }
+//   GET  /v2/openapi/task/{task_id}
+//     resp: { code: 0, data: { status, progress, output: { model | pbr_model } } }
+// Auth: Bearer <api-key>. Same `data:base64,…` GLB shape on the way out.
+
+const TRIPO_API_BASE = 'https://api.tripo3d.ai/v2/openapi';
+const TRIPO_DEFAULT_MODEL_VERSION = 'v2.0-20240919';
+const TRIPO_POLL_INTERVAL_MS = 4_000;
+const TRIPO_MAX_POLL_DURATION_MS = 5 * 60_000;
+
+interface TripoTaskCreateResponse {
+  code: number;
+  message?: string;
+  data?: { task_id: string };
+}
+
+interface TripoTaskStatusResponse {
+  code: number;
+  message?: string;
+  data?: {
+    task_id?: string;
+    status?: 'queued' | 'running' | 'success' | 'failed' | 'cancelled' | 'banned';
+    progress?: number;
+    output?: { model?: string; pbr_model?: string; rendered_image?: string };
+    error?: { message?: string };
+    prompt?: string;
+  };
+}
+
+export interface TripoAdapterConfig {
+  apiKey: string;
+  baseUrl?: string;
+  /** Override the model version pin. Tripo bumps these every few months;
+   *  the host can override without redeploying providers. */
+  modelVersion?: string;
+}
+
+export function makeTripoProvider(config: TripoAdapterConfig): ThreeDAssetProvider {
+  const baseUrl = config.baseUrl ?? TRIPO_API_BASE;
+  const modelVersion = config.modelVersion ?? TRIPO_DEFAULT_MODEL_VERSION;
+  const headers = {
+    Authorization: `Bearer ${config.apiKey}`,
+    'Content-Type': 'application/json',
+  };
+  return async (request, signal) => {
+    const started = Date.now();
+    // Tripo's `style` enum is narrower than ours. Map intent in the
+    // prompt prefix when the requested style has no Tripo equivalent.
+    const tripoStyle: string | undefined =
+      request.style === 'low_poly'
+        ? 'lowpoly'
+        : request.style === 'voxel'
+          ? 'voxel'
+          : request.style === 'sculpture'
+            ? undefined
+            : request.style === 'stylized'
+              ? 'cartoon'
+              : undefined;
+    const stylePrefix =
+      request.style === 'sculpture'
+        ? 'high-detail sculpt — '
+        : tripoStyle === undefined && request.style === 'realistic'
+          ? ''
+          : '';
+    const enrichedPrompt = `${stylePrefix}${request.prompt}`;
+
+    // Step 1: create text_to_model task.
+    const createBody: Record<string, unknown> = {
+      type: 'text_to_model',
+      model_version: modelVersion,
+      prompt: enrichedPrompt,
+      ...(tripoStyle !== undefined ? { style: tripoStyle } : {}),
+      // Tripo returns PBR textures on `pbr_model`; flag it on by default
+      // so we get the higher-quality output. Caller can opt out.
+      texture: request.pbrTextures !== false,
+      pbr: request.pbrTextures !== false,
+    };
+    const createResp = await fetch(`${baseUrl}/task`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(createBody),
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    if (!createResp.ok) {
+      throw new Error(
+        `Tripo text-to-model create failed: ${createResp.status} ${createResp.statusText}`,
+      );
+    }
+    const createJson = (await createResp.json()) as TripoTaskCreateResponse;
+    if (createJson.code !== 0 || createJson.data?.task_id === undefined) {
+      throw new Error(
+        `Tripo text-to-model create returned non-zero code: ${createJson.code} ${createJson.message ?? ''}`.trim(),
+      );
+    }
+    const taskId = createJson.data.task_id;
+
+    // Step 2: poll.
+    const pollDeadline = started + TRIPO_MAX_POLL_DURATION_MS;
+    let task: TripoTaskStatusResponse['data'] | null = null;
+    while (Date.now() < pollDeadline) {
+      if (signal?.aborted) throw new Error('Tripo text-to-model aborted by caller');
+      await new Promise((r) => setTimeout(r, TRIPO_POLL_INTERVAL_MS));
+      const statusResp = await fetch(`${baseUrl}/task/${taskId}`, {
+        method: 'GET',
+        headers,
+        ...(signal !== undefined ? { signal } : {}),
+      });
+      if (!statusResp.ok) continue;
+      const json = (await statusResp.json()) as TripoTaskStatusResponse;
+      if (json.code !== 0) continue;
+      task = json.data ?? null;
+      const status = task?.status;
+      if (
+        status === 'success' ||
+        status === 'failed' ||
+        status === 'cancelled' ||
+        status === 'banned'
+      ) {
+        break;
+      }
+    }
+
+    if (task === null) throw new Error('Tripo text-to-model timed out before any status response');
+    if (task.status !== 'success') {
+      const errMsg = task.error?.message ?? task.status ?? 'unknown';
+      throw new Error(`Tripo text-to-model ${task.status ?? 'unknown'}: ${errMsg}`);
+    }
+    const glbUrl = task.output?.pbr_model ?? task.output?.model;
+    if (typeof glbUrl !== 'string' || glbUrl.length === 0) {
+      throw new Error('Tripo text-to-model success but no output.model URL returned');
+    }
+
+    // Step 3: download.
+    const glbResp = await fetch(glbUrl, signal !== undefined ? { signal } : {});
+    if (!glbResp.ok) {
+      throw new Error(`Tripo GLB download failed: ${glbResp.status} ${glbResp.statusText}`);
+    }
+    const glbBytes = new Uint8Array(await glbResp.arrayBuffer());
+    const base64 = bytesToBase64(glbBytes);
+    return {
+      path: `assets/models/${slugify(request.prompt)}.glb`,
+      dataUrl: `data:base64,${base64}`,
+      mimeType: 'model/gltf-binary',
+      provider: 'tripo',
+      model: modelVersion,
+      ...(typeof task.prompt === 'string' && task.prompt !== enrichedPrompt
+        ? { revisedPrompt: task.prompt }
+        : {}),
+      generationMs: Date.now() - started,
+    };
+  };
+}
+
+// ---------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------
 
