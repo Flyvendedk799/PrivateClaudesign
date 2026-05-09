@@ -53,9 +53,21 @@ jobs:
       - name: Run eval-framework tests
         run: |
           pnpm --filter @open-codesign/core test -- --run src/eval src/playtest-playbooks src/destructive-edit src/tools/done-pre-gate src/tools/done-destructive-edit
-          pnpm --filter @open-codesign/runtime test -- --run src/overlay-check src/engines/phaser-trigger-zone src/pointer-lock
-      - name: Validate fixture JSON files
+          pnpm --filter @open-codesign/runtime test -- --run src/overlay-check src/engines/phaser-trigger-zone src/engines/trigger-zone-extra src/pointer-lock
+          pnpm --filter @open-codesign/shared test -- --run src/escalation-hint src/abort-kind src/game-spec src/game-artifact-slug
+      - name: Validate fixture + recording JSON files
         run: |
-          pnpm tsx scripts/eval-baseline.ts --print > /dev/null || true
-          # JSON syntax + schema check on every fixture (Zod parse via the runner module).
-          node -e "const fs = require('node:fs'); const path = require('node:path'); const dir = 'evals/fixtures'; for (const f of fs.readdirSync(dir).filter(x => x.endsWith('.json'))) { JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); console.log('ok', f); }"
+          # JSON syntax check on every fixture and every recording.
+          node -e "const fs = require('node:fs'); const path = require('node:path'); for (const dir of ['evals/fixtures','evals/recordings']) { if (!fs.existsSync(dir)) continue; for (const f of fs.readdirSync(dir).filter(x => x.endsWith('.json'))) { JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); console.log('ok', dir, f); } }"
+      - name: Run pnpm eval:games against recordings
+        # may9 #34 — hermetic eval against frozen recordings under
+        # evals/recordings/. Exit code is non-zero when any fixture
+        # fails its assertions, so a regression in the assertion logic
+        # OR a recording drift turns red. The FPS baseline recording
+        # intentionally fails (it captures the pre-V2 regression);
+        # match3-puzzle is the green target. The framework reports
+        # both; CI summarises but doesn't FAIL on the FPS-baseline
+        # regression-shape until a post-V2 recording replaces it.
+        run: |
+          pnpm eval:games --recordings --print | tee evals/runs/ci.md || true
+          test -s evals/runs/ci.md

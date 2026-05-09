@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "fixtureSlug": "match3-puzzle-phaser",
+  "capturedAt": "2026-05-09T00:00:00.000Z",
+  "observation": {
+    "engine": "phaser",
+    "genre": "puzzle",
+    "inputTokens": 420000,
+    "outputTokens": 18000,
+    "cachedInputTokens": 320000,
+    "toolCounts": {
+      "str_replace_based_edit_tool": 28,
+      "set_todos": 2,
+      "verify_artifact": 4,
+      "done": 1,
+      "list_files": 1,
+      "validate_game_scene": 1,
+      "playtest_game": 1,
+      "generate_audio_asset": 2,
+      "choose_engine": 1,
+      "declare_game_spec": 1,
+      "get_playtest_playbook": 1
+    },
+    "strReplaceFailures": 1,
+    "filePaths": ["index.html", "src/main.js", "assets/audio/click.wav", "assets/audio/coin.wav"],
+    "snapshotCount": 1,
+    "correctionCount": 0
+  },
+  "notes": "Synthesised post-V2 ideal run for the match-3 fixture. Demonstrates the green target: every Phase 9b cap holds (set_todos=2 ≤ 6, render_preview=0, corrections=0 ≤ 1, str_replace failure rate ~3.6% ≤ 5%, validate + playtest both ≥ 1). Once a real V2 run is captured this file gets replaced; until then it serves as a CI fixture for the assertion logic itself."
+}

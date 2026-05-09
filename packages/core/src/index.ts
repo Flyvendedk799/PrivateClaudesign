@@ -44,10 +44,18 @@ export {
   EvalAssertion,
   EvalEngine,
   EvalFixture,
+  RECORDING_SCHEMA_VERSION,
+  emptyRecording,
   evaluateFixture,
+  parseEvalRecording,
   renderEvalReport,
 } from './eval/index.js';
-export type { EvalReport, EvalResult, RunObservation } from './eval/index.js';
+export type {
+  EvalRecording,
+  EvalReport,
+  EvalResult,
+  RunObservation,
+} from './eval/index.js';
 export {
   buildContinuationPrompt,
   CONTINUATION_THRESHOLDS,

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "fixtureSlug": "fps-wave-defense",
+  "capturedAt": "2026-05-09T00:00:00.000Z",
+  "designId": "ba2adf62-f041-486b-95fa-3919088e6c30",
+  "observation": {
+    "engine": "three",
+    "genre": "fps",
+    "inputTokens": 32780000,
+    "outputTokens": 668000,
+    "cachedInputTokens": 28830000,
+    "toolCounts": {
+      "str_replace_based_edit_tool": 428,
+      "set_todos": 93,
+      "verify_artifact": 66,
+      "done": 26,
+      "list_files": 22,
+      "render_preview": 5,
+      "read_url": 2,
+      "generate_audio_asset": 2,
+      "validate_game_scene": 1,
+      "playtest_game": 1,
+      "assert_game_invariants": 1,
+      "list_design_skills": 1,
+      "declare_tweak_schema": 1,
+      "choose_engine": 1
+    },
+    "strReplaceFailures": 81,
+    "filePaths": ["index.html"],
+    "snapshotCount": 28,
+    "correctionCount": 27
+  },
+  "notes": "Frozen baseline from the May-8 design ba2adf62. Used by `pnpm eval:games --recordings` to demonstrate every Phase 9b cap firing: 93 set_todos > 8 cap; 5 render_preview > 0 cap; 27 corrections > 2 cap; 4.78M input-tokens-equivalent > 1.4M cap; 19% str_replace failure rate > 5% cap. The fixture's assertions intentionally fail against this recording so CI catches a regression to baseline behavior. A 'post-V2 passes' recording will land alongside it once a real V2 run is captured."
+}

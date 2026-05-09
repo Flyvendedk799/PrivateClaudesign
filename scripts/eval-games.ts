@@ -21,16 +21,18 @@
  * Re-run after rebuilding better-sqlite3 native bindings:
  *   pnpm rebuild better-sqlite3
  */
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   EvalFixture,
+  type EvalRecording,
   type EvalReport,
   type EvalResult,
   type RunObservation,
   evaluateFixture,
+  parseEvalRecording,
   renderEvalReport,
 } from '@open-codesign/core';
 import Database from 'better-sqlite3';
@@ -40,6 +42,13 @@ const REPO_ROOT = resolve(SCRIPT_DIR, '..');
 const DB_PATH = join(homedir(), 'Library/Application Support/@open-codesign/desktop/designs.db');
 const FIXTURES_DIR = join(REPO_ROOT, 'evals/fixtures');
 const RUNS_DIR = join(REPO_ROOT, 'evals/runs');
+const RECORDINGS_DIR = join(REPO_ROOT, 'evals/recordings');
+
+function loadRecordingForSlug(slug: string): EvalRecording | null {
+  const path = join(RECORDINGS_DIR, `${slug}.json`);
+  if (!existsSync(path)) return null;
+  return parseEvalRecording(JSON.parse(readFileSync(path, 'utf8')));
+}
 
 interface DesignRow {
   id: string;
@@ -206,6 +215,11 @@ function main(): void {
   const print = args.has('--print');
   const json = args.has('--json');
   const baselineOnly = args.has('--baseline-only');
+  // may9 #34 — recordings-only mode runs the eval framework against
+  // captured observations under evals/recordings/ instead of the
+  // local designs.db. Hermetic; CI-runnable; no API key + no native
+  // bindings dependency.
+  const recordingsOnly = args.has('--recordings');
 
   const fixtures = loadFixtures();
   if (fixtures.length === 0) {
@@ -213,20 +227,39 @@ function main(): void {
     process.exit(1);
   }
 
-  let db: Database.Database;
-  try {
-    db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
-  } catch (err) {
-    process.stderr.write(
-      `Failed to open designs.db at ${DB_PATH}: ${err instanceof Error ? err.message : String(err)}\nRun the app at least once to seed it, or pass --print on a machine without the DB to dry-run with empty observations.\n`,
-    );
-    process.exit(2);
-    return;
+  let db: Database.Database | null = null;
+  if (!recordingsOnly) {
+    try {
+      db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+    } catch (err) {
+      process.stderr.write(
+        `Failed to open designs.db at ${DB_PATH}: ${err instanceof Error ? err.message : String(err)}\nRun the app at least once to seed it, or pass --recordings to evaluate against frozen JSON observations under evals/recordings/.\n`,
+      );
+      process.exit(2);
+      return;
+    }
   }
 
   const results: EvalResult[] = [];
   for (const fx of fixtures) {
     const start = Date.now();
+    // First try a recording (hermetic + cheap). When --recordings is
+    // explicit, this is the ONLY source — no SQL fallback.
+    const recording = loadRecordingForSlug(fx.slug);
+    if (recording !== null) {
+      results.push(evaluateFixture(fx, recording.observation, Date.now() - start));
+      continue;
+    }
+    if (recordingsOnly) {
+      const result = evaluateFixture(fx, undefined, Date.now() - start);
+      result.failures.unshift(
+        `(no recording at evals/recordings/${fx.slug}.json — record one or remove --recordings)`,
+      );
+      result.pass = false;
+      results.push(result);
+      continue;
+    }
+    if (db === null) continue;
     const design = findMatchingDesign(db, fx);
     if (design === null) {
       if (baselineOnly) continue;

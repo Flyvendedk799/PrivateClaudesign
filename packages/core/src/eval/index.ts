@@ -18,3 +18,5 @@ export type { EvalReport, EvalResult } from './fixture.js';
 export { evaluateFixture } from './runner.js';
 export type { RunObservation } from './runner.js';
 export { renderEvalReport } from './report.js';
+export { RECORDING_SCHEMA_VERSION, emptyRecording, parseEvalRecording } from './recording.js';
+export type { EvalRecording } from './recording.js';
