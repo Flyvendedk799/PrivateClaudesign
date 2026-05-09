@@ -50,6 +50,14 @@ const VALID_KINDS: ChatMessageKind[] = [
   'continuation_pending',
 ];
 
+/** may9 Phase 15 #29 — exhaustiveness-test escape hatch. The runtime
+ *  array stays a private const so production callers cannot mutate it;
+ *  the test imports this getter to compare against ChatMessageKind.options
+ *  per the lockstep rule documented in the project memory. */
+export function _getValidKindsForTests(): readonly ChatMessageKind[] {
+  return VALID_KINDS;
+}
+
 function requireSchemaV1(r: Record<string, unknown>, channel: string): void {
   if (r['schemaVersion'] !== 1) {
     throw new CodesignError(`${channel} requires schemaVersion: 1`, ERROR_CODES.IPC_BAD_INPUT);
