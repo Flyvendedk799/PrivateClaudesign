@@ -146,6 +146,13 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
   const activeModelLine =
     config?.hasKey && config.modelPrimary ? config.modelPrimary : t('sidebar.chat.noModel');
   const lastTokens = lastUsage ? lastUsage.inputTokens + lastUsage.outputTokens : null;
+  // may9 follow-up #36 — cache hit rate from the latest run.
+  // cachedInputTokens / inputTokens; null when no run has landed
+  // yet OR the input was zero (degenerate, but skip the divide).
+  const cacheHitRate =
+    lastUsage !== null && lastUsage.inputTokens > 0
+      ? lastUsage.cachedInputTokens / lastUsage.inputTokens
+      : null;
 
   // may9 Phase 13 follow-up #35 — compute the escalation hint from
   // recent error rows in the chat. The selector reads chat_messages
@@ -451,6 +458,11 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
             >
               {lastTokens !== null ? (
                 <span>{t('sidebar.chat.tokensLine', { count: lastTokens })}</span>
+              ) : null}
+              {cacheHitRate !== null ? (
+                <span title="Cache hit rate on the last run (cached_input_tokens / input_tokens). Higher is cheaper.">
+                  {`cache ${(cacheHitRate * 100).toFixed(0)}%`}
+                </span>
               ) : null}
               {designCostUsd !== null ? (
                 <span title={t('sidebar.chat.designCostTooltip', { runs: designCostUsd.runs })}>
