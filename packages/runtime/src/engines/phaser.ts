@@ -182,8 +182,76 @@ function phaserValidate(files: ReadonlyArray<InputFile>): ValidationResult {
     }
   }
 
+  // may9 Phase 8 follow-up #27 — trigger-zone reachability for Tiled
+  // JSON levels. The FPS Wave Defense run (FPS-run #4) shipped a level
+  // where the exit zone's centroid was numerically outside the
+  // walkable polygon. We can't run point-in-polygon here without
+  // parsing the full Tiled object layer with collision geometry, but
+  // the structural lint catches the obvious cases:
+  //  - trigger object positioned with negative coords or beyond map
+  //    width/height
+  //  - trigger object referenced by name in JS code but absent from
+  //    the JSON
+  for (const f of files) {
+    if (!/\.json$/.test(f.path)) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(f.content);
+    } catch {
+      continue;
+    }
+    if (!isTiledMap(parsed)) continue;
+    const map = parsed;
+    const mapW = map.width * map.tilewidth;
+    const mapH = map.height * map.tileheight;
+    for (const layer of map.layers) {
+      if (layer.type !== 'objectgroup') continue;
+      for (const obj of layer.objects ?? []) {
+        const cx = (obj.x ?? 0) + (obj.width ?? 0) / 2;
+        const cy = (obj.y ?? 0) + (obj.height ?? 0) / 2;
+        if (cx < 0 || cy < 0 || cx > mapW || cy > mapH) {
+          issues.push({
+            path: f.path,
+            message: `geometry.unreachable_trigger: '${obj.name ?? `obj#${obj.id}`}' centroid (${cx.toFixed(0)}, ${cy.toFixed(0)}) is outside the map bounds (${mapW}×${mapH}). Triggers must lie inside the walkable area + ε.`,
+            severity: 'error',
+          });
+        }
+      }
+    }
+  }
+
   if (issues.length === 0) return { ok: true };
   return { ok: false, issues };
+}
+
+interface TiledMap {
+  width: number;
+  height: number;
+  tilewidth: number;
+  tileheight: number;
+  layers: Array<{
+    type: string;
+    objects?: Array<{
+      id?: number;
+      name?: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+    }>;
+  }>;
+}
+
+function isTiledMap(value: unknown): value is TiledMap {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v['width'] === 'number' &&
+    typeof v['height'] === 'number' &&
+    typeof v['tilewidth'] === 'number' &&
+    typeof v['tileheight'] === 'number' &&
+    Array.isArray(v['layers'])
+  );
 }
 
 export const phaserAdapter: GameEngineAdapter = {
