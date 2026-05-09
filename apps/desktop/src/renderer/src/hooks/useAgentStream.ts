@@ -664,6 +664,41 @@ export function useAgentStream(): void {
       }
     };
 
+    /** v7 — auto-continue checkpoint pauses (wall_clock / output_budget /
+     *  context_threshold) when the user has the preference enabled. The
+     *  main process emits this event right after persisting the
+     *  `continuation_pending` row for one of those reasons. We consult
+     *  the persisted preference (read fresh, not cached, so flipping the
+     *  toggle takes effect on the next checkpoint without a reload),
+     *  then schedule `continueRun` after a short delay so the closing
+     *  `agent_end` has cleared `isGenerating`. continueRun itself
+     *  short-circuits if `isGenerating` is still true. */
+    const handleAutoContinue = (event: AgentStreamEvent) => {
+      const api = window.codesign;
+      if (!api?.preferences?.get) return;
+      void api.preferences
+        .get()
+        .then((prefs) => {
+          if (prefs.autoContinueEnabled !== true) return;
+          // Defer so the agent_end handler that follows this event has
+          // cleared isGenerating + chunkProgress before continueRun
+          // checks them. 600ms is comfortable headroom over the
+          // tryAutoPolish 1200ms timer (which would otherwise fire its
+          // own follow-up prompt and conflict with us).
+          setTimeout(() => {
+            const s = useCodesignStore.getState();
+            if (s.currentDesignId !== event.designId) return;
+            if (s.isGenerating) return;
+            void s.continueRun();
+          }, 600);
+        })
+        .catch(() => {
+          /* non-fatal — auto-continue is a convenience layer, not a
+           *  correctness requirement. The renderer's continuation_pending
+           *  card still offers a Continue button. */
+        });
+    };
+
     const handleError = (event: AgentStreamEvent) => {
       const current = inFlight.current;
       // TODO: replace with rendererLogger once renderer-logger lands
@@ -857,6 +892,9 @@ export function useAgentStream(): void {
           return;
         case 'heartbeat':
           handleHeartbeat(event);
+          return;
+        case 'auto_continue':
+          handleAutoContinue(event);
           return;
         case 'error':
           handleError(event);

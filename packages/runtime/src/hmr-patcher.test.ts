@@ -11,7 +11,6 @@ function loadPatcher(): void {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  // biome-ignore lint/performance/noDelete: required to reset patcher idempotency
   delete (window as { [HMR_PATCHER_MARKER]?: unknown })[HMR_PATCHER_MARKER];
   document.body.innerHTML = '';
   document.head.innerHTML = '';

@@ -2100,7 +2100,7 @@ function registerIpcHandlers(db: Database | null): void {
     );
     const recap = buildAbortContinuationRecap(params.db, params.designId);
     const outputTokens = params.outputTokensOverride ?? 0;
-    persistContinuationRowOnce(
+    const outcome = persistContinuationRowOnce(
       continuationRowsWritten,
       logIpc,
       {
@@ -2130,6 +2130,27 @@ function registerIpcHandlers(db: Database | null): void {
         });
       },
     );
+    // v7 — runtime checkpoint pauses (wall_clock / output_budget /
+    // context_threshold) are not "the model is done" signals — they're
+    // budget cuts the runtime imposed. When the user has auto-continue
+    // enabled, hand the resume off to the renderer's continueRun path
+    // so the run keeps going until the model itself emits done /
+    // pause_for_continuation (model_requested) or hits an error.
+    // model_requested + manual + unplanned_abort intentionally do not
+    // auto-resume.
+    if (
+      outcome === 'wrote' &&
+      (params.reason === 'wall_clock' ||
+        params.reason === 'output_budget' ||
+        params.reason === 'context_threshold')
+    ) {
+      mainWindow?.webContents.send('agent:event:v1', {
+        type: 'auto_continue',
+        designId: params.designId,
+        generationId: params.id,
+        continuationReason: params.reason,
+      });
+    }
   };
 
   /** Promise-level dedup so an accidental double-IPC of the same generation

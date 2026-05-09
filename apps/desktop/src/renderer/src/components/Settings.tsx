@@ -3352,6 +3352,7 @@ function AdvancedTab() {
     diagnosticsLastReadTs: 0,
     lastPickedMode: 'design',
     incrementalVerifyDisabled: false,
+    autoContinueEnabled: true,
   });
 
   useEffect(() => {
@@ -3452,6 +3453,18 @@ function AdvancedTab() {
           type="checkbox"
           checked={prefs.incrementalVerifyDisabled !== true}
           onChange={(e) => void updatePref({ incrementalVerifyDisabled: !e.target.checked })}
+          className="h-4 w-4 accent-[var(--color-accent)]"
+        />
+      </Row>
+
+      <Row
+        label="Auto-continue on checkpoint pause"
+        hint="When ON (default), runs that pause for a runtime checkpoint (10-min wall clock, 50k output tokens, or 80% context) auto-resume so the task keeps going until the model itself emits done. Turn off to require a manual Continue click after every checkpoint."
+      >
+        <input
+          type="checkbox"
+          checked={prefs.autoContinueEnabled !== false}
+          onChange={(e) => void updatePref({ autoContinueEnabled: e.target.checked })}
           className="h-4 w-4 accent-[var(--color-accent)]"
         />
       </Row>

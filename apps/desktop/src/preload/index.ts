@@ -137,6 +137,11 @@ export interface Preferences {
   lastPickedMode: 'design' | 'game' | 'motion';
   /** Improver1 §6 — opt-out of mid-run auto-verify. Default false (ON). */
   incrementalVerifyDisabled: boolean;
+  /** v7 — auto-resume after runtime checkpoint pauses (wall_clock /
+   *  output_budget / context_threshold) so a long task keeps going
+   *  until the model itself emits done / pause_for_continuation
+   *  (model_requested) or hits an error. Default true. */
+  autoContinueEnabled: boolean;
 }
 
 /**
@@ -178,6 +183,14 @@ export interface AgentStreamEvent {
     | 'chunk_end'
     | 'agent_end'
     | 'heartbeat'
+    // v7 — fired right after a `continuation_pending` row is written
+    // for a checkpoint reason (wall_clock / output_budget /
+    // context_threshold). The renderer consults the
+    // `autoContinueEnabled` preference and, when true, calls
+    // `continueRun()` automatically so a long task keeps going until
+    // the model itself emits done / pause_for_continuation
+    // (model_requested) or hits an error.
+    | 'auto_continue'
     | 'error';
   designId: string;
   /** Trace ID linking this event to the main-process generation log entry.
@@ -242,6 +255,16 @@ export interface AgentStreamEvent {
   // error
   message?: string;
   code?: string;
+  // auto_continue — which checkpoint fired (so the renderer can choose to
+  // toast / log differently per reason). The renderer ignores all reasons
+  // except wall_clock / output_budget / context_threshold; main only emits
+  // those, but the field is typed broadly to match the source enum.
+  continuationReason?:
+    | 'context_threshold'
+    | 'output_budget'
+    | 'wall_clock'
+    | 'model_requested'
+    | 'manual';
 }
 
 const api = {

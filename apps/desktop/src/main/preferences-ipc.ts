@@ -17,7 +17,7 @@ import { getLogger } from './logger';
 
 const logger = getLogger('preferences-ipc');
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 // v1 → v2: raise the abandoned 120s timeout default (which aborted real
 // agentic runs mid-loop) to 600s. Values that happen to equal the old
 // default are treated as unmigrated defaults, not user intent.
@@ -64,6 +64,14 @@ export interface Preferences {
    *  internal logic still runs but the IPC handler stops passing
    *  `incrementalVerify: true`. */
   incrementalVerifyDisabled: boolean;
+  /** v7 — when true and the agent emits a checkpoint pause
+   *  (continuation_pending with reason=wall_clock | output_budget |
+   *  context_threshold), the main process auto-fires the same
+   *  continueRun path the renderer uses, so a long task keeps going
+   *  until the model itself emits `done` / `pause_for_continuation`
+   *  (model_requested) or hits an error. Default true. Model-requested
+   *  and manual pauses always stop, regardless of this flag. */
+  autoContinueEnabled: boolean;
 }
 
 interface PreferencesFile extends Preferences {
@@ -83,6 +91,7 @@ const DEFAULTS: Preferences = {
   diagnosticsLastReadTs: 0,
   lastPickedMode: 'design',
   incrementalVerifyDisabled: false,
+  autoContinueEnabled: true,
 };
 
 /** Deterministic parse of the on-disk preferences file. No clock reads: the
@@ -130,6 +139,10 @@ function parsePersistedFile(parsed: Partial<PreferencesFile>): Preferences {
       typeof parsed.incrementalVerifyDisabled === 'boolean'
         ? parsed.incrementalVerifyDisabled
         : DEFAULTS.incrementalVerifyDisabled,
+    autoContinueEnabled:
+      typeof parsed.autoContinueEnabled === 'boolean'
+        ? parsed.autoContinueEnabled
+        : DEFAULTS.autoContinueEnabled,
   };
 }
 
@@ -243,6 +256,12 @@ function parsePreferences(raw: unknown): Partial<Preferences> {
       );
     }
     out.diagnosticsLastReadTs = r['diagnosticsLastReadTs'];
+  }
+  if (r['autoContinueEnabled'] !== undefined) {
+    if (typeof r['autoContinueEnabled'] !== 'boolean') {
+      throw new CodesignError('autoContinueEnabled must be a boolean', ERROR_CODES.IPC_BAD_INPUT);
+    }
+    out.autoContinueEnabled = r['autoContinueEnabled'];
   }
   return out;
 }
