@@ -1,10 +1,18 @@
 import { useT } from '@open-codesign/i18n';
-import type { DesignSnapshot, LocalInputFile, OnboardingState } from '@open-codesign/shared';
-import { summarizeSnapshotDiff } from '@open-codesign/shared';
+import {
+  type DesignSnapshot,
+  type EscalationSignal,
+  type LocalInputFile,
+  type OnboardingState,
+  classifyAbortKind,
+  selectEscalationHint,
+  summarizeSnapshotDiff,
+} from '@open-codesign/shared';
 import { FolderOpen, Link2, MessageSquare, MessageSquarePlus, Paperclip, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgentStream } from '../hooks/useAgentStream';
 import { useCodesignStore } from '../store';
+import { EscalationHint } from './EscalationHint';
 import { ModelSwitcher } from './ModelSwitcher';
 import { AddMenu } from './chat/AddMenu';
 import { ChatMessageList } from './chat/ChatMessageList';
@@ -138,6 +146,35 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
   const activeModelLine =
     config?.hasKey && config.modelPrimary ? config.modelPrimary : t('sidebar.chat.noModel');
   const lastTokens = lastUsage ? lastUsage.inputTokens + lastUsage.outputTokens : null;
+
+  // may9 Phase 13 follow-up #35 — compute the escalation hint from
+  // recent error rows in the chat. The selector reads chat_messages
+  // kind='error' rows with model context, classifies via
+  // classifyAbortKind, and considers only failures (not paused or
+  // user_aborted). The active model is the config primary; opus has
+  // no further escalation so the selector returns null there.
+  const escalationHint = useMemo(() => {
+    if (!config?.hasKey || !config.modelPrimary) return null;
+    const signals: EscalationSignal[] = [];
+    for (const msg of chatMessages) {
+      if (msg.kind !== 'error') continue;
+      const p = msg.payload as { message?: string; model?: string; modelId?: string } | null;
+      if (p === null) continue;
+      const message = p.message ?? '';
+      const kind = classifyAbortKind(message);
+      // Only count "real" failures — skip user-initiated aborts and
+      // paused-at-safe-boundary which are routine.
+      if (kind === 'paused_safe_boundary' || kind === 'user_aborted') continue;
+      const modelId = p.modelId ?? p.model ?? config.modelPrimary;
+      signals.push({
+        modelId,
+        at: msg.createdAt ?? new Date().toISOString(),
+        kind: kind === 'overloaded' ? 'overloaded' : 'failed',
+      });
+    }
+    return selectEscalationHint(signals, config.modelPrimary);
+  }, [chatMessages, config?.hasKey, config?.modelPrimary]);
+  const openSettingsTab = useCodesignStore((s) => s.openSettingsTab);
 
   // Sequence-7 (game-mode guardrails) — load snapshots for the current
   // design so we can compute per-snapshot "what changed" diff lines and
@@ -325,6 +362,12 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
         {/* Skill chips + prompt input + model/tokens line */}
         <div className="border-t border-[var(--color-border-subtle)] px-[var(--space-4)] pt-[var(--space-3)] pb-[var(--space-3)] space-y-[10px] bg-[var(--color-background-secondary)]">
           <CommentChipBar />
+          {escalationHint !== null ? (
+            <EscalationHint
+              hint={escalationHint}
+              onOpenSettings={() => openSettingsTab('models')}
+            />
+          ) : null}
           <PromptInput
             ref={promptInputRef}
             prompt={prompt}
