@@ -531,6 +531,13 @@ export { classifyAbortKind, isNeutralAbort, suggestsTokenReimport } from './abor
 export type { AbortKind } from './abort-kind';
 
 export {
+  ESCALATION_MIN_FAILURES,
+  ESCALATION_WINDOW_MS,
+  selectEscalationHint,
+} from './escalation-hint';
+export type { EscalationHint, EscalationKind, EscalationSignal } from './escalation-hint';
+
+export {
   CHAT_MESSAGE_SCHEMA_VERSION,
   ChatMessageKind,
   ChatMessageRowV1,
