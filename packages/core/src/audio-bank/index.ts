@@ -52,23 +52,48 @@ export interface AudioBankMatch {
   score: number;
 }
 
-let cachedManifest: AudioBankManifest | null = null;
+// may9 step 1.5 fix (Defect Q) — Electron's main bundle inlines this
+// module into apps/desktop/out/main/index.js, so import.meta.url no
+// longer points at packages/core/src/audio-bank where manifest.json
+// + the *.wav samples actually live. The third-person combat run
+// (designId 25e276e2…) recorded `ENOENT: no such file or directory,
+// open '<repo>/apps/desktop/out/main/manifest.json'` four times in
+// 2026-05-09 main.log; the agent gave up on audio generation entirely.
+//
+// Fix: cache the manifest per-directory and let the HOST inject the
+// audio-bank dir explicitly via apps/desktop/src/main when constructing
+// the tool. The import.meta.url fallback stays for in-package tests
+// and for the unit tests that don't go through the host.
+const manifestCache = new Map<string, AudioBankManifest>();
 
-/** Default loader — reads `manifest.json` from the bundled directory.
- *  Tests pass a stub instead. */
-export async function loadAudioBankManifest(): Promise<AudioBankManifest> {
-  if (cachedManifest !== null) return cachedManifest;
-  const here = dirname(fileURLToPath(import.meta.url));
+/** Resolve the audio-bank dir to use. When the caller passes one
+ *  (production path), trust it. Otherwise fall back to the
+ *  import.meta.url-relative resolution that works in unit tests + the
+ *  in-package dev mode. */
+function resolveBankDir(injectedDir?: string): string {
+  if (injectedDir !== undefined && injectedDir.length > 0) return injectedDir;
+  return dirname(fileURLToPath(import.meta.url));
+}
+
+/** Default loader — reads `manifest.json` from the resolved bank dir.
+ *  `bankDir` overrides the import.meta.url fallback so the host can
+ *  point at the real source path post-bundle. Tests pass a stub
+ *  instead. */
+export async function loadAudioBankManifest(bankDir?: string): Promise<AudioBankManifest> {
+  const here = resolveBankDir(bankDir);
+  const cached = manifestCache.get(here);
+  if (cached !== undefined) return cached;
   const path = join(here, 'manifest.json');
   const raw = await readFile(path, 'utf8');
   const parsed = JSON.parse(raw) as AudioBankManifest;
-  cachedManifest = parsed;
+  manifestCache.set(here, parsed);
   return parsed;
 }
 
-/** Test-only — drop the cached manifest so the next load re-reads disk. */
+/** Test-only — drop the cached manifests so the next load re-reads
+ *  disk for every dir. */
 export function _resetAudioBankCache(): void {
-  cachedManifest = null;
+  manifestCache.clear();
 }
 
 /** Tokenize a free-text prompt: lowercase, strip punctuation, drop short
@@ -151,9 +176,14 @@ export function pickBestMatch(
 }
 
 /** Read an audio entry's bytes off disk and base64-encode them for
- *  insertion into the design's virtual FS as a `data:base64,…` sentinel. */
-export async function readAudioEntryBytes(entry: AudioBankEntry): Promise<Buffer> {
-  const here = dirname(fileURLToPath(import.meta.url));
+ *  insertion into the design's virtual FS as a `data:base64,…` sentinel.
+ *  `bankDir` MUST be the same dir loadAudioBankManifest used so the
+ *  entry.path resolves to the right wav file. */
+export async function readAudioEntryBytes(
+  entry: AudioBankEntry,
+  bankDir?: string,
+): Promise<Buffer> {
+  const here = resolveBankDir(bankDir);
   const path = join(here, entry.path);
   return readFile(path);
 }

@@ -2695,6 +2695,22 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       let pendingMode = get().pendingArtifactMode;
       const pendingEngine = get().pendingGameEngine;
       const pendingMotionStyle = get().pendingMotionStyle;
+      // may9 step 1.5 fix (Defect R) — pendingArtifactMode is one-shot
+      // (cleared after the first runPrompt that uses it). Follow-up
+      // turns on a known-game design landed with payload.artifactMode
+      // undefined, which made run_usage.artifact_type empty AND made
+      // the Phase 9b mandatory pre-done gate inert (it only fires for
+      // artifactType === 'game'). The third-person combat run
+      // (designId 25e276e2…) hit this on its second chunk: empty
+      // artifact_type in run_usage, validate_game_scene + playtest_game
+      // both 0, done accepted. Fall back to currentArtifactType so
+      // every follow-up turn carries the design's mode forward.
+      if (pendingMode === null) {
+        const current = get().currentArtifactType;
+        if (current === 'game' || current === 'motion' || current === 'design') {
+          pendingMode = current;
+        }
+      }
       // may9 Phase 10 — genre seed picked in NewDesignDialog. Forwarded
       // into the IPC payload so the agent's first declare_game_spec call
       // starts with a typed genre instead of inferring it from the brief.

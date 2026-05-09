@@ -250,10 +250,34 @@ interface Collected {
   artifacts: Artifact[];
 }
 
-function createHtmlArtifact(content: string, index: number): Artifact {
+/** may9 step 1.5 fix (Defect P) — the artifact's type must reflect the
+ *  run's mode so the snapshot row lands as artifact_type='game' (or
+ *  'motion') instead of always 'html'. Before this fix every game run
+ *  rolled up as html, which:
+ *   - kept the Phase 9b mandatory pre-done gate inert in production
+ *     (done.ts checks artifactType==='game')
+ *   - made the spec_json splice in snapshots-ipc inert (it gates on
+ *     artifact_type === 'game')
+ *   - left engine + engine_version empty on every snapshot
+ *  Recorded in the third-person combat run (designId 25e276e2…) on
+ *  2026-05-09: snapshot.artifact_type='html', engine='', spec_json=''
+ *  despite declare_game_spec + choose_engine='three' both firing.
+ */
+function createArtifact(
+  content: string,
+  index: number,
+  artifactType: 'design' | 'game' | 'motion' | undefined,
+): Artifact {
+  // Map agent-side artifactType to the legacy core Artifact.type
+  // discriminator. Design + undefined stay 'html' (back-compat for
+  // the IPC + renderer + snapshot read path that expects html for
+  // legacy design runs). Game and motion get their own types so
+  // the snapshot writer + done gate + renderer can branch on them.
+  const type: Artifact['type'] =
+    artifactType === 'game' ? 'game' : artifactType === 'motion' ? 'motion' : 'html';
   return {
     id: `design-${index + 1}`,
-    type: 'html',
+    type,
     title: 'Design',
     content,
     designParams: [],
@@ -261,12 +285,16 @@ function createHtmlArtifact(content: string, index: number): Artifact {
   };
 }
 
-function collect(events: Iterable<ArtifactEvent>, into: Collected): void {
+function collect(
+  events: Iterable<ArtifactEvent>,
+  into: Collected,
+  artifactType: 'design' | 'game' | 'motion' | undefined,
+): void {
   for (const ev of events) {
     if (ev.type === 'text') {
       into.text += ev.delta;
     } else if (ev.type === 'artifact:end') {
-      const artifact = createHtmlArtifact(ev.fullContent, into.artifacts.length);
+      const artifact = createArtifact(ev.fullContent, into.artifacts.length, artifactType);
       if (ev.identifier) artifact.id = ev.identifier;
       into.artifacts.push(artifact);
     }
@@ -889,6 +917,14 @@ export interface GenerateViaAgentDeps {
    * before calling `done`. See backlog-2 #5.
    */
   renderPreview?: RenderPreviewer | undefined;
+  /** may9 step 1.5 fix (Defect Q) — host-supplied audio-bank source
+   *  directory. The host (apps/desktop) resolves the absolute path of
+   *  packages/core/src/audio-bank via require.resolve so the bundled
+   *  Electron main process can find manifest.json + the *.wav files.
+   *  Without this, runs hit `ENOENT … out/main/manifest.json` and the
+   *  agent gives up on audio. Optional — when undefined the audio
+   *  loaders fall back to import.meta.url (works for unit tests). */
+  audioBankDir?: string | undefined;
   /** may9 Phase 9b — host-supplied counter callback for set_todos.
    *  Returns the per-turn + per-design invocation counts AFTER
    *  incrementing. When undefined, the cap is dormant (vitest paths).
@@ -1273,8 +1309,12 @@ export async function generateViaAgent(
     // call needed. Lives behind isGameMode so design-mode prompts don't
     // see a tool that would never apply to them.
     if (isGameMode) {
+      const audioToolOpts = deps.audioBankDir !== undefined ? { bankDir: deps.audioBankDir } : {};
       defaultTools.push(
-        makeGenerateAudioAssetTool(deps.fs, log) as unknown as AgentTool<TSchema, unknown>,
+        makeGenerateAudioAssetTool(deps.fs, log, audioToolOpts) as unknown as AgentTool<
+          TSchema,
+          unknown
+        >,
       );
     }
     // gameplan §E2 — assert_game_invariants is the cross-engine
@@ -2496,8 +2536,8 @@ export async function generateViaAgent(
 
   const parser = createArtifactParser();
   const collected: Collected = { text: '', artifacts: [] };
-  collect(parser.feed(fullText), collected);
-  collect(parser.flush(), collected);
+  collect(parser.feed(fullText), collected, input.artifactType);
+  collect(parser.flush(), collected, input.artifactType);
 
   if (collected.artifacts.length === 0) {
     // Prose `<artifact>` fallback (fenced ```html / bare <html>) was deliberately
@@ -2512,7 +2552,7 @@ export async function generateViaAgent(
   if (collected.artifacts.length === 0 && deps.fs) {
     const file = deps.fs.view('index.html');
     if (file !== null && file.content.trim().length > 0) {
-      collected.artifacts.push(createHtmlArtifact(file.content, 0));
+      collected.artifacts.push(createArtifact(file.content, 0, input.artifactType));
     }
   }
   log.info('[generate] step=parse_response.ok', {

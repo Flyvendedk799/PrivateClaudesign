@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import path_module from 'node:path';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -204,6 +205,22 @@ import { initStorageSettings } from './storage-settings';
 // existing join(__dirname, '../preload/...') calls keep working.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const __require = createRequire(import.meta.url);
+
+// may9 step 1.5 fix (Defect Q) — resolve the @open-codesign/core
+// package's source audio-bank dir absolutely so the bundled Electron
+// main process can find manifest.json + the *.wav samples. Falls back
+// to undefined when resolution fails (which falls back to the audio
+// loader's import.meta.url path; tests + non-host paths still work).
+function resolveAudioBankDir(): string | undefined {
+  try {
+    const corePkgPath = __require.resolve('@open-codesign/core/package.json');
+    return join(dirname(corePkgPath), 'src/audio-bank');
+  } catch {
+    return undefined;
+  }
+}
+const AUDIO_BANK_DIR = resolveAudioBankDir();
 
 let mainWindow: ElectronBrowserWindow | null = null;
 // Cached update-available payload so a window opened after the event still
@@ -1496,6 +1513,7 @@ function registerIpcHandlers(db: Database | null): void {
       renderPreview,
       setTodosCounter,
       getParentArtifactBytes,
+      ...(AUDIO_BANK_DIR !== undefined ? { audioBankDir: AUDIO_BANK_DIR } : {}),
       userSkills,
       ...(gameMode !== undefined ? { gameMode } : {}),
       ...(motionMode !== undefined ? { motionMode } : {}),

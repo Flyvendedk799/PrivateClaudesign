@@ -393,10 +393,20 @@ function imageInputsForWire(
     .filter((image): image is { data: string; mimeType: string } => image !== null);
 }
 
-function createHtmlArtifact(content: string, index: number): Artifact {
+function createArtifact(
+  content: string,
+  index: number,
+  artifactType: 'design' | 'game' | 'motion' | undefined,
+): Artifact {
+  // may9 step 1.5 fix (Defect P) — see agent.ts:createArtifact for the
+  // full rationale. Game + motion runs need their own snapshot
+  // artifact_type so the Phase 9b done gate, the spec_json splice, and
+  // the engine pin all activate.
+  const type: Artifact['type'] =
+    artifactType === 'game' ? 'game' : artifactType === 'motion' ? 'motion' : 'html';
   return {
     id: `design-${index + 1}`,
-    type: 'html',
+    type,
     title: 'Design',
     content,
     designParams: [],
@@ -404,12 +414,16 @@ function createHtmlArtifact(content: string, index: number): Artifact {
   };
 }
 
-function collect(events: Iterable<ArtifactEvent>, into: Collected): void {
+function collect(
+  events: Iterable<ArtifactEvent>,
+  into: Collected,
+  artifactType: 'design' | 'game' | 'motion' | undefined,
+): void {
   for (const ev of events) {
     if (ev.type === 'text') {
       into.text += ev.delta;
     } else if (ev.type === 'artifact:end') {
-      const artifact = createHtmlArtifact(ev.fullContent, into.artifacts.length);
+      const artifact = createArtifact(ev.fullContent, into.artifacts.length, artifactType);
       if (ev.identifier) artifact.id = ev.identifier;
       into.artifacts.push(artifact);
     }
@@ -625,8 +639,8 @@ async function runModel(input: ModelRunInput): Promise<GenerateOutput> {
   try {
     const parser = createArtifactParser();
     const collected: Collected = { text: '', artifacts: [] };
-    collect(parser.feed(result.content), collected);
-    collect(parser.flush(), collected);
+    collect(parser.feed(result.content), collected, input.artifactType);
+    collect(parser.flush(), collected, input.artifactType);
 
     log.info(`[${scope}] step=parse_response.ok`, {
       ...ctx,

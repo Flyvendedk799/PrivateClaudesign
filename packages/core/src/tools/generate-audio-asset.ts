@@ -70,6 +70,13 @@ export interface MakeGenerateAudioAssetToolOpts {
   loadManifest?: () => Promise<AudioBankManifest>;
   /** Bytes loader override — production reads the file off disk. */
   loadBytes?: (entry: AudioBankManifest['entries'][number]) => Promise<Buffer>;
+  /** may9 step 1.5 fix (Defect Q) — explicit audio-bank dir from the
+   *  host. Ignored when loadManifest/loadBytes are also overridden
+   *  (tests pass stubs). When set, the default loaders use this dir
+   *  to resolve `manifest.json` + entry paths instead of falling
+   *  back to import.meta.url (which lands at the bundled-out/main
+   *  location, not packages/core/src/audio-bank). */
+  bankDir?: string;
 }
 
 export function makeGenerateAudioAssetTool(
@@ -77,8 +84,9 @@ export function makeGenerateAudioAssetTool(
   logger: CoreLogger = NOOP_LOGGER,
   opts: MakeGenerateAudioAssetToolOpts = {},
 ): AgentTool<typeof GenerateAudioAssetParams, GenerateAudioAssetDetails> {
-  const loadManifest = opts.loadManifest ?? loadAudioBankManifest;
-  const loadBytes = opts.loadBytes ?? readAudioEntryBytes;
+  const bankDir = opts.bankDir;
+  const loadManifest = opts.loadManifest ?? (() => loadAudioBankManifest(bankDir));
+  const loadBytes = opts.loadBytes ?? ((entry) => readAudioEntryBytes(entry, bankDir));
   return {
     name: 'generate_audio_asset',
     label: 'Generate audio asset',
