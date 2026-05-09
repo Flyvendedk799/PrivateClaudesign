@@ -109,6 +109,7 @@ import {
   makeUpdateGameArtifactTool,
   makeValidateGameArtifactsTool,
 } from './tools/game-artifacts.js';
+import { type Generate3dAssetFn, makeGenerate3dAssetTool } from './tools/generate-3d-asset.js';
 import { makeGenerateAudioAssetTool } from './tools/generate-audio-asset.js';
 import {
   type GenerateImageAssetFn,
@@ -917,6 +918,13 @@ export interface GenerateViaAgentDeps {
    * before calling `done`. See backlog-2 #5.
    */
   renderPreview?: RenderPreviewer | undefined;
+  /** may9 step 1 — host-injected 3D asset generator. Wired only when
+   *  the user has configured a provider (Meshy / Tripo / etc.) with
+   *  a BYOK key. When undefined the tool isn't registered for the
+   *  agent and the procedural-primitives fallback path applies; the
+   *  Phase 12 D7 anti-slop bullet still steers the agent toward
+   *  generate_image_asset for billboard textures. */
+  generate3dAsset?: Generate3dAssetFn | undefined;
   /** may9 step 1.5 fix (Defect Q) — host-supplied audio-bank source
    *  directory. The host (apps/desktop) resolves the absolute path of
    *  packages/core/src/audio-bank via require.resolve so the bundled
@@ -1378,6 +1386,18 @@ export async function generateViaAgent(
     // (the playbook is still useful as a documentation source).
     if (isGameMode) {
       defaultTools.push(makeGetPlaytestPlaybookTool() as unknown as AgentTool<TSchema, unknown>);
+    }
+    // may9 step 1 — generate_3d_asset is registered only when (a)
+    // game mode is active AND (b) the host wired a 3D provider
+    // (BYOK). Without a wired provider the tool isn't visible to
+    // the agent and the procedural-primitives fallback applies.
+    if (isGameMode && deps.generate3dAsset !== undefined) {
+      defaultTools.push(
+        makeGenerate3dAssetTool(deps.generate3dAsset, deps.fs, log) as unknown as AgentTool<
+          TSchema,
+          unknown
+        >,
+      );
     }
   }
   if (deps.generateImageAsset) {

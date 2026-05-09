@@ -162,6 +162,22 @@ export const ImageGenerationSettingsSchema = z.object({
 });
 export type ImageGenerationSettings = z.infer<typeof ImageGenerationSettingsSchema>;
 
+// may9 step 1 — 3D asset generation settings. Mirrors the image-gen
+// shape so the Settings UI can reuse the same provider/credential
+// patterns; 3D providers always require their own BYOK key (no
+// 'inherit' from another provider).
+export const THREED_ASSET_SCHEMA_VERSION = 1 as const;
+export const ThreeDAssetProviderSchema = z.enum(['meshy', 'tripo']);
+export type ThreeDAssetProviderId = z.infer<typeof ThreeDAssetProviderSchema>;
+export const ThreeDAssetSettingsSchema = z.object({
+  schemaVersion: z.literal(THREED_ASSET_SCHEMA_VERSION),
+  enabled: z.boolean().default(false),
+  provider: ThreeDAssetProviderSchema.default('meshy'),
+  apiKey: SecretRef.optional(),
+  baseUrl: z.string().url().optional(),
+});
+export type ThreeDAssetSettings = z.infer<typeof ThreeDAssetSettingsSchema>;
+
 export const ProviderEntrySchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -337,6 +353,7 @@ export const ConfigV3Schema = z.object({
   providers: z.record(z.string(), ProviderEntrySchema).default({}),
   designSystem: StoredDesignSystem.optional(),
   imageGeneration: ImageGenerationSettingsSchema.optional(),
+  threeDAsset: ThreeDAssetSettingsSchema.optional(),
 });
 export type ConfigV3 = z.infer<typeof ConfigV3Schema>;
 
@@ -451,6 +468,7 @@ export function toPersistedV3(cfg: Config | ConfigV3): ConfigV3 {
     providers: cfg.providers,
     ...(cfg.designSystem !== undefined ? { designSystem: cfg.designSystem } : {}),
     ...(cfg.imageGeneration !== undefined ? { imageGeneration: cfg.imageGeneration } : {}),
+    ...(cfg.threeDAsset !== undefined ? { threeDAsset: cfg.threeDAsset } : {}),
   };
 }
 

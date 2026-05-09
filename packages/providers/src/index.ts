@@ -661,3 +661,15 @@ export type {
 //   streamWithFallback(models[], messages, opts)
 //   completeWithRetry(model, messages, opts, { maxRetries, baseDelayMs })
 //   completeWithPdf(pdfBase64, prompt, opts)
+
+// may9 step 1 — 3D asset providers (Meshy reference impl + fake for tests).
+export {
+  fakeThreeDAssetProvider,
+  makeMeshyProvider,
+  type MeshyAdapterConfig,
+  type ThreeDAssetProvider,
+  type ThreeDAssetPurpose,
+  type ThreeDAssetRequest,
+  type ThreeDAssetResult,
+  type ThreeDAssetStyle,
+} from './threed-asset';

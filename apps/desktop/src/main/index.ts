@@ -199,6 +199,7 @@ import {
   registerWorkspaceIpc,
 } from './snapshots-ipc';
 import { initStorageSettings } from './storage-settings';
+import { buildThreeDAssetProvider, resolveThreeDAssetConfig } from './threed-asset-settings';
 
 // ESM shim: package.json "type": "module" means the built bundle is ESM and
 // __dirname/__filename don't exist. Derive them from import.meta.url so the
@@ -1198,6 +1199,15 @@ function registerIpcHandlers(db: Database | null): void {
     const cfg = getCachedConfig();
     const imageConfig = cfg ? resolveImageGenerationConfig(cfg) : null;
     const imageLog = getLogger('image-generation');
+    // may9 step 1 — 3D asset provider (Meshy by default). Wired only
+    // when the user has BYOK + enabled in Settings; otherwise the
+    // tool isn't registered and the agent falls back to procedural
+    // primitives (the Phase 12 D7 anti-slop bullet still steers it
+    // toward generate_image_asset for billboard textures).
+    const threeDAssetConfig = cfg ? resolveThreeDAssetConfig(cfg) : null;
+    const generate3dAsset = threeDAssetConfig
+      ? buildThreeDAssetProvider(threeDAssetConfig)
+      : undefined;
     const generateImageAsset = imageConfig
       ? async (
           request: GenerateImageAssetRequest,
@@ -1513,6 +1523,7 @@ function registerIpcHandlers(db: Database | null): void {
       renderPreview,
       setTodosCounter,
       getParentArtifactBytes,
+      ...(generate3dAsset !== undefined ? { generate3dAsset } : {}),
       ...(AUDIO_BANK_DIR !== undefined ? { audioBankDir: AUDIO_BANK_DIR } : {}),
       userSkills,
       ...(gameMode !== undefined ? { gameMode } : {}),
