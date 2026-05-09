@@ -142,6 +142,10 @@ export interface Preferences {
    *  until the model itself emits done / pause_for_continuation
    *  (model_requested) or hits an error. Default true. */
   autoContinueEnabled: boolean;
+  /** v8 — auto-run the four-phase Decompose pipeline (sprites →
+   *  animations → levels → world) whenever a game-mode design's
+   *  index.html bytes change. Default true. */
+  autoDecomposeEnabled: boolean;
 }
 
 /**
@@ -642,6 +646,12 @@ const api = {
         schemaVersion: 1,
         id,
         metadata,
+      }) as Promise<Design>,
+    setDecomposeHash: (id: string, hash: string | null) =>
+      ipcRenderer.invoke('snapshots:v1:set-decompose-hash', {
+        schemaVersion: 1,
+        id,
+        hash,
       }) as Promise<Design>,
     softDeleteDesign: (id: string) =>
       ipcRenderer.invoke('snapshots:v1:soft-delete-design', {

@@ -17,7 +17,7 @@ import { getLogger } from './logger';
 
 const logger = getLogger('preferences-ipc');
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 // v1 → v2: raise the abandoned 120s timeout default (which aborted real
 // agentic runs mid-loop) to 600s. Values that happen to equal the old
 // default are treated as unmigrated defaults, not user intent.
@@ -72,6 +72,16 @@ export interface Preferences {
    *  (model_requested) or hits an error. Default true. Model-requested
    *  and manual pauses always stop, regardless of this flag. */
   autoContinueEnabled: boolean;
+  /** v8 — when true and a game-mode design's index.html bytes change
+   *  (initial generation completes, applyComment edit lands, design
+   *  switch into a previously-edited game), the renderer auto-runs the
+   *  four-phase Decompose pipeline (sprites → animations → levels →
+   *  world). Default true. Disable to require the manual Decompose
+   *  toolbar button — useful for credit-conscious users since each
+   *  phase is its own LLM call. Skipped while a continuation_pending
+   *  row is open (avoids stomping mid-chain), while another decompose
+   *  is already running, and on non-game designs. */
+  autoDecomposeEnabled: boolean;
 }
 
 interface PreferencesFile extends Preferences {
@@ -92,6 +102,7 @@ const DEFAULTS: Preferences = {
   lastPickedMode: 'design',
   incrementalVerifyDisabled: false,
   autoContinueEnabled: true,
+  autoDecomposeEnabled: true,
 };
 
 /** Deterministic parse of the on-disk preferences file. No clock reads: the
@@ -143,6 +154,10 @@ function parsePersistedFile(parsed: Partial<PreferencesFile>): Preferences {
       typeof parsed.autoContinueEnabled === 'boolean'
         ? parsed.autoContinueEnabled
         : DEFAULTS.autoContinueEnabled,
+    autoDecomposeEnabled:
+      typeof parsed.autoDecomposeEnabled === 'boolean'
+        ? parsed.autoDecomposeEnabled
+        : DEFAULTS.autoDecomposeEnabled,
   };
 }
 
@@ -262,6 +277,12 @@ function parsePreferences(raw: unknown): Partial<Preferences> {
       throw new CodesignError('autoContinueEnabled must be a boolean', ERROR_CODES.IPC_BAD_INPUT);
     }
     out.autoContinueEnabled = r['autoContinueEnabled'];
+  }
+  if (r['autoDecomposeEnabled'] !== undefined) {
+    if (typeof r['autoDecomposeEnabled'] !== 'boolean') {
+      throw new CodesignError('autoDecomposeEnabled must be a boolean', ERROR_CODES.IPC_BAD_INPUT);
+    }
+    out.autoDecomposeEnabled = r['autoDecomposeEnabled'];
   }
   return out;
 }

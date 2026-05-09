@@ -363,6 +363,19 @@ function applyAdditiveMigrations(db: Database): void {
     db.exec('ALTER TABLE designs ADD COLUMN current_session_id INTEGER NOT NULL DEFAULT 0');
   }
 
+  // designs.last_decomposed_artifact_hash — SHA-256 (hex, lowercase) of
+  // the index.html bytes captured at the start of the most recent
+  // successful Decompose run. Used by tryAutoDecompose to detect a
+  // stale set of sprite/animation/level/world artifacts whenever the
+  // game artifact changes (initial generation completion, applyComment
+  // edit, design switch into a previously-edited game). NULL marks
+  // "never decomposed". Nullable + lowercase hex so the schema is
+  // forward-compatible with future hash-algo swaps if SHA-256 is ever
+  // deemed too costly for huge game artifacts.
+  if (!designCols.includes('last_decomposed_artifact_hash')) {
+    db.exec('ALTER TABLE designs ADD COLUMN last_decomposed_artifact_hash TEXT');
+  }
+
   // diagnostic_events v2 — add `context_json` (TEXT, nullable) so rows from
   // provider errors can persist the full NormalizedProviderError payload
   // (upstream_request_id, upstream_status, retry_count, redacted_body_head).
@@ -1024,6 +1037,10 @@ interface DesignRow {
   /** In-design new-conversation pointer; absent on rows older than the
    *  session_id migration. Treated as 0 for those rows. */
   current_session_id: number | null | undefined;
+  /** SHA-256 (hex) of index.html captured at the start of the most
+   *  recent successful Decompose run. NULL = never decomposed. May be
+   *  undefined on rows older than the additive migration. */
+  last_decomposed_artifact_hash: string | null | undefined;
 }
 
 interface SnapshotRow {
@@ -1083,6 +1100,11 @@ function rowToDesign(row: DesignRow): Design {
       typeof row.current_session_id === 'number' && Number.isFinite(row.current_session_id)
         ? row.current_session_id
         : 0,
+    lastDecomposedArtifactHash:
+      typeof row.last_decomposed_artifact_hash === 'string' &&
+      row.last_decomposed_artifact_hash.length > 0
+        ? row.last_decomposed_artifact_hash
+        : null,
   };
 }
 
@@ -1185,6 +1207,23 @@ export function clearDesignWorkspace(db: Database, id: string): Design | null {
   const result = db
     .prepare('UPDATE designs SET workspace_path = NULL, updated_at = ? WHERE id = ?')
     .run(now, id);
+  if (result.changes === 0) return null;
+  return getDesign(db, id);
+}
+
+/** Persist (or clear) the SHA-256 hash of index.html that was decomposed
+ *  in the most recent successful Decompose run. `null` clears the column
+ *  so the next change is treated as "never decomposed". Updated only when
+ *  all four phases land successfully — partial failures must leave the
+ *  prior hash in place so the next trigger retries the whole run. */
+export function setDesignDecomposeHash(
+  db: Database,
+  id: string,
+  hash: string | null,
+): Design | null {
+  const result = db
+    .prepare('UPDATE designs SET last_decomposed_artifact_hash = ? WHERE id = ?')
+    .run(hash, id);
   if (result.changes === 0) return null;
   return getDesign(db, id);
 }

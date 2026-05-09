@@ -44,6 +44,7 @@ import {
   listSnapshots,
   renameDesign,
   restoreSnapshotFiles,
+  setDesignDecomposeHash,
   setDesignPromptAssistMetadata,
   setDesignThumbnail,
   snapshotDesignFiles,
@@ -578,6 +579,36 @@ export function registerSnapshotsIpc(db: Database): void {
     return updated;
   });
 
+  ipcMain.handle('snapshots:v1:set-decompose-hash', (_e: unknown, raw: unknown): Design => {
+    if (typeof raw !== 'object' || raw === null) {
+      throw new CodesignError(
+        'snapshots:v1:set-decompose-hash expects { id, hash }',
+        'IPC_BAD_INPUT',
+      );
+    }
+    const r = raw as Record<string, unknown>;
+    requireSchemaV1(r, 'snapshots:v1:set-decompose-hash');
+    if (typeof r['id'] !== 'string' || r['id'].trim().length === 0) {
+      throw new CodesignError('id must be a non-empty string', 'IPC_BAD_INPUT');
+    }
+    const value = r['hash'];
+    if (value !== null && typeof value !== 'string') {
+      throw new CodesignError('hash must be a string or null', 'IPC_BAD_INPUT');
+    }
+    if (typeof value === 'string' && (value.length === 0 || !/^[0-9a-f]+$/.test(value))) {
+      // Lowercase hex only — keeps the column shape contractually predictable
+      // for any future migration that wants to detect hashes by length.
+      throw new CodesignError('hash must be a non-empty lowercase hex string', 'IPC_BAD_INPUT');
+    }
+    const updated = runDb('set-decompose-hash', () =>
+      setDesignDecomposeHash(db, r['id'] as string, value as string | null),
+    );
+    if (updated === null) {
+      throw new CodesignError('Design not found', 'IPC_NOT_FOUND');
+    }
+    return updated;
+  });
+
   ipcMain.handle('snapshots:v1:soft-delete-design', (_e: unknown, raw: unknown): Design => {
     const id = parseIdPayload(raw, 'soft-delete-design');
     const updated = runDb('soft-delete-design', () => softDeleteDesign(db, id));
@@ -799,6 +830,7 @@ export const SNAPSHOTS_CHANNELS_V1 = [
   'snapshots:v1:rename-design',
   'snapshots:v1:set-thumbnail',
   'snapshots:v1:set-prompt-assist',
+  'snapshots:v1:set-decompose-hash',
   'snapshots:v1:soft-delete-design',
   'snapshots:v1:duplicate-design',
   'snapshots:v1:list',

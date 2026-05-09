@@ -1,8 +1,10 @@
 import type { GameArtifact, WorldDoc } from '@open-codesign/shared';
 import { WorldDoc as WorldDocSchema } from '@open-codesign/shared';
 import { Download, Loader2 } from 'lucide-react';
+import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCodesignStore } from '../../store';
+import { DecomposeFreshnessBanner } from './DecomposeFreshnessBanner';
 import { GENERATE_WORLD_GRAPH_BRIEF } from './game-briefs';
 import { computeForceLayout } from './level-renderers/forceLayout';
 
@@ -112,26 +114,23 @@ export function WorldDesignerTabView() {
 
   if (designId === null) return null;
 
+  let body: React.ReactNode;
   if (worldArtifact === null) {
-    return (
+    body = (
       <WorldEmptyState
         hasLevels={levelArtifacts.length > 0}
         onGenerate={() => setPromptDraft(GENERATE_WORLD_GRAPH_BRIEF)}
       />
     );
-  }
-
-  if (loading || (doc === null && rawIssue === null)) {
-    return (
+  } else if (loading || (doc === null && rawIssue === null)) {
+    body = (
       <div className="flex flex-1 items-center justify-center gap-[var(--space-2)] text-[12px] text-[var(--color-text-muted)]">
         <Loader2 className="h-4 w-4 codesign-spin-once" aria-hidden="true" />
         <span>Loading world graph…</span>
       </div>
     );
-  }
-
-  if (doc === null) {
-    return (
+  } else if (doc === null) {
+    body = (
       <div className="flex flex-1 flex-col gap-[var(--space-2)] p-[var(--space-3)]">
         <div className="rounded-[var(--radius-sm)] border border-amber-500/40 bg-amber-500/8 p-[var(--space-2)] text-[11px] text-amber-500">
           <strong className="text-[12px]">world.json failed to parse.</strong>{' '}
@@ -139,24 +138,31 @@ export function WorldDesignerTabView() {
         </div>
       </div>
     );
+  } else {
+    body = (
+      <WorldGraphView
+        doc={doc}
+        levelArtifacts={levelArtifacts}
+        saving={saving}
+        onSelectLevel={(slug) => {
+          // Hand off to the Levels tab. The LevelsTabView's own state
+          // re-derives the selected slug from the artifact list.
+          selectProjectTab('levels');
+          useCodesignStore.setState({ toastMessage: `Open level "${slug}" in the Levels tab.` });
+        }}
+        onChange={(next) => {
+          setDoc(next);
+          writeDoc(next);
+        }}
+      />
+    );
   }
 
   return (
-    <WorldGraphView
-      doc={doc}
-      levelArtifacts={levelArtifacts}
-      saving={saving}
-      onSelectLevel={(slug) => {
-        // Hand off to the Levels tab. The LevelsTabView's own state
-        // re-derives the selected slug from the artifact list.
-        selectProjectTab('levels');
-        useCodesignStore.setState({ toastMessage: `Open level "${slug}" in the Levels tab.` });
-      }}
-      onChange={(next) => {
-        setDoc(next);
-        writeDoc(next);
-      }}
-    />
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-[var(--color-background)]">
+      <DecomposeFreshnessBanner tabLabel="world graph" />
+      <div className="flex min-h-0 flex-1 flex-col">{body}</div>
+    </div>
   );
 }
 

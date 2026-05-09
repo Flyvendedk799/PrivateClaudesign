@@ -841,6 +841,25 @@ interface CodesignState {
   cancelDecomposeFlow: () => void;
   /** Dismiss the progress card after a flow has finished. */
   dismissDecomposeFlow: () => void;
+  /** v8 — opportunistically run Decompose when the game artifact has
+   *  changed since the last successful run. Compares a SHA-256 of the
+   *  live `previewHtml` against `lastDecomposedArtifactHash` on the
+   *  Design row. No-op when:
+   *    - autoDecomposeEnabled pref is false
+   *    - design isn't game mode
+   *    - hashes match (already fresh)
+   *    - a decompose is already running
+   *    - a generation is in flight (sendPrompt would refuse anyway)
+   *    - a `continuation_pending` row is open (auto-continue chain
+   *      hasn't reached "real done" yet — wait for the model to finish)
+   *  Persists the new hash via `snapshots:v1:set-decompose-hash` only
+   *  when all four phases complete successfully. */
+  tryAutoDecompose: (designId: string) => Promise<void>;
+  /** Per-design hash of the index.html bytes captured at the last
+   *  successful Decompose run. Mirrors `Design.lastDecomposedArtifactHash`;
+   *  hydrated lazily on switchDesign so the freshness check doesn't have
+   *  to round-trip through IPC for every previewHtml mutation. */
+  lastDecomposedHashByDesign: Record<string, string | null>;
   renameCurrentDesign: (name: string) => Promise<void>;
   renameDesign: (id: string, name: string) => Promise<void>;
   duplicateDesign: (id: string) => Promise<Design | null>;
@@ -1002,6 +1021,18 @@ export interface CommentBubbleAnchor {
 }
 
 const THEME_STORAGE_KEY = 'open-codesign:theme';
+
+/** SHA-256 (lowercase hex) of an arbitrary string. Implemented over Web
+ *  Crypto so it runs in the renderer without pulling node:crypto. Matches
+ *  the column shape persisted by `snapshots-db.setDesignDecomposeHash`
+ *  and the validation in `snapshots:v1:set-decompose-hash` (lowercase
+ *  hex, non-empty). */
+async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const hexParts = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0'));
+  return hexParts.join('');
+}
 
 // PreviewPane keeps an iframe per recently-visited design alive so switching
 // back is instant. Bound the pool so memory stays small for users with lots
@@ -2244,6 +2275,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   currentDesignEngine: null,
   currentArtifactType: 'design',
   decomposeFlow: null,
+  lastDecomposedHashByDesign: {},
   godotPreviewByDesign: {},
   godotBuildStatusByDesign: {},
   lastPickedMode: 'design',
@@ -3209,6 +3241,11 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         });
         const artifact = artifactFromResult(firstArtifact, userMessageText, assistantText);
         void persistDesignState(get, designIdAtStart, get().previewHtml, artifact);
+        // v8 — applyComment mutates index.html bytes; treat as a change
+        // event so a subsequent decompose can stay in sync. The internal
+        // guards (game-mode only, hash compare) make this safe to call
+        // for design / motion edits too — the function will no-op.
+        void get().tryAutoDecompose(designIdAtStart);
       }
       if (rejectedUsageFields.length > 0) {
         const detail = rejectedUsageFields.join(', ');
@@ -3555,6 +3592,16 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       set({ toastMessage: 'A generation is in flight — cancel or wait before decomposing.' });
       return;
     }
+    // Snapshot the artifact bytes at run start so the freshness hash we
+    // persist on success reflects what the four phases actually saw.
+    // Mid-run mutations (none should happen — sendPrompt is bounded by
+    // isGenerating — but defensive) won't be captured: the next change
+    // will trigger a fresh tryAutoDecompose.
+    const startHtml = get().previewHtml;
+    const startHashPromise: Promise<string | null> =
+      typeof startHtml === 'string' && startHtml.length > 0
+        ? sha256Hex(startHtml)
+        : Promise.resolve(null);
     set({
       decomposeFlow: {
         designId,
@@ -3628,9 +3675,11 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     }
     // All phases completed — mark overall done unless the user already
     // cancelled mid-flight (in which case overallStatus stays 'cancelled').
+    let landedSuccessfully = false;
     set((s) => {
       if (s.decomposeFlow === null) return {};
       if (s.decomposeFlow.overallStatus !== 'running') return {};
+      landedSuccessfully = true;
       return {
         decomposeFlow: {
           ...s.decomposeFlow,
@@ -3639,6 +3688,32 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         toastMessage: 'Decomposition complete — Sprites, Animations, Levels, World all populated.',
       };
     });
+    // Persist the start-of-run hash so the next change to index.html is
+    // detectable as "stale" by tryAutoDecompose. We persist only on full
+    // success: a partial / failed / cancelled run leaves the prior hash
+    // in place, which keeps the design correctly marked stale until the
+    // next attempt lands. Hashing + IPC are fire-and-forget — UI already
+    // marked the flow completed; a persist failure is a stale-detection
+    // bug at worst, not a correctness issue.
+    if (landedSuccessfully) {
+      try {
+        const hash = await startHashPromise;
+        if (hash !== null && window.codesign?.snapshots?.setDecomposeHash) {
+          await window.codesign.snapshots.setDecomposeHash(designId, hash);
+          set((s) => ({
+            lastDecomposedHashByDesign: {
+              ...s.lastDecomposedHashByDesign,
+              [designId]: hash,
+            },
+          }));
+        }
+      } catch (err) {
+        rendererLogger.warn('decompose', 'decompose.hash.persist.fail', {
+          designId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   },
 
   cancelDecomposeFlow() {
@@ -3667,6 +3742,59 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
 
   dismissDecomposeFlow() {
     set({ decomposeFlow: null });
+  },
+
+  async tryAutoDecompose(designId: string) {
+    if (!window.codesign) return;
+    const state = get();
+    // Hard guards — every one of these is "definitely don't fire."
+    if (state.currentDesignId !== designId) return;
+    if (state.currentArtifactType !== 'game') return;
+    if (state.isGenerating) return;
+    if (state.decomposeFlow !== null && state.decomposeFlow.overallStatus === 'running') {
+      return;
+    }
+    // While auto-continue is mid-chain (a continuation_pending row is
+    // open and the next sendPrompt is queued), don't kick off a parallel
+    // pipeline — wait for the model to actually finish.
+    if (hasFreshContinuationPending(state.chatMessages, designId)) return;
+    // Pref check — read fresh so a Settings toggle takes effect on the
+    // next change without a reload. The renderer already reads prefs
+    // for the auto-continue handler; this is the symmetrical path.
+    let autoEnabled = true;
+    try {
+      const prefs = await window.codesign.preferences?.get?.();
+      if (prefs && typeof prefs.autoDecomposeEnabled === 'boolean') {
+        autoEnabled = prefs.autoDecomposeEnabled;
+      }
+    } catch {
+      // If prefs read fails, default to the documented default (ON).
+      autoEnabled = true;
+    }
+    if (!autoEnabled) return;
+    const html = state.previewHtml;
+    if (typeof html !== 'string' || html.length === 0) return;
+    const liveHash = await sha256Hex(html);
+    const persistedHash = state.lastDecomposedHashByDesign[designId];
+    if (persistedHash === liveHash) {
+      // Tabs are already in sync with the current artifact — no-op.
+      return;
+    }
+    // State drifted (or never decomposed). Re-check guards after the
+    // async hash compute in case anything started in the gap.
+    const after = get();
+    if (after.currentDesignId !== designId) return;
+    if (after.isGenerating) return;
+    if (after.decomposeFlow !== null && after.decomposeFlow.overallStatus === 'running') {
+      return;
+    }
+    if (hasFreshContinuationPending(after.chatMessages, designId)) return;
+    if (after.lastDecomposedHashByDesign[designId] === liveHash) return;
+    rendererLogger.info('decompose', 'decompose.auto.fire', {
+      designId,
+      hadPriorHash: persistedHash !== null && persistedHash !== undefined,
+    });
+    void get().startDecomposeFlow(designId);
   },
 
   async switchDesign(id: string) {
@@ -3770,6 +3898,29 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
                 ? 'game'
                 : 'design';
           set({ currentArtifactType: derived });
+          // Hydrate the per-design last-decomposed hash + opportunistic
+          // freshness check. Runs after the snapshot pull so previewHtml
+          // matches the persisted artifact, and only when the design
+          // landed in game mode — non-game designs never decompose.
+          if (derived === 'game') {
+            try {
+              const design = await window.codesign?.snapshots.getDesign(id);
+              if (design && get().currentDesignId === id) {
+                const persistedHash = design.lastDecomposedArtifactHash ?? null;
+                set((s) => ({
+                  lastDecomposedHashByDesign: {
+                    ...s.lastDecomposedHashByDesign,
+                    [id]: persistedHash,
+                  },
+                }));
+              }
+            } catch {
+              // Hash hydration failure → tabs render as 'never' and the
+              // user can hit the manual Decompose button. No worse than
+              // pre-v8 behavior.
+            }
+            void get().tryAutoDecompose(id);
+          }
         } catch {
           // Background refresh failure is harmless — cached preview remains.
         }
@@ -3817,6 +3968,34 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       void get().loadCommentsForCurrentDesign();
       void get().loadGameArtifacts(id);
       void get().loadMotionCompositions(id);
+      // Same hydration + freshness check as the hot path. Cold path
+      // already paid the snapshot.list IPC; piggyback the design fetch
+      // for game-mode designs only.
+      const coldDerived =
+        latest?.artifactType === 'motion'
+          ? 'motion'
+          : latest?.artifactType === 'game' || latest?.engine != null
+            ? 'game'
+            : 'design';
+      if (coldDerived === 'game') {
+        void (async () => {
+          try {
+            const design = await window.codesign?.snapshots.getDesign(id);
+            if (design && get().currentDesignId === id) {
+              const persistedHash = design.lastDecomposedArtifactHash ?? null;
+              set((s) => ({
+                lastDecomposedHashByDesign: {
+                  ...s.lastDecomposedHashByDesign,
+                  [id]: persistedHash,
+                },
+              }));
+            }
+          } catch {
+            /* tabs render as 'never' on hydration failure */
+          }
+          void get().tryAutoDecompose(id);
+        })();
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : tr('errors.unknown');
       get().pushToast({

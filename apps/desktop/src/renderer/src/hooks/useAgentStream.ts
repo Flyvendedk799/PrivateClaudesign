@@ -810,6 +810,17 @@ export function useAgentStream(): void {
         }
         useCodesignStore.getState().tryAutoPolish(designId, locale);
       }, 1200);
+      // v8 — opportunistic Decompose at the end of a chain. The internal
+      // guards in tryAutoDecompose (game-mode only, no
+      // continuation_pending row open, hash unchanged → no-op) make this
+      // safe to call after every agent_end. We schedule slightly behind
+      // tryAutoPolish so the snapshot persistence pipeline has flushed
+      // and any auto_continue event has already arrived. Auto-continue
+      // chains are skipped naturally: hasFreshContinuationPending
+      // returns true while the chain is open.
+      setTimeout(() => {
+        void useCodesignStore.getState().tryAutoDecompose(designId);
+      }, 1500);
       // Backlog-3 §10 — budget threshold check. Fire-and-forget; the
       // toast is informational. We compare today's daily_usage total
       // against the user's saved daily limit and toast at the

@@ -3353,6 +3353,7 @@ function AdvancedTab() {
     lastPickedMode: 'design',
     incrementalVerifyDisabled: false,
     autoContinueEnabled: true,
+    autoDecomposeEnabled: true,
   });
 
   useEffect(() => {
@@ -3465,6 +3466,18 @@ function AdvancedTab() {
           type="checkbox"
           checked={prefs.autoContinueEnabled !== false}
           onChange={(e) => void updatePref({ autoContinueEnabled: e.target.checked })}
+          className="h-4 w-4 accent-[var(--color-accent)]"
+        />
+      </Row>
+
+      <Row
+        label="Auto-decompose game artifacts"
+        hint="When ON (default), the four-phase Decompose pipeline (Sprites → Animations → Levels → World) auto-runs whenever a game-mode design's index.html bytes change — initial generation, applyComment edits, or a switch into a previously-edited game. Each phase is its own LLM call, so turn off to control credit usage and trigger Decompose manually from the toolbar."
+      >
+        <input
+          type="checkbox"
+          checked={prefs.autoDecomposeEnabled !== false}
+          onChange={(e) => void updatePref({ autoDecomposeEnabled: e.target.checked })}
           className="h-4 w-4 accent-[var(--color-accent)]"
         />
       </Row>

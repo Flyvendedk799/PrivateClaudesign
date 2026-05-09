@@ -71,6 +71,13 @@ export const DesignV1 = z.object({
    *  consumers read it via `design.currentSessionId ?? 0` or fetch fresh via
    *  the dedicated IPC. The DB always materialises a value (default 0). */
   currentSessionId: z.number().int().nonnegative().optional(),
+  /** SHA-256 (hex, lowercase) of index.html captured at the start of the
+   *  most recent successful Decompose run. NULL = never decomposed.
+   *  Drives `tryAutoDecompose`'s freshness check: differs from the live
+   *  artifact hash → tabs are stale → re-run the four-phase Decompose
+   *  pipeline. Optional in the inferred type so legacy fixtures and
+   *  pre-migration row reads don't need to set it. */
+  lastDecomposedArtifactHash: z.string().nullable().default(null).optional(),
 });
 export type Design = z.infer<typeof DesignV1>;
 

@@ -1,6 +1,7 @@
 import type { GameArtifact } from '@open-codesign/shared';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useCodesignStore } from '../../store';
+import { DecomposeFreshnessBanner } from './DecomposeFreshnessBanner';
 import { ANIMATION_EXTRACTION_BRIEF } from './game-briefs';
 
 function readFileAsText(file: File): Promise<string> {
@@ -116,100 +117,103 @@ export function AnimationsTabView() {
   const targetSprite = sprites.find((s) => s.id === targetSpriteId) ?? null;
 
   return (
-    <div className="flex h-full min-h-0 flex-1 bg-[var(--color-background)]">
-      <div className="flex w-[300px] flex-col border-r border-[var(--color-border-muted)]">
-        <div className="space-y-[var(--space-2)] p-[var(--space-3)]">
-          <h3 className="text-[13px] font-medium text-[var(--color-text-primary)]">Animations</h3>
-          <label className="flex flex-col gap-[var(--space-1)] text-[11px]">
-            <span className="text-[var(--color-text-muted)]">Target sprite</span>
-            <select
-              value={targetSpriteId ?? ''}
-              onChange={(e) => setAnimationTargetSprite(e.target.value || null)}
-              className="rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background-secondary)] px-[var(--space-2)] py-[var(--space-1)] text-[12px] text-[var(--color-text-primary)]"
-            >
-              <option value="">Pick a sprite…</option>
-              {sprites.map((sprite) => (
-                <option key={sprite.id} value={sprite.id}>
-                  {sprite.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="flex items-center justify-between gap-[var(--space-2)]">
-            <button
-              type="button"
-              onClick={onPickFiles}
-              disabled={targetSpriteId === null || importing}
-              className="rounded-[var(--radius-sm)] bg-[var(--color-surface-elevated)] px-[var(--space-2)] py-[2px] text-[11px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface)] disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {importing ? 'Importing…' : 'Import animation'}
-            </button>
-            <label className="flex items-center gap-[var(--space-1)] text-[11px] text-[var(--color-text-muted)]">
-              <input
-                type="checkbox"
-                checked={showAll}
-                onChange={(e) => setShowAll(e.target.checked)}
-              />
-              Show all
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-[var(--color-background)]">
+      <DecomposeFreshnessBanner tabLabel="animations" />
+      <div className="flex min-h-0 flex-1">
+        <div className="flex w-[300px] flex-col border-r border-[var(--color-border-muted)]">
+          <div className="space-y-[var(--space-2)] p-[var(--space-3)]">
+            <h3 className="text-[13px] font-medium text-[var(--color-text-primary)]">Animations</h3>
+            <label className="flex flex-col gap-[var(--space-1)] text-[11px]">
+              <span className="text-[var(--color-text-muted)]">Target sprite</span>
+              <select
+                value={targetSpriteId ?? ''}
+                onChange={(e) => setAnimationTargetSprite(e.target.value || null)}
+                className="rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] bg-[var(--color-background-secondary)] px-[var(--space-2)] py-[var(--space-1)] text-[12px] text-[var(--color-text-primary)]"
+              >
+                <option value="">Pick a sprite…</option>
+                {sprites.map((sprite) => (
+                  <option key={sprite.id} value={sprite.id}>
+                    {sprite.name}
+                  </option>
+                ))}
+              </select>
             </label>
+            <div className="flex items-center justify-between gap-[var(--space-2)]">
+              <button
+                type="button"
+                onClick={onPickFiles}
+                disabled={targetSpriteId === null || importing}
+                className="rounded-[var(--radius-sm)] bg-[var(--color-surface-elevated)] px-[var(--space-2)] py-[2px] text-[11px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface)] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {importing ? 'Importing…' : 'Import animation'}
+              </button>
+              <label className="flex items-center gap-[var(--space-1)] text-[11px] text-[var(--color-text-muted)]">
+                <input
+                  type="checkbox"
+                  checked={showAll}
+                  onChange={(e) => setShowAll(e.target.checked)}
+                />
+                Show all
+              </label>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".json,.glb,.gltf,.png,.webp,application/json,model/gltf-binary"
+              onChange={onFilesPicked}
+              className="hidden"
+            />
           </div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept=".json,.glb,.gltf,.png,.webp,application/json,model/gltf-binary"
-            onChange={onFilesPicked}
-            className="hidden"
-          />
+          {visibleAnimations.length === 0 ? (
+            <AnimationsEmptyState
+              hasTarget={targetSpriteId !== null}
+              onImport={onPickFiles}
+              onSeedExtractionPrompt={() => {
+                setPromptDraft(ANIMATION_EXTRACTION_BRIEF);
+              }}
+            />
+          ) : (
+            <ul className="flex-1 overflow-y-auto px-[var(--space-2)] pb-[var(--space-2)]">
+              {visibleAnimations.map((anim) => (
+                <AnimationRow
+                  key={anim.id}
+                  animation={anim}
+                  bindings={bindings.filter((b) => b.animationId === anim.id)}
+                  active={anim.id === selectedAnimationId}
+                  onSelect={() => selectAnimation(anim.id, targetSpriteId ?? undefined)}
+                />
+              ))}
+            </ul>
+          )}
         </div>
-        {visibleAnimations.length === 0 ? (
-          <AnimationsEmptyState
-            hasTarget={targetSpriteId !== null}
-            onImport={onPickFiles}
-            onSeedExtractionPrompt={() => {
-              setPromptDraft(ANIMATION_EXTRACTION_BRIEF);
-            }}
-          />
-        ) : (
-          <ul className="flex-1 overflow-y-auto px-[var(--space-2)] pb-[var(--space-2)]">
-            {visibleAnimations.map((anim) => (
-              <AnimationRow
-                key={anim.id}
-                animation={anim}
-                bindings={bindings.filter((b) => b.animationId === anim.id)}
-                active={anim.id === selectedAnimationId}
-                onSelect={() => selectAnimation(anim.id, targetSpriteId ?? undefined)}
-              />
-            ))}
-          </ul>
-        )}
-      </div>
-      <div className="flex flex-1 flex-col p-[var(--space-3)]">
-        {selectedAnimationId !== null ? (
-          (() => {
-            const anim = animations.find((a) => a.id === selectedAnimationId);
-            if (!anim) return null;
-            return (
-              <AnimationDetail
-                animation={anim}
-                sprites={sprites}
-                bindings={bindings.filter((b) => b.animationId === anim.id)}
-                targetSpriteId={targetSpriteId}
-                onArchive={() => archive(anim.id)}
-                onCopyAlias={() => appendArtifactRef(anim.id)}
-                onBind={(spriteId) => bindAnimation(anim.id, spriteId)}
-                onUnbind={(spriteId) => unbindAnimation(anim.id, spriteId)}
-                targetSprite={targetSprite}
-              />
-            );
-          })()
-        ) : (
-          <div className="flex flex-1 items-center justify-center text-[12px] text-[var(--color-text-muted)]">
-            {targetSpriteId === null
-              ? 'Pick a target sprite first.'
-              : 'Select an animation to inspect or preview it.'}
-          </div>
-        )}
+        <div className="flex flex-1 flex-col p-[var(--space-3)]">
+          {selectedAnimationId !== null ? (
+            (() => {
+              const anim = animations.find((a) => a.id === selectedAnimationId);
+              if (!anim) return null;
+              return (
+                <AnimationDetail
+                  animation={anim}
+                  sprites={sprites}
+                  bindings={bindings.filter((b) => b.animationId === anim.id)}
+                  targetSpriteId={targetSpriteId}
+                  onArchive={() => archive(anim.id)}
+                  onCopyAlias={() => appendArtifactRef(anim.id)}
+                  onBind={(spriteId) => bindAnimation(anim.id, spriteId)}
+                  onUnbind={(spriteId) => unbindAnimation(anim.id, spriteId)}
+                  targetSprite={targetSprite}
+                />
+              );
+            })()
+          ) : (
+            <div className="flex flex-1 items-center justify-center text-[12px] text-[var(--color-text-muted)]">
+              {targetSpriteId === null
+                ? 'Pick a target sprite first.'
+                : 'Select an animation to inspect or preview it.'}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

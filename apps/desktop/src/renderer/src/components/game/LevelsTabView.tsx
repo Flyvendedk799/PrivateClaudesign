@@ -3,6 +3,7 @@ import { LevelDoc as LevelDocSchema, inferLevelKind } from '@open-codesign/share
 import { Plus } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useCodesignStore } from '../../store';
+import { DecomposeFreshnessBanner } from './DecomposeFreshnessBanner';
 import {
   ADD_LEVEL_BRIEF,
   DEFINE_LEVEL_SCHEMA_BRIEF,
@@ -53,47 +54,50 @@ export function LevelsTabView() {
   if (designId === null) return null;
 
   return (
-    <div className="flex h-full min-h-0 flex-1 bg-[var(--color-background)]">
-      <div className="flex w-[300px] flex-col border-r border-[var(--color-border-muted)]">
-        <div className="flex items-center justify-between p-[var(--space-3)]">
-          <h3 className="text-[13px] font-medium text-[var(--color-text-primary)]">Levels</h3>
-          <button
-            type="button"
-            onClick={() => setPromptDraft(ADD_LEVEL_BRIEF)}
-            title="Seed the prompt with a brief asking the agent to add a new level conforming to the design's _schema.json"
-            className="inline-flex items-center gap-[4px] rounded-[var(--radius-sm)] bg-[var(--color-surface-elevated)] px-[var(--space-2)] py-[2px] text-[11px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface)]"
-          >
-            <Plus className="h-3 w-3" aria-hidden="true" />
-            New level
-          </button>
-        </div>
-        {levels.length === 0 ? (
-          <LevelsEmptyState
-            onAddLevel={() => setPromptDraft(ADD_LEVEL_BRIEF)}
-            onDefineSchema={() => setPromptDraft(DEFINE_LEVEL_SCHEMA_BRIEF)}
-            onExtractFromGame={() => setPromptDraft(EXTRACT_LEVELS_FROM_GAME_BRIEF)}
-          />
-        ) : (
-          <ul className="flex-1 overflow-y-auto px-[var(--space-2)] pb-[var(--space-2)]">
-            {levels.map((lvl) => (
-              <LevelRow
-                key={lvl.id}
-                level={lvl}
-                active={lvl.slug === selectedSlug}
-                onSelect={() => setSelectedSlug(lvl.slug)}
-              />
-            ))}
-          </ul>
-        )}
-      </div>
-      <div className="flex flex-1 flex-col p-[var(--space-3)]">
-        {selectedSlug !== null ? (
-          <LevelDetail designId={designId} slug={selectedSlug} levels={levels} />
-        ) : (
-          <div className="flex flex-1 items-center justify-center text-[12px] text-[var(--color-text-muted)]">
-            Select a level to inspect or edit it.
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-[var(--color-background)]">
+      <DecomposeFreshnessBanner tabLabel="levels" />
+      <div className="flex min-h-0 flex-1">
+        <div className="flex w-[300px] flex-col border-r border-[var(--color-border-muted)]">
+          <div className="flex items-center justify-between p-[var(--space-3)]">
+            <h3 className="text-[13px] font-medium text-[var(--color-text-primary)]">Levels</h3>
+            <button
+              type="button"
+              onClick={() => setPromptDraft(ADD_LEVEL_BRIEF)}
+              title="Seed the prompt with a brief asking the agent to add a new level conforming to the design's _schema.json"
+              className="inline-flex items-center gap-[4px] rounded-[var(--radius-sm)] bg-[var(--color-surface-elevated)] px-[var(--space-2)] py-[2px] text-[11px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface)]"
+            >
+              <Plus className="h-3 w-3" aria-hidden="true" />
+              New level
+            </button>
           </div>
-        )}
+          {levels.length === 0 ? (
+            <LevelsEmptyState
+              onAddLevel={() => setPromptDraft(ADD_LEVEL_BRIEF)}
+              onDefineSchema={() => setPromptDraft(DEFINE_LEVEL_SCHEMA_BRIEF)}
+              onExtractFromGame={() => setPromptDraft(EXTRACT_LEVELS_FROM_GAME_BRIEF)}
+            />
+          ) : (
+            <ul className="flex-1 overflow-y-auto px-[var(--space-2)] pb-[var(--space-2)]">
+              {levels.map((lvl) => (
+                <LevelRow
+                  key={lvl.id}
+                  level={lvl}
+                  active={lvl.slug === selectedSlug}
+                  onSelect={() => setSelectedSlug(lvl.slug)}
+                />
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="flex flex-1 flex-col p-[var(--space-3)]">
+          {selectedSlug !== null ? (
+            <LevelDetail designId={designId} slug={selectedSlug} levels={levels} />
+          ) : (
+            <div className="flex flex-1 items-center justify-center text-[12px] text-[var(--color-text-muted)]">
+              Select a level to inspect or edit it.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

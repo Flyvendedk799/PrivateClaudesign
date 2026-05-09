@@ -1,6 +1,7 @@
 import type { GameArtifact } from '@open-codesign/shared';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useCodesignStore } from '../../store';
+import { DecomposeFreshnessBanner } from './DecomposeFreshnessBanner';
 import { SPRITE_EXTRACTION_BRIEF } from './game-briefs';
 
 const ROLE_LABELS: Record<string, string> = {
@@ -111,59 +112,62 @@ export function SpritesTabView() {
   if (designId === null) return null;
 
   return (
-    <div className="flex h-full min-h-0 flex-1 bg-[var(--color-background)]">
-      <div className="flex w-[280px] flex-col border-r border-[var(--color-border-muted)]">
-        <div className="flex items-center justify-between p-[var(--space-3)]">
-          <h3 className="text-[13px] font-medium text-[var(--color-text-primary)]">Sprites</h3>
-          <button
-            type="button"
-            onClick={onPickFiles}
-            disabled={importing}
-            className="rounded-[var(--radius-sm)] bg-[var(--color-surface-elevated)] px-[var(--space-2)] py-[2px] text-[11px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface)]"
-          >
-            {importing ? 'Importing…' : 'Import'}
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept="image/png,image/webp,image/jpeg,model/gltf-binary,application/octet-stream,.png,.webp,.jpg,.jpeg,.glb,.gltf,.json"
-            onChange={onFilesPicked}
-            className="hidden"
-          />
-        </div>
-        {artifacts.length === 0 ? (
-          <SpriteEmptyState
-            onImport={onPickFiles}
-            onSeedExtractionPrompt={() => {
-              setPromptDraft(SPRITE_EXTRACTION_BRIEF);
-            }}
-          />
-        ) : (
-          <ul className="flex-1 overflow-y-auto px-[var(--space-2)] pb-[var(--space-2)]">
-            {artifacts.map((sprite) => (
-              <SpriteRow
-                key={sprite.id}
-                sprite={sprite}
-                active={sprite.id === selectedSpriteId}
-                onSelect={() => selectSprite(sprite.id)}
-              />
-            ))}
-          </ul>
-        )}
-      </div>
-      <div className="flex flex-1 flex-col p-[var(--space-3)]">
-        {selected ? (
-          <SpriteDetail
-            sprite={selected}
-            onArchive={() => archive(selected.id)}
-            onCopyAlias={() => appendArtifactRef(selected.id)}
-          />
-        ) : (
-          <div className="flex flex-1 items-center justify-center text-[12px] text-[var(--color-text-muted)]">
-            Select a sprite to inspect it.
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-[var(--color-background)]">
+      <DecomposeFreshnessBanner tabLabel="sprites" />
+      <div className="flex min-h-0 flex-1">
+        <div className="flex w-[280px] flex-col border-r border-[var(--color-border-muted)]">
+          <div className="flex items-center justify-between p-[var(--space-3)]">
+            <h3 className="text-[13px] font-medium text-[var(--color-text-primary)]">Sprites</h3>
+            <button
+              type="button"
+              onClick={onPickFiles}
+              disabled={importing}
+              className="rounded-[var(--radius-sm)] bg-[var(--color-surface-elevated)] px-[var(--space-2)] py-[2px] text-[11px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface)]"
+            >
+              {importing ? 'Importing…' : 'Import'}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/png,image/webp,image/jpeg,model/gltf-binary,application/octet-stream,.png,.webp,.jpg,.jpeg,.glb,.gltf,.json"
+              onChange={onFilesPicked}
+              className="hidden"
+            />
           </div>
-        )}
+          {artifacts.length === 0 ? (
+            <SpriteEmptyState
+              onImport={onPickFiles}
+              onSeedExtractionPrompt={() => {
+                setPromptDraft(SPRITE_EXTRACTION_BRIEF);
+              }}
+            />
+          ) : (
+            <ul className="flex-1 overflow-y-auto px-[var(--space-2)] pb-[var(--space-2)]">
+              {artifacts.map((sprite) => (
+                <SpriteRow
+                  key={sprite.id}
+                  sprite={sprite}
+                  active={sprite.id === selectedSpriteId}
+                  onSelect={() => selectSprite(sprite.id)}
+                />
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="flex flex-1 flex-col p-[var(--space-3)]">
+          {selected ? (
+            <SpriteDetail
+              sprite={selected}
+              onArchive={() => archive(selected.id)}
+              onCopyAlias={() => appendArtifactRef(selected.id)}
+            />
+          ) : (
+            <div className="flex flex-1 items-center justify-center text-[12px] text-[var(--color-text-muted)]">
+              Select a sprite to inspect it.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

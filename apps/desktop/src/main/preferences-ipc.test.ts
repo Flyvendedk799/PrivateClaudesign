@@ -57,6 +57,7 @@ describe('readPersisted()', () => {
       lastPickedMode: 'design',
       incrementalVerifyDisabled: false,
       autoContinueEnabled: true,
+      autoDecomposeEnabled: true,
     });
   });
 
@@ -202,7 +203,7 @@ describe('readPersisted()', () => {
       generationTimeoutSec: number;
       diagnosticsLastReadTs: number;
     };
-    expect(written.schemaVersion).toBe(7);
+    expect(written.schemaVersion).toBe(8);
     expect(written.generationTimeoutSec).toBe(2700);
     expect(written.diagnosticsLastReadTs).toBe(12345);
   });
@@ -258,7 +259,7 @@ describe('readPersisted()', () => {
       schemaVersion: number;
       diagnosticsLastReadTs: number;
     };
-    expect(written.schemaVersion).toBe(7);
+    expect(written.schemaVersion).toBe(8);
     expect(written.diagnosticsLastReadTs).toBe(result.diagnosticsLastReadTs);
     expect(written.diagnosticsLastReadTs).toBeGreaterThanOrEqual(before);
     expect(written.diagnosticsLastReadTs).toBeLessThanOrEqual(after);
