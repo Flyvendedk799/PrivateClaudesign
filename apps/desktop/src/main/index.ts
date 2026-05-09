@@ -1476,11 +1476,26 @@ function registerIpcHandlers(db: Database | null): void {
       setTodosCountByDesign.set(designKey, next);
       return { turnCount: perRunSetTodosCount, designCount: next };
     };
+    // may9 Phase 8b — parent-snapshot byte-size lookup for the
+    // destructive-edit advisory in done.ts. Returns null on initial
+    // run (no parent) and on all non-game runs (the advisory only
+    // fires for game mode anyway).
+    const getParentArtifactBytes = (): number | null => {
+      if (designId === null || db === null) return null;
+      try {
+        const latest = listSnapshots(db, designId)[0];
+        if (latest?.artifactSource === undefined) return null;
+        return latest.artifactSource.length;
+      } catch {
+        return null;
+      }
+    };
     return generateViaAgent(input, {
       fs,
       runtimeVerify,
       renderPreview,
       setTodosCounter,
+      getParentArtifactBytes,
       userSkills,
       ...(gameMode !== undefined ? { gameMode } : {}),
       ...(motionMode !== undefined ? { motionMode } : {}),

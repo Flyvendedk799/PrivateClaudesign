@@ -894,6 +894,13 @@ export interface GenerateViaAgentDeps {
    *  Production wires this from apps/desktop/src/main so 93-set_todos
    *  storms (FPS Wave Defense baseline) get gated at 3/turn / 12/design. */
   setTodosCounter?: (() => { turnCount: number; designCount: number }) | undefined;
+  /** may9 Phase 8b — host-supplied callback returning the parent
+   *  snapshot's artifact_source byte length, or null when no parent
+   *  exists (initial run). Forwarded into makeDoneTool so a 40%+
+   *  shrink-without-remove-intent fires the destructive-edit advisory
+   *  the FPS Wave Defense holographic-HUD regression (D5) demonstrated.
+   *  Optional; vitest + headless paths leave it undefined. */
+  getParentArtifactBytes?: (() => Promise<number | null> | number | null) | undefined;
   /**
    * User-authored design skills loaded from the host's local DB. Surfaced
    * to the agent through `list_design_skills` and `view_design_skill`
@@ -1215,10 +1222,14 @@ export async function generateViaAgent(
       ) as unknown as AgentTool<TSchema, unknown>,
     );
     defaultTools.push(
-      makeDoneTool(deps.fs, deps.runtimeVerify, log, input.artifactType) as unknown as AgentTool<
-        TSchema,
-        unknown
-      >,
+      makeDoneTool(
+        deps.fs,
+        deps.runtimeVerify,
+        log,
+        input.artifactType,
+        deps.getParentArtifactBytes,
+        input.prompt,
+      ) as unknown as AgentTool<TSchema, unknown>,
     );
     // gameplan §A5 — validate_game_scene needs both fs (to read the bundle)
     // and the host's engine-aware validator dispatch. Lazy-loaded

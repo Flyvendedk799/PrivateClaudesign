@@ -24,6 +24,7 @@
 
 import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
 import { Type } from '@sinclair/typebox';
+import { checkDestructiveEdit } from '../destructive-edit.js';
 import { VerifyResultCache, hashContent } from '../incremental-verify.js';
 import { type CoreLogger, NOOP_LOGGER } from '../logger.js';
 import { planPlaytest } from '../playtest-planner.js';
@@ -31,6 +32,14 @@ import { diffThemeTokens } from '../theme-token-diff.js';
 import { HEURISTIC_ADVISORY_SOURCES, runHeuristics } from './done-heuristics.js';
 import type { EditBudget } from './edit-budget.js';
 import type { TextEditorFsCallbacks } from './text-editor.js';
+
+/** may9 Phase 8b follow-up #28 — host-supplied callback returning the
+ *  parent snapshot's `length(artifact_source)` (or null when no parent
+ *  exists, i.e. initial run). The `done` tool consumes this to
+ *  detect destructive edits per checkDestructiveEdit. Optional —
+ *  vitest paths and design-mode runs that don't care about the
+ *  destructive-edit advisory pass undefined. */
+export type GetParentArtifactBytesFn = () => Promise<number | null> | number | null;
 
 const DoneParams = Type.Object({
   summary: Type.Optional(Type.String()),
@@ -486,6 +495,8 @@ export function makeDoneTool(
   runtimeVerify?: DoneRuntimeVerifier,
   logger: CoreLogger = NOOP_LOGGER,
   artifactType?: 'design' | 'game' | 'motion',
+  getParentArtifactBytes?: GetParentArtifactBytesFn,
+  userPrompt?: string,
 ): AgentTool<typeof DoneParams, DoneDetails> {
   // Per-tool-instance state. `makeDoneTool` is called once per `Agent`
   // construction (see generateViaAgent), so these counters are naturally
@@ -541,6 +552,36 @@ export function makeDoneTool(
           content: [{ type: 'text', text: `has_errors\n- File not found: ${path}` }],
           details,
         };
+      }
+      // may9 Phase 8b — destructive-edit advisory. When the host wired
+      // getParentArtifactBytes, compare current source size against the
+      // parent snapshot's. A 40%+ shrink without remove/strip language
+      // in the user prompt fires the advisory, which the agent gets in
+      // the result text so it can re-justify before the next done call.
+      // The first call (no parent) skips silently.
+      let destructiveAdvisory: string | null = null;
+      if (getParentArtifactBytes !== undefined && artifactType === 'game') {
+        try {
+          const priorBytes = await getParentArtifactBytes();
+          const currentBytes = file.content.length;
+          if (typeof priorBytes === 'number' && priorBytes > 0) {
+            const advisory = checkDestructiveEdit({
+              priorBytes,
+              currentBytes,
+              userPrompt: userPrompt ?? null,
+            });
+            if (advisory.triggered) {
+              destructiveAdvisory = advisory.reason;
+              logger.warn('[done] step=destructive_edit_warning', {
+                priorBytes,
+                currentBytes,
+                shrinkRatio: advisory.shrinkRatio,
+              });
+            }
+          }
+        } catch {
+          // Best-effort — if the host's lookup throws, skip the advisory.
+        }
       }
       // Snapshot the design's other files so multi-file scanLocalRefs can
       // validate cross-file references. Best-effort: if listDir throws or
@@ -662,6 +703,15 @@ export function makeDoneTool(
         text = `has_errors\n${fatal
           .map((e) => `- ${e.message}${e.lineno ? ` (line ${e.lineno})` : ''}`)
           .join('\n')}${cap}`;
+      }
+      // may9 Phase 8b — append the destructive-edit advisory if it
+      // fired. This is informational, not a block: the agent sees it
+      // and can re-justify in the next turn (if status was has_errors)
+      // or in the user-facing summary (if status was ok). Surfacing
+      // in both paths because the regression class manifests as a
+      // shrunk-but-otherwise-clean source.
+      if (destructiveAdvisory !== null) {
+        text = `${text}\n\nDESTRUCTIVE-EDIT WARNING: ${destructiveAdvisory}`;
       }
       return { content: [{ type: 'text', text }], details };
     },
