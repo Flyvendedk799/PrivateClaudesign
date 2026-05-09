@@ -156,6 +156,23 @@ function threeValidate(files: ReadonlyArray<InputFile>): ValidationResult {
         severity: 'error',
       });
     }
+    // may9 Phase 8 follow-up #27 (Three.js portion) — trigger-zone
+    // contract lint. The static-analysis equivalent of the Phaser
+    // Tiled walk: when the JS references __game.world.triggers, it
+    // must also expose colliders so a runtime point-in-volume test
+    // can validate reachability. Catches the FPS Wave Defense
+    // regression class where a "go through the door" trigger zone
+    // was numerically outside the walkable area.
+    const referencesTriggers = /__game\.world\.triggers\b/.test(allJs);
+    const referencesColliders = /__game\.world\.colliders\b/.test(allJs);
+    if (referencesTriggers && !referencesColliders) {
+      issues.push({
+        path: jsFiles[0]?.path ?? 'src/',
+        message:
+          'geometry.unreachable_trigger: code references `__game.world.triggers` but never sets `__game.world.colliders`. The host playtest path uses both to assert each trigger centroid lies inside the walkable polygon — without colliders the check is dormant. Expose `__game.world.colliders = [...]` (an array of bounding boxes / meshes) alongside triggers.',
+        severity: 'warn',
+      });
+    }
   }
 
   if (issues.length === 0) return { ok: true };

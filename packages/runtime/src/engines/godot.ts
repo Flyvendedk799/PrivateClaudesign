@@ -212,6 +212,36 @@ function godotValidate(files: ReadonlyArray<InputFile>): ValidationResult {
     }
   }
 
+  // may9 Phase 8 follow-up #27 (Godot portion) — trigger-zone
+  // structural lint. .tscn scenes reference Area2D/Area3D for trigger
+  // zones; the lint flags scenes that declare an Area* node but lack
+  // a CollisionShape/CollisionPolygon child OR any StaticBody/Tileset
+  // that defines the walkable polygon. Catches "go through the door"
+  // triggers placed without any wall geometry to bound them.
+  for (const file of files) {
+    if (!file.path.endsWith('.tscn')) continue;
+    const hasAreaTrigger = /\[node[^\]]*type="Area[23]D"/.test(file.content);
+    if (!hasAreaTrigger) continue;
+    const hasCollisionShape = /\[node[^\]]*type="CollisionShape[23]D"/.test(file.content);
+    const hasWalkableBounds =
+      /\[node[^\]]*type="(StaticBody[23]D|TileMap|GridMap|RigidBody[23]D)"/.test(file.content);
+    if (!hasCollisionShape) {
+      issues.push({
+        path: file.path,
+        message:
+          'geometry.unreachable_trigger: scene declares an Area* trigger node but no CollisionShape* child. Trigger zones need a shape to be reachable.',
+        severity: 'warn',
+      });
+    } else if (!hasWalkableBounds) {
+      issues.push({
+        path: file.path,
+        message:
+          'geometry.unreachable_trigger: scene declares Area* triggers but no walkable bounds (StaticBody, TileMap, RigidBody). The reachability check is dormant; add at least one bounding body.',
+        severity: 'warn',
+      });
+    }
+  }
+
   if (issues.length === 0) return { ok: true };
   return { ok: false, issues };
 }

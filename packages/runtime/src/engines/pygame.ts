@@ -279,6 +279,26 @@ function pygameValidate(files: ReadonlyArray<InputFile>): ValidationResult {
     }
   }
 
+  // may9 Phase 8 follow-up #27 (Pygame portion) — trigger-zone
+  // structural lint. Pygame doesn't have a canonical level-format like
+  // Tiled, so the static check is conservative: when code references
+  // an `exit_zone` / `trigger_zone` / `goal` rect by name, it should
+  // also reference walkable bounds (a `walkable_rect`, `bounds`, a
+  // tile collision lookup, or a sprite group like `walls`). Without
+  // any of those, the trigger may be unreachable.
+  const refsExitZone = /\b(exit_zone|trigger_zone|goal_zone|level_exit)\b/.test(ctx.pythonContent);
+  const refsWalkable = /\b(walkable|walls|collidable|solid_tiles|collision_layer|bounds)\b/.test(
+    ctx.pythonContent,
+  );
+  if (refsExitZone && !refsWalkable) {
+    issues.push({
+      path: ctx.pythonFiles[0]?.path ?? 'main.py',
+      message:
+        'geometry.unreachable_trigger: code references an exit/trigger/goal zone but no walkable bounds (walls, bounds, collision_layer, walkable rect). Reachability cannot be verified. Either remove the trigger or expose the walkable polygon so `assert_game_invariants` can check it.',
+      severity: 'warn',
+    });
+  }
+
   if (issues.length === 0) return { ok: true };
   return { ok: false, issues };
 }
