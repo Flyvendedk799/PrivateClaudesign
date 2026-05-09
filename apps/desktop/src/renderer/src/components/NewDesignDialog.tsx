@@ -8,6 +8,44 @@ type Mode = 'design' | 'game' | 'motion';
 type Engine = 'auto' | 'three' | 'phaser' | 'pygame' | 'godot';
 type StylePick = 'auto' | MotionStyle;
 
+/** may9 Phase 10 — genre dropdown options. The seven shown here are
+ *  the genres that ship a built-in playtest playbook (see
+ *  packages/core/src/playtest-playbooks.ts) plus a small set of
+ *  high-frequency briefs that don't yet have one but read naturally
+ *  in a New-Design dropdown. The agent's declare_game_spec accepts
+ *  more values than this; the dialog stays curated so the picker is
+ *  scannable. */
+type GenrePick =
+  | 'auto'
+  | 'platformer'
+  | 'topdown_arcade'
+  | 'fps'
+  | 'tps'
+  | 'fighting'
+  | 'puzzle'
+  | 'runner'
+  | 'rpg'
+  | 'shmup'
+  | 'racing'
+  | 'tower_defense'
+  | 'rhythm';
+
+const GENRE_OPTIONS: ReadonlyArray<{ value: GenrePick; label: string }> = [
+  { value: 'auto', label: 'Auto (let the agent infer)' },
+  { value: 'platformer', label: 'Platformer (side-scroll, jump arcs)' },
+  { value: 'topdown_arcade', label: 'Top-down arcade' },
+  { value: 'fps', label: 'FPS (first-person shooter)' },
+  { value: 'tps', label: 'TPS (third-person shooter)' },
+  { value: 'fighting', label: 'Fighting / brawler' },
+  { value: 'puzzle', label: 'Puzzle (match / swap)' },
+  { value: 'runner', label: 'Endless runner' },
+  { value: 'rpg', label: 'RPG (top-down or iso)' },
+  { value: 'shmup', label: 'Shoot-em-up (vertical / horiz)' },
+  { value: 'racing', label: 'Racing' },
+  { value: 'tower_defense', label: 'Tower defense' },
+  { value: 'rhythm', label: 'Rhythm' },
+];
+
 const STYLE_OPTIONS: ReadonlyArray<{
   value: StylePick;
   label: string;
@@ -74,6 +112,11 @@ export function NewDesignDialog() {
   const [mode, setMode] = useState<Mode>(lastPickedMode);
   const [engine, setEngine] = useState<Engine>('auto');
   const [style, setStyle] = useState<StylePick>('auto');
+  // may9 Phase 10 — genre seed. Seeds the agent's declare_game_spec
+  // call so the spec gate has a typed genre from the get-go (closes
+  // the FPS-vault iteration coherence regression class on the very
+  // first turn). 'auto' leaves it to the agent.
+  const [genre, setGenre] = useState<GenrePick>('auto');
 
   useEffect(() => {
     if (open) setMode(lastPickedMode);
@@ -103,6 +146,7 @@ export function NewDesignDialog() {
         mode,
         engine: mode === 'game' && engine !== 'auto' ? engine : null,
         motionStyle: mode === 'motion' && style !== 'auto' ? style : null,
+        gameGenre: mode === 'game' && genre !== 'auto' ? genre : null,
       });
       const design = await createNewDesign(withPath);
       close();
@@ -273,6 +317,28 @@ export function NewDesignDialog() {
                   </div>
                 </label>
               ))}
+            </div>
+            {/* may9 Phase 10 — genre dropdown. Seeds declare_game_spec
+                so the spec gate runs with a typed genre from turn 0. */}
+            <div className="space-y-1.5 pt-1">
+              <label
+                htmlFor="newdesign-genre"
+                className="text-[var(--text-xs)] text-[var(--color-text-secondary)]"
+              >
+                Genre
+              </label>
+              <select
+                id="newdesign-genre"
+                value={genre}
+                onChange={(e) => setGenre(e.target.value as GenrePick)}
+                className="w-full rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-[var(--text-sm)] text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+              >
+                {GENRE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         ) : (

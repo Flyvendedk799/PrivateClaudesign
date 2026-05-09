@@ -424,6 +424,10 @@ interface CodesignState {
    */
   pendingArtifactMode: 'design' | 'game' | 'motion' | null;
   pendingGameEngine: 'three' | 'phaser' | 'pygame' | 'godot' | null;
+  /** may9 Phase 10 — genre seed picked in NewDesignDialog. Forwarded
+   *  into the next runGenerate payload's promptAssist so declare_game_spec
+   *  starts with a typed genre. Null means 'auto' / no seed. */
+  pendingGameGenre: string | null;
   /** motion-graphics-plan §1.1 — style pin from the New-design dialog,
    *  consumed by the next IPC payload alongside pendingArtifactMode. */
   pendingMotionStyle: MotionStyle | null;
@@ -796,6 +800,10 @@ interface CodesignState {
     mode: 'design' | 'game' | 'motion';
     engine?: 'three' | 'phaser' | 'pygame' | 'godot' | null;
     motionStyle?: MotionStyle | null;
+    /** may9 Phase 10 — genre seed from the New-design dialog. The
+     *  agent's declare_game_spec call uses this as the typed `genre`
+     *  default if the brief is ambiguous. */
+    gameGenre?: string | null;
   }) => void;
   clearPendingGameSelection: () => void;
   // motion-graphics-plan §4 — actions used by the motion UI surface.
@@ -2232,6 +2240,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   pendingArtifactMode: null,
   pendingGameEngine: null,
   pendingMotionStyle: null,
+  pendingGameGenre: null,
   currentDesignEngine: null,
   currentArtifactType: 'design',
   decomposeFlow: null,
@@ -3916,6 +3925,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       pendingArtifactMode: input.mode,
       pendingGameEngine: input.mode === 'game' ? (input.engine ?? null) : null,
       pendingMotionStyle: input.mode === 'motion' ? (input.motionStyle ?? null) : null,
+      pendingGameGenre: input.mode === 'game' ? (input.gameGenre ?? null) : null,
       lastPickedMode: input.mode,
     });
     void window.codesign?.preferences
@@ -3923,7 +3933,12 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       ?.catch(() => undefined);
   },
   clearPendingGameSelection() {
-    set({ pendingArtifactMode: null, pendingGameEngine: null, pendingMotionStyle: null });
+    set({
+      pendingArtifactMode: null,
+      pendingGameEngine: null,
+      pendingMotionStyle: null,
+      pendingGameGenre: null,
+    });
   },
   selectMotionTab(tab) {
     set({ activeMotionTab: tab });

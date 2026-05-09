@@ -114,6 +114,7 @@ import {
   type GenerateImageAssetFn,
   makeGenerateImageAssetTool,
 } from './tools/generate-image-asset.js';
+import { makeGetPlaytestPlaybookTool } from './tools/get-playtest-playbook.js';
 import { makeListFilesTool } from './tools/list-files.js';
 import {
   type MotionCompositionRegistryDeps,
@@ -1328,6 +1329,13 @@ export async function generateViaAgent(
           unknown
         >,
       );
+    }
+    // may9 Phase 9 — genre-specific playbook lookup. Pure data; no host
+    // dependencies. Registered for every game-mode run so the agent can
+    // query supported genres even when the host omits the playtester
+    // (the playbook is still useful as a documentation source).
+    if (isGameMode) {
+      defaultTools.push(makeGetPlaytestPlaybookTool() as unknown as AgentTool<TSchema, unknown>);
     }
   }
   if (deps.generateImageAsset) {

@@ -21,7 +21,6 @@ function fakeFs(content: string): TextEditorFsCallbacks {
     strReplace: vi.fn(),
     insert: vi.fn(),
     listDir: vi.fn(() => ['index.html']),
-    delete: vi.fn(),
   };
 }
 
