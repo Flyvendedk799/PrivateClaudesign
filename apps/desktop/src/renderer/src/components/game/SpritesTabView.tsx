@@ -285,16 +285,30 @@ function SpriteDetail({
   onCopyAlias: () => void;
 }) {
   const meta = sprite.metadata.kind === 'sprite' ? sprite.metadata : null;
-  const bindings = useCodesignStore((s) =>
-    sprite.designId in s.gameAnimationBindingsByDesign
-      ? (s.gameAnimationBindingsByDesign[sprite.designId] ?? [])
-      : [],
+  // Selector stability — `.filter()` / `?? []` inline returns a fresh
+  // reference per call. Zustand sees a new snapshot every render, the
+  // component re-renders, the selector re-runs → "Maximum update
+  // depth exceeded" the moment another store write happens (e.g. an
+  // auto-decompose run mutating gameArtifactsByDesign while this
+  // detail panel is open). Select the raw arrays once, derive the
+  // filtered subsets via useMemo so the references stay stable across
+  // unrelated store writes — same pattern used in the SpritesTabView
+  // outer hooks above.
+  const rawArtifacts = useCodesignStore((s) => s.gameArtifactsByDesign[sprite.designId] ?? null);
+  const animations = useMemo(
+    () => (rawArtifacts ?? []).filter((a) => a.kind === 'animation'),
+    [rawArtifacts],
   );
-  const animations = useCodesignStore((s) =>
-    (s.gameArtifactsByDesign[sprite.designId] ?? []).filter((a) => a.kind === 'animation'),
+  const rawBindings = useCodesignStore(
+    (s) => s.gameAnimationBindingsByDesign[sprite.designId] ?? null,
   );
-  const compatibleAnimations = animations.filter((anim) =>
-    bindings.some((b) => b.animationId === anim.id && b.spriteId === sprite.id),
+  const bindings = useMemo(() => rawBindings ?? [], [rawBindings]);
+  const compatibleAnimations = useMemo(
+    () =>
+      animations.filter((anim) =>
+        bindings.some((b) => b.animationId === anim.id && b.spriteId === sprite.id),
+      ),
+    [animations, bindings, sprite.id],
   );
 
   return (
