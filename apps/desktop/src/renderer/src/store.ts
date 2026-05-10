@@ -3592,16 +3592,6 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       set({ toastMessage: 'A generation is in flight — cancel or wait before decomposing.' });
       return;
     }
-    // Snapshot the artifact bytes at run start so the freshness hash we
-    // persist on success reflects what the four phases actually saw.
-    // Mid-run mutations (none should happen — sendPrompt is bounded by
-    // isGenerating — but defensive) won't be captured: the next change
-    // will trigger a fresh tryAutoDecompose.
-    const startHtml = get().previewHtml;
-    const startHashPromise: Promise<string | null> =
-      typeof startHtml === 'string' && startHtml.length > 0
-        ? sha256Hex(startHtml)
-        : Promise.resolve(null);
     set({
       decomposeFlow: {
         designId,
@@ -3688,22 +3678,31 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         toastMessage: 'Decomposition complete — Sprites, Animations, Levels, World all populated.',
       };
     });
-    // Persist the start-of-run hash so the next change to index.html is
-    // detectable as "stale" by tryAutoDecompose. We persist only on full
-    // success: a partial / failed / cancelled run leaves the prior hash
-    // in place, which keeps the design correctly marked stale until the
-    // next attempt lands. Hashing + IPC are fire-and-forget — UI already
-    // marked the flow completed; a persist failure is a stale-detection
-    // bug at worst, not a correctness issue.
+    // Persist the END-of-run hash — i.e. the artifact bytes the four
+    // phases produced — so a subsequent agent_end's tryAutoDecompose
+    // sees the live `previewHtml` matching the persisted hash and
+    // correctly skips. Persisting the START hash here was the original
+    // shape of this code, but the sprite/animation extraction briefs
+    // explicitly allow targeted edits to `index.html` (relocating
+    // inline weapon/character viewmodels into `assets/sprites/...`),
+    // so start and end hashes diverge on every successful flow. With
+    // start-hash persisted, the next agent_end always saw drift and
+    // re-fired the entire 4-phase pipeline — observed cost ~$10 over
+    // 2.5h before the bug was caught. End-hash converges immediately:
+    // hash(post-flow artifact) == live previewHtml right after we
+    // return, so the freshness check returns "fresh" until the next
+    // real change.
     if (landedSuccessfully) {
       try {
-        const hash = await startHashPromise;
-        if (hash !== null && window.codesign?.snapshots?.setDecomposeHash) {
-          await window.codesign.snapshots.setDecomposeHash(designId, hash);
+        const finalHtml = get().previewHtml;
+        const finalHash =
+          typeof finalHtml === 'string' && finalHtml.length > 0 ? await sha256Hex(finalHtml) : null;
+        if (finalHash !== null && window.codesign?.snapshots?.setDecomposeHash) {
+          await window.codesign.snapshots.setDecomposeHash(designId, finalHash);
           set((s) => ({
             lastDecomposedHashByDesign: {
               ...s.lastDecomposedHashByDesign,
-              [designId]: hash,
+              [designId]: finalHash,
             },
           }));
         }
