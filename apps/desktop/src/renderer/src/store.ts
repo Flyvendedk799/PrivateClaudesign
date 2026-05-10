@@ -1034,6 +1034,16 @@ async function sha256Hex(input: string): Promise<string> {
   return hexParts.join('');
 }
 
+/** v9 — per-design epoch ms of the last `tryAutoDecompose` that actually
+ *  fired `startDecomposeFlow`. Module-level rather than store-state so
+ *  it survives Settings re-loads + isn't observed by React (no need for
+ *  re-renders on bump). The 60-second floor is a belt-and-suspenders
+ *  against any future logic regression — even if the hash check or
+ *  chat-loaded guard mis-evaluates, the runaway loop is hard-capped to
+ *  one fire per minute per design. */
+const lastAutoDecomposeFiredAt = new Map<string, number>();
+const AUTO_DECOMPOSE_MIN_GAP_MS = 60_000;
+
 // PreviewPane keeps an iframe per recently-visited design alive so switching
 // back is instant. Bound the pool so memory stays small for users with lots
 // of designs — 5 covers the typical "compare two or three" workflow with
@@ -2884,7 +2894,16 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           }
         }
       }
-      const canAutoRetry = transient && !producedToolCall && input._autoRetried !== true;
+      // v9 — exclude `silent: true` runs from auto-retry. Silent calls
+      // are orchestrator-driven (Decompose phases, auto-polish): if the
+      // upstream stream gets cut, we want the orchestrator's flow to
+      // see a clean "this phase failed" signal and stop, not an
+      // invisible 5-second retry chain that masks the failure and
+      // burns tokens. Production trace 2026-05-10: a single Decompose
+      // flow stacked ~10 silent retries before the user noticed
+      // because each silent retry suppressed the chat user-bubble.
+      const canAutoRetry =
+        transient && !producedToolCall && input._autoRetried !== true && input.silent !== true;
       if (canAutoRetry) {
         // Surface the retry attempt as a low-key info toast so the user
         // sees what's happening but doesn't get a scary error first.
@@ -3746,41 +3765,66 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   async tryAutoDecompose(designId: string) {
     if (!window.codesign) return;
     const state = get();
-    // Hard guards — every one of these is "definitely don't fire."
+    // ── Hard guards — every one returns early without doing any IPC. ──
+    // Each is documented because the v8 implementation had a perf bug
+    // where a single missing guard caused $10/2.5h of wasted runs.
     if (state.currentDesignId !== designId) return;
     if (state.currentArtifactType !== 'game') return;
     if (state.isGenerating) return;
     if (state.decomposeFlow !== null && state.decomposeFlow.overallStatus === 'running') {
       return;
     }
+    // v9 — auto-fire is "first-time only." Once a design has any
+    // `lastDecomposedArtifactHash` (success or even partial-success
+    // from an older v8 install), subsequent edits surface the freshness
+    // banner with a manual "Run now" CTA instead of auto-firing. This
+    // is the trigger-narrowing that breaks the v8 retry-cascade —
+    // every change no longer kicks off a 4-phase pipeline.
+    if (
+      state.lastDecomposedHashByDesign[designId] !== null &&
+      state.lastDecomposedHashByDesign[designId] !== undefined
+    ) {
+      return;
+    }
+    // v9 — wait for chat history to load before firing. The v8 code
+    // could fire while `chatMessages === []` because
+    // `loadChatForCurrentDesign` is fire-and-forget; the silent
+    // decompose prompt then went out with `historyLen: 0`, making the
+    // agent re-discover the project from scratch (wasted tokens +
+    // lower-quality output). Wait for the load so the decompose phase
+    // sees the same context the model would on any other run.
+    if (!state.chatLoaded) return;
     // While auto-continue is mid-chain (a continuation_pending row is
     // open and the next sendPrompt is queued), don't kick off a parallel
     // pipeline — wait for the model to actually finish.
     if (hasFreshContinuationPending(state.chatMessages, designId)) return;
+    // v9 — hard 60s floor between auto-fires for the same design.
+    // Belt-and-suspenders: even if a future logic regression
+    // mis-evaluates the hash check or chat-loaded guard, the runaway
+    // loop is bounded to at most one auto-fire per minute. Manual
+    // toolbar Decompose remains unrestricted.
+    const lastFired = lastAutoDecomposeFiredAt.get(designId) ?? 0;
+    if (Date.now() - lastFired < AUTO_DECOMPOSE_MIN_GAP_MS) return;
     // Pref check — read fresh so a Settings toggle takes effect on the
-    // next change without a reload. The renderer already reads prefs
-    // for the auto-continue handler; this is the symmetrical path.
-    let autoEnabled = true;
+    // next change without a reload.
+    let autoEnabled = false;
     try {
       const prefs = await window.codesign.preferences?.get?.();
       if (prefs && typeof prefs.autoDecomposeEnabled === 'boolean') {
         autoEnabled = prefs.autoDecomposeEnabled;
       }
     } catch {
-      // If prefs read fails, default to the documented default (ON).
-      autoEnabled = true;
+      // v9 — pref read failure defaults to OFF (was ON in v8). After
+      // the v8 cost incident, "fail closed" is the right posture.
+      autoEnabled = false;
     }
     if (!autoEnabled) return;
     const html = state.previewHtml;
     if (typeof html !== 'string' || html.length === 0) return;
-    const liveHash = await sha256Hex(html);
-    const persistedHash = state.lastDecomposedHashByDesign[designId];
-    if (persistedHash === liveHash) {
-      // Tabs are already in sync with the current artifact — no-op.
-      return;
-    }
-    // State drifted (or never decomposed). Re-check guards after the
-    // async hash compute in case anything started in the gap.
+    // First-time-only branch: we already verified
+    // lastDecomposedHashByDesign[designId] is null above, so any drift
+    // detection here is redundant. Re-check the timing guards after
+    // the (unavoidable) async pref read in case something raced.
     const after = get();
     if (after.currentDesignId !== designId) return;
     if (after.isGenerating) return;
@@ -3788,10 +3832,16 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       return;
     }
     if (hasFreshContinuationPending(after.chatMessages, designId)) return;
-    if (after.lastDecomposedHashByDesign[designId] === liveHash) return;
+    if (
+      after.lastDecomposedHashByDesign[designId] !== null &&
+      after.lastDecomposedHashByDesign[designId] !== undefined
+    ) {
+      return;
+    }
+    lastAutoDecomposeFiredAt.set(designId, Date.now());
     rendererLogger.info('decompose', 'decompose.auto.fire', {
       designId,
-      hadPriorHash: persistedHash !== null && persistedHash !== undefined,
+      reason: 'first_time',
     });
     void get().startDecomposeFlow(designId);
   },

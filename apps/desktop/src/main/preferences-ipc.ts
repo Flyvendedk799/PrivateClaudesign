@@ -17,7 +17,17 @@ import { getLogger } from './logger';
 
 const logger = getLogger('preferences-ipc');
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
+// v8 default for `autoDecomposeEnabled` was `true`, but the "every
+// game change re-fires the 4-phase pipeline" semantics chewed through
+// tokens (~$10 of LLM spend in 2.5h on a single brawler design before
+// the start-hash bug + retry cascade were diagnosed). v9 narrows the
+// trigger to "first-time-only on never-decomposed games" AND flips
+// the default to `false`. The parser below treats the literal
+// v8-default value as "unmigrated default" and rewrites it to the v9
+// default during readPersisted; users who explicitly toggled it ON
+// keep their choice.
+const V8_AUTO_DECOMPOSE_DEFAULT = true;
 // v1 → v2: raise the abandoned 120s timeout default (which aborted real
 // agentic runs mid-loop) to 600s. Values that happen to equal the old
 // default are treated as unmigrated defaults, not user intent.
@@ -72,15 +82,17 @@ export interface Preferences {
    *  (model_requested) or hits an error. Default true. Model-requested
    *  and manual pauses always stop, regardless of this flag. */
   autoContinueEnabled: boolean;
-  /** v8 — when true and a game-mode design's index.html bytes change
-   *  (initial generation completes, applyComment edit lands, design
-   *  switch into a previously-edited game), the renderer auto-runs the
-   *  four-phase Decompose pipeline (sprites → animations → levels →
-   *  world). Default true. Disable to require the manual Decompose
-   *  toolbar button — useful for credit-conscious users since each
-   *  phase is its own LLM call. Skipped while a continuation_pending
-   *  row is open (avoids stomping mid-chain), while another decompose
-   *  is already running, and on non-game designs. */
+  /** v9 — when true, the four-phase Decompose pipeline (sprites →
+   *  animations → levels → world) auto-runs **once per game** — and
+   *  only on a never-decomposed design (lastDecomposedArtifactHash is
+   *  NULL). Subsequent edits to index.html surface a "Run now" CTA in
+   *  each game tab's freshness banner instead of auto-firing, so token
+   *  spend is bounded by explicit user action. Default false (the
+   *  v8→v9 migration flips it off because the v8 "every change"
+   *  semantics produced runaway loops in production — see commit
+   *  af5118d hash-bug + retry-cascade analysis). Users who want the
+   *  old "always re-decompose" behavior can opt back in via Settings,
+   *  but it's not the documented path. */
   autoDecomposeEnabled: boolean;
 }
 
@@ -102,7 +114,7 @@ const DEFAULTS: Preferences = {
   lastPickedMode: 'design',
   incrementalVerifyDisabled: false,
   autoContinueEnabled: true,
-  autoDecomposeEnabled: true,
+  autoDecomposeEnabled: false,
 };
 
 /** Deterministic parse of the on-disk preferences file. No clock reads: the
@@ -154,9 +166,21 @@ function parsePersistedFile(parsed: Partial<PreferencesFile>): Preferences {
       typeof parsed.autoContinueEnabled === 'boolean'
         ? parsed.autoContinueEnabled
         : DEFAULTS.autoContinueEnabled,
+    // v8→v9 migration: schema 8 shipped `autoDecomposeEnabled: true` as
+    // default, but the "every game change re-fires the 4-phase pipeline"
+    // semantics turned out to be way too eager (production trace burned
+    // ~\$10 in 2.5h). Treat a v8 row that still carries the literal v8
+    // default as unmigrated and rewrite to the v9 default; users who
+    // explicitly opted in (toggled it ON after launch — same boolean
+    // shape, indistinguishable from the seed default) get the same flip,
+    // which we accept because the v8 semantics are gone anyway and the
+    // v9 toggle is documented as "first-time only" — they can re-enable
+    // explicitly post-migration.
     autoDecomposeEnabled:
       typeof parsed.autoDecomposeEnabled === 'boolean'
-        ? parsed.autoDecomposeEnabled
+        ? persistedSchema < 9 && parsed.autoDecomposeEnabled === V8_AUTO_DECOMPOSE_DEFAULT
+          ? DEFAULTS.autoDecomposeEnabled
+          : parsed.autoDecomposeEnabled
         : DEFAULTS.autoDecomposeEnabled,
   };
 }

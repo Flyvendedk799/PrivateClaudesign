@@ -38,7 +38,13 @@ export function DecomposeFreshnessBanner({
     designId !== null ? (s.lastDecomposedHashByDesign[designId] ?? null) : null,
   );
   const flow = useCodesignStore((s) => s.decomposeFlow);
-  const tryAutoDecompose = useCodesignStore((s) => s.tryAutoDecompose);
+  // v9 — the "Run now" button calls startDecomposeFlow directly
+  // (not tryAutoDecompose), because tryAutoDecompose intentionally
+  // refuses to fire on already-decomposed designs as part of the
+  // first-time-only auto semantics. This banner button is the user's
+  // explicit re-decompose request, which is exactly what the manual
+  // toolbar button does.
+  const startDecomposeFlow = useCodesignStore((s) => s.startDecomposeFlow);
 
   const [staleDetected, setStaleDetected] = useState<boolean>(false);
 
@@ -92,7 +98,7 @@ export function DecomposeFreshnessBanner({
       {!isRunning && designId !== null ? (
         <button
           type="button"
-          onClick={() => void tryAutoDecompose(designId)}
+          onClick={() => void startDecomposeFlow(designId)}
           className="rounded-[var(--radius-sm)] border border-[var(--color-border-muted)] px-[var(--space-2)] py-[2px] text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
         >
           Run now
