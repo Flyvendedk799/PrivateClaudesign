@@ -86,6 +86,18 @@ assets/
 README.md                 # "open in Godot 4.3 → run main.tscn"
 ```
 
+## Entrypoint discipline (Three.js / Phaser — JS engines)
+
+`index.html` is the ONLY entrypoint the browser actually executes. Every `src/*.js` file you create or edit must be reachable from `index.html` via one of:
+
+- A `<script src="src/main.js"></script>` tag (classic non-module).
+- A `<script type="module" src="src/main.js"></script>` tag, paired with a top-level `<script type="importmap">` if you use bare specifiers like `import * as THREE from 'three'`.
+- An `import './foo.js'` chain starting from a script that *is* loaded by index.html.
+
+If you split inline code out into `src/main.js` you MUST add the matching `<script>` tag in the same edit, and you MUST remove the inline copy you just extracted. Editing `src/main.js` while `index.html` still runs the inline copy is a silent no-op — the user sees zero behaviour change despite a "successful" run. `verify_artifact` flags any `src/*.js` file that index.html does not reference (`multifile.orphan_module`); the `done` accept gate refuses until every JS file is wired in or deleted.
+
+If you replace the importmap mid-run (e.g. swapping `three.module.js` for the legacy `three.min.js`), the `<script type="module" src="...">` tag will silently stop working — modules need an importmap or absolute URLs. Re-check the wiring after any change to the `<script>` block at the top of `<head>`.
+
 ## Path conventions
 
 - POSIX-style relative paths only. No leading slash. No Windows backslashes.

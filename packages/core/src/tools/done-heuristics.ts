@@ -412,7 +412,78 @@ export function runHeuristics(
     ...(skipHtmlSemantic ? [] : scanResponsiveSignals(src)),
     ...(isMotion ? [] : scanDarkModeSupport(src)),
     ...scanLocalRefs(src, knownFiles),
+    // Skipped for motion (Remotion bundles modules its own way; the
+    // bundler enforces reachability statically). Game + design HTML
+    // both load JS via plain <script> tags, so the orphan-module heuristic
+    // applies uniformly.
+    ...(isMotion ? [] : scanOrphanedJsModules(src, knownFiles)),
   ];
+}
+
+/**
+ * Detect `.js` / `.mjs` files in the project that the rendered HTML
+ * doesn't load. Catches the failure mode where the agent extracts logic
+ * out of an inline `<script>` block into `src/main.js` (or similar) but
+ * forgets to add a `<script type="module" src="src/main.js">` tag — or
+ * later removes it during an unrelated edit. The agent then keeps
+ * editing the orphaned file thinking it's the source of truth, while
+ * the rendered game/page still runs the inline copy. Production trace
+ * 2026-05-10: 5+ "improve combat" prompts edited `src/main.js` while
+ * `index.html` ran a stale inline script — the user reported "changes
+ * didn't implement in game" and the diagnosis took 30 minutes.
+ *
+ * Heuristic: the file's path or basename must appear somewhere in the
+ * rendered HTML (covers `<script src="...">`, `<script type="module"
+ * src="...">`, importmap entries, and inline `import './foo.js'`
+ * strings). Anything not mentioned is flagged as a fatal error so the
+ * `done` accept gate refuses until the wiring is restored.
+ *
+ * Scoped narrow on purpose:
+ *   - Only `.js` / `.mjs` / `.cjs` files (not `.css`, `.json`, etc.)
+ *   - Skips files under `assets/` (data, not code; loaded on demand)
+ *   - Skips `_schema.json`-style metadata regardless
+ *   - Skips when the project is single-file (no siblings) — JSX / vanilla
+ *     React patterns don't have separate JS modules
+ *
+ * Limited intentionally: only checks top-level reachability from the
+ * rendered HTML. A `.js` file imported only from another `.js` file is
+ * still flagged because the heuristic doesn't follow transitive imports
+ * (would need fs read access). In practice the agent's first fix is
+ * almost always at the entrypoint, and the next verify pass catches
+ * any remaining orphans.
+ */
+export function scanOrphanedJsModules(src: string, knownFiles: Set<string>): DoneError[] {
+  if (knownFiles.size === 0) return [];
+  const orphaned: string[] = [];
+  for (const path of knownFiles) {
+    if (!/\.(m?js|cjs)$/i.test(path)) continue;
+    if (path.startsWith('assets/')) continue;
+    // Reference forms we tolerate as "wired up":
+    //   <script src="src/main.js"></script>
+    //   <script type="module" src="src/main.js"></script>
+    //   importmap: { "main": "./src/main.js" }
+    //   inline: import './main.js'
+    //   inline: import { ... } from './src/main.js'
+    // The basename catches the `import './entities.js'` form when the
+    // agent puts entities.js next to main.js and uses a bare relative
+    // path. We don't want false positives for files whose names happen
+    // to appear in user-visible text ("main.js" mentioned in a tutorial),
+    // so the basename check is gated on the path NOT being mentioned —
+    // i.e. the basename match is the fallback, not the primary signal.
+    if (src.includes(path)) continue;
+    const slashIdx = path.lastIndexOf('/');
+    const basename = slashIdx >= 0 ? path.slice(slashIdx + 1) : path;
+    if (basename !== path && src.includes(basename)) continue;
+    orphaned.push(path);
+  }
+  return orphaned.map((path) => ({
+    message:
+      // Single template literal — Biome's noUnusedTemplateLiteral lint
+      // wants either pure interpolation or pure string. The agent reads
+      // this end-to-end so the long form is intentional.
+      `'${path}' is in the project but the rendered HTML does not load it (no \`<script src=\` or \`<script type="module" src=\` tag, no importmap entry, no inline import). Either wire it in (e.g. \`<script type="module" src="${path}"></script>\` after the inline blocks), inline its content into an existing \`<script>\` block, or delete the file. Editing this file currently has no effect on the rendered output.`,
+    source: 'multifile.orphan_module',
+  }));
 }
 
 /** Sources that are advisory — surface to the model but never trip has_errors. */
@@ -436,4 +507,5 @@ export const HEURISTIC_FATAL_SOURCES = new Set<string>([
   'a11y.no_document_title',
   'a11y.no_html_lang',
   'multifile.missing_ref',
+  'multifile.orphan_module',
 ]);

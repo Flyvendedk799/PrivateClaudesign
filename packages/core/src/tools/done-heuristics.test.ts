@@ -10,6 +10,7 @@ import {
   scanHeadingHierarchy,
   scanInteractivity,
   scanLocalRefs,
+  scanOrphanedJsModules,
   scanResponsiveSignals,
 } from './done-heuristics.js';
 
@@ -254,6 +255,96 @@ describe('scanLocalRefs', () => {
     for (const e of r) {
       expect(HEURISTIC_FATAL_SOURCES.has(e.source ?? '')).toBe(true);
     }
+  });
+});
+
+describe('scanOrphanedJsModules', () => {
+  it('flags src/main.js when index.html does not load it', () => {
+    const html = "<!doctype html><html><body><script>console.log('inline');</script></body></html>";
+    const r = scanOrphanedJsModules(html, new Set(['src/main.js']));
+    expect(r).toHaveLength(1);
+    expect(r[0]?.source).toBe('multifile.orphan_module');
+    expect(r[0]?.message).toMatch(/src\/main\.js/);
+    expect(r[0]?.message).toMatch(/does not load it/);
+  });
+
+  it('passes when <script src="src/main.js"> is present', () => {
+    const html = '<!doctype html><html><body><script src="src/main.js"></script></body></html>';
+    const r = scanOrphanedJsModules(html, new Set(['src/main.js']));
+    expect(r).toHaveLength(0);
+  });
+
+  it('passes when <script type="module" src="src/main.js"> is present', () => {
+    const html =
+      '<!doctype html><html><body><script type="module" src="src/main.js"></script></body></html>';
+    const r = scanOrphanedJsModules(html, new Set(['src/main.js']));
+    expect(r).toHaveLength(0);
+  });
+
+  it('passes when an inline script imports the file by basename', () => {
+    // Common pattern: <script type="module">import { Audio } from './main.js';</script>
+    const html =
+      '<!doctype html><html><body><script type="module">import \'./main.js\';</script></body></html>';
+    const r = scanOrphanedJsModules(html, new Set(['src/main.js']));
+    // basename 'main.js' is mentioned — heuristic accepts as wired.
+    expect(r).toHaveLength(0);
+  });
+
+  it('skips assets/ files (treated as data, not code)', () => {
+    const html = '<!doctype html><html><body></body></html>';
+    const r = scanOrphanedJsModules(html, new Set(['assets/data/levels.js']));
+    expect(r).toHaveLength(0);
+  });
+
+  it('skips non-JS extensions', () => {
+    const html = '<!doctype html><html><body></body></html>';
+    const r = scanOrphanedJsModules(
+      html,
+      new Set(['src/styles.css', 'src/data.json', 'src/icon.svg']),
+    );
+    expect(r).toHaveLength(0);
+  });
+
+  it('flags multiple orphaned files independently', () => {
+    const html = '<!doctype html><html><body></body></html>';
+    const r = scanOrphanedJsModules(html, new Set(['src/main.js', 'src/entities.js']));
+    expect(r).toHaveLength(2);
+    const messages = r.map((e) => e.message).join('\n');
+    expect(messages).toMatch(/src\/main\.js/);
+    expect(messages).toMatch(/src\/entities\.js/);
+  });
+
+  it('source is in HEURISTIC_FATAL_SOURCES (drives the fix loop)', () => {
+    const html = '<!doctype html><html><body></body></html>';
+    const r = scanOrphanedJsModules(html, new Set(['src/main.js']));
+    for (const e of r) {
+      expect(HEURISTIC_FATAL_SOURCES.has(e.source ?? '')).toBe(true);
+    }
+  });
+
+  it('production trace 2026-05-10 — Game2 brawler: src/main.js + src/entities.js orphaned', () => {
+    // Reproduction of the exact failure mode: importmap got swapped for
+    // legacy three.min.js (line 90 of the brawler index.html), removing
+    // the <script type="module" src="src/main.js"> wiring; src/main.js
+    // and src/entities.js still exist but no reference in the HTML.
+    const html = [
+      '<!doctype html>',
+      '<html lang="en">',
+      '<head>',
+      '<title>Shadow Strike</title>',
+      '<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>',
+      '<script>',
+      '// inline brawler logic — pre-combat-improvement',
+      'const player = { hp: 100 };',
+      '</script>',
+      '</head>',
+      '<body><canvas id="c"></canvas></body>',
+      '</html>',
+    ].join('\n');
+    const r = scanOrphanedJsModules(html, new Set(['src/main.js', 'src/entities.js']));
+    expect(r).toHaveLength(2);
+    expect(r.map((e) => e.message).join(' ')).toMatch(/src\/main\.js/);
+    expect(r.map((e) => e.message).join(' ')).toMatch(/src\/entities\.js/);
   });
 });
 
