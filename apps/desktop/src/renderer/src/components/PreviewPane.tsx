@@ -301,6 +301,62 @@ function PreviewSlot({
       oldStyles.length === newStyles.length && oldStyles.some((s, i) => s !== newStyles[i]);
     const scriptsDiffer =
       oldScripts.length === newScripts.length && oldScripts.some((s, i) => s !== newScripts[i]);
+    // Backlog-3 §1 follow-up (2026-05-10) — count how many script blocks
+    // actually differ. The in-iframe HMR patcher rejects the envelope
+    // when more than one script changed ("multiple scripts changed;
+    // structural reload required") because it can't safely hot-swap
+    // multiple scripts that may reference each other. Without a
+    // client-side fallback the iframe sat on the OLD code while the
+    // store/snapshot held the NEW code — exactly the "changes didn't
+    // implement" symptom from the brawler combat-improvement run on
+    // 2026-05-10. When count > 1, force a full iframe reload by
+    // rewriting srcdoc; React's srcDoc memo wouldn't change because
+    // stablePreviewSourceKey collapses all script bodies to the same
+    // placeholder.
+    const scriptsChangedCount =
+      oldScripts.length === newScripts.length
+        ? oldScripts.reduce((acc, s, i) => acc + (s !== newScripts[i] ? 1 : 0), 0)
+        : 0;
+    // Cases that need a FULL reload (HMR can't safely apply):
+    //   1. Multiple <script> blocks changed → patcher rejects "multiple
+    //      scripts changed; structural reload required" because
+    //      cross-script refs would break.
+    //   2. Script or style block count changed → structural shape
+    //      shifted (e.g. agent added a new <script>); the in-iframe
+    //      patcher would mismatch positions and refuse.
+    //   3. BOTH styles AND scripts differ → safer to reload than
+    //      partially apply CSS while JS is stale (the prior code path
+    //      did exactly this and silently dropped the JS patch).
+    if (
+      scriptsChangedCount > 1 ||
+      oldScripts.length !== newScripts.length ||
+      oldStyles.length !== newStyles.length ||
+      (stylesDiffer && scriptsDiffer)
+    ) {
+      // Force a full iframe reload with the new HTML. Direct srcdoc
+      // assignment is the most reliable cross-Electron way to retrigger
+      // the document parse with new content; location.reload() on a
+      // srcDoc iframe blanks the document.
+      try {
+        iframe.srcdoc = buildSrcdoc(html);
+        // eslint-disable-next-line no-console
+        console.debug('[hmr] full-reload', {
+          designId,
+          reason:
+            scriptsChangedCount > 1
+              ? 'multi-script-change'
+              : oldScripts.length !== newScripts.length
+                ? 'script-count-change'
+                : oldStyles.length !== newStyles.length
+                  ? 'style-count-change'
+                  : 'css-and-js-both-changed',
+          scriptsChanged: scriptsChangedCount,
+        });
+      } catch {
+        /* iframe may have closed */
+      }
+      return;
+    }
     if (stylesDiffer && oldStyles.length === newStyles.length) {
       try {
         win.postMessage(
