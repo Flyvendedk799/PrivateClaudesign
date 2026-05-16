@@ -2817,3 +2817,182 @@ export function getDesignUsageTotals(db: Database, designId: string): DesignUsag
     }
   );
 }
+
+export type AgentRunStatus = 'idle' | 'running' | 'done' | 'error';
+
+interface AgentRunRow {
+  design_id: string;
+  name: string;
+  design_created: string;
+  design_updated: string;
+  last_status: AgentRunStatus;
+  pinned: number;
+  archived: number;
+  last_event_at: string;
+  agent_label: string | null;
+}
+
+export interface AgentRunCard {
+  designId: string;
+  name: string;
+  lastStatus: AgentRunStatus;
+  pinned: boolean;
+  archived: boolean;
+  lastEventAt: string;
+  updatedAt: string;
+  createdAt: string;
+  agentLabel: string | null;
+}
+
+function ensureDesignRunMeta(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS design_run_meta (
+      design_id TEXT PRIMARY KEY REFERENCES designs(id) ON DELETE CASCADE,
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      agent_label TEXT,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      archived INTEGER NOT NULL DEFAULT 0,
+      sort_rank INTEGER NOT NULL DEFAULT 0,
+      last_generation_id TEXT,
+      last_status TEXT NOT NULL DEFAULT 'idle' CHECK (last_status IN ('idle','running','done','error')),
+      last_event_at TEXT NOT NULL,
+      last_error_code TEXT,
+      last_error_message TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_design_run_meta_view ON design_run_meta(archived, pinned DESC, last_event_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_design_run_meta_status ON design_run_meta(last_status, last_event_at DESC);
+    INSERT INTO design_run_meta(design_id,schema_version,last_event_at,created_at,updated_at)
+    SELECT d.id,1,d.updated_at,d.created_at,d.updated_at FROM designs d
+    WHERE NOT EXISTS (SELECT 1 FROM design_run_meta m WHERE m.design_id=d.id);
+  `);
+}
+
+export function createAgentRun(
+  db: Database,
+  input: {
+    name?: string;
+    mode?: 'design' | 'game' | 'motion';
+    initialPrompt?: string;
+    switchToNew?: boolean;
+  },
+) {
+  ensureDesignRunMeta(db);
+  return db.transaction(() => {
+    const design = createDesign(db, input.name ?? 'Untitled run');
+    const now = new Date().toISOString();
+    db.prepare(
+      'INSERT OR IGNORE INTO design_run_meta (design_id,schema_version,last_status,last_event_at,created_at,updated_at) VALUES (?,1,?,?,?,?)',
+    ).run(design.id, 'idle', now, now, now);
+    return getAgentRun(db, design.id);
+  })();
+}
+
+export function getAgentRun(db: Database, designId: string): AgentRunCard | null {
+  ensureDesignRunMeta(db);
+  const row = db
+    .prepare(
+      'SELECT d.id as design_id,d.name,d.created_at as design_created,d.updated_at as design_updated,m.last_status,m.pinned,m.archived,m.last_event_at,m.agent_label FROM designs d JOIN design_run_meta m ON m.design_id=d.id WHERE d.id=?',
+    )
+    .get(designId) as AgentRunRow | undefined;
+  if (!row) return null;
+  return {
+    designId: row.design_id,
+    name: row.name,
+    lastStatus: row.last_status,
+    pinned: row.pinned === 1,
+    archived: row.archived === 1,
+    lastEventAt: row.last_event_at,
+    updatedAt: row.design_updated,
+    createdAt: row.design_created,
+    agentLabel: row.agent_label ?? null,
+  };
+}
+
+export function listAgentRuns(
+  db: Database,
+  input: {
+    includeArchived: boolean;
+    status: string;
+    search: string;
+    limit: number;
+    cursor: string | null;
+  },
+) {
+  ensureDesignRunMeta(db);
+  const where: string[] = ['d.deleted_at IS NULL'];
+  const args: unknown[] = [];
+  if (!input.includeArchived) where.push('m.archived = 0');
+  if (input.status !== 'all') {
+    where.push('m.last_status = ?');
+    args.push(input.status);
+  }
+  if (input.search.trim()) {
+    where.push('d.name LIKE ?');
+    args.push(`%${input.search.trim()}%`);
+  }
+  const rows = db
+    .prepare(
+      `SELECT d.id as design_id,d.name,d.created_at as design_created,d.updated_at as design_updated,m.last_status,m.pinned,m.archived,m.last_event_at,m.agent_label FROM designs d JOIN design_run_meta m ON m.design_id=d.id WHERE ${where.join(' AND ')} ORDER BY m.pinned DESC,m.last_event_at DESC LIMIT ?`,
+    )
+    .all(...args, Math.max(1, Math.min(input.limit, 200))) as AgentRunRow[];
+  return {
+    items: rows.map((row) => ({
+      designId: row.design_id,
+      name: row.name,
+      lastStatus: row.last_status,
+      pinned: row.pinned === 1,
+      archived: row.archived === 1,
+      lastEventAt: row.last_event_at,
+      updatedAt: row.design_updated,
+      createdAt: row.design_created,
+      agentLabel: row.agent_label ?? null,
+    })),
+    nextCursor: null,
+  };
+}
+
+export function updateAgentRunMeta(
+  db: Database,
+  designId: string,
+  patch: { pinned?: boolean; archived?: boolean; agentLabel?: string },
+) {
+  ensureDesignRunMeta(db);
+  const now = new Date().toISOString();
+  db.prepare(
+    'UPDATE design_run_meta SET pinned=COALESCE(?, pinned), archived=COALESCE(?, archived), agent_label=COALESCE(?, agent_label), updated_at=? WHERE design_id=?',
+  ).run(
+    typeof patch.pinned === 'boolean' ? (patch.pinned ? 1 : 0) : null,
+    typeof patch.archived === 'boolean' ? (patch.archived ? 1 : 0) : null,
+    typeof patch.agentLabel === 'string' ? patch.agentLabel : null,
+    now,
+    designId,
+  );
+  return getAgentRun(db, designId);
+}
+export function switchAgentRun(db: Database, designId: string) {
+  return getAgentRun(db, designId);
+}
+export function bulkArchiveAgentRuns(db: Database, designIds: string[]) {
+  ensureDesignRunMeta(db);
+  const now = new Date().toISOString();
+  const stmt = db.prepare('UPDATE design_run_meta SET archived=1,updated_at=? WHERE design_id=?');
+  const tx = db.transaction((ids: string[]) => ids.forEach((id) => stmt.run(now, id)));
+  tx(designIds);
+  return { archived: designIds.length };
+}
+export function reconcileStaleRunningAgentRuns(
+  db: Database,
+  nowMs = Date.now(),
+  timeoutMs = 120_000,
+): number {
+  ensureDesignRunMeta(db);
+  const cutoff = new Date(nowMs - timeoutMs).toISOString();
+  const res = db
+    .prepare(
+      "UPDATE design_run_meta SET last_status='error', last_error_code='RUN_STALE_AFTER_RESTART', updated_at=? WHERE last_status='running' AND last_event_at < ?",
+    )
+    .run(new Date(nowMs).toISOString(), cutoff);
+  return Number(res.changes ?? 0);
+}

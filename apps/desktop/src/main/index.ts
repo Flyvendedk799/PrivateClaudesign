@@ -78,6 +78,7 @@ import type { BrowserWindow as ElectronBrowserWindow } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import type { AgentStreamEvent } from '../preload/index';
 import { buildAbortContinuationRecap } from './abort-continuation';
+import { registerAgentsIpc } from './agents-ipc';
 import { registerAppMenu } from './app-menu';
 import { showBootDialog, writeBootErrorSync } from './boot-fallback';
 import { registerChatMessagesIpc, registerChatMessagesUnavailableIpc } from './chat-messages-ipc';
@@ -3665,6 +3666,7 @@ if (!IS_VITEST) {
         // cache / OAuth-refresh path is reused. systemPrompt override
         // skips skill loading + artifact parsing — extractor returns
         // raw JSON from the model.
+        registerAgentsIpc(dbResult.db);
         registerSkillsIpc(dbResult.db, {
           runOneShotCompletion: async (messages) => {
             const cfg = getCachedConfig();
