@@ -54,8 +54,14 @@ export interface ContinuationState {
 export const CONTINUATION_THRESHOLDS = Object.freeze({
   /** Pause when the model has consumed > 80% of its context window.
    *  Leaves enough room for the recap + tool definitions in the
-   *  continuation turn without immediately re-tripping. */
+   *  continuation turn without immediately re-tripping. Context pressure
+   *  alone is noisy on short runs, so it must also have meaningful run
+   *  progress before we cut. */
   contextUsedPct: 0.8,
+  /** Minimum emitted output before a context-pressure cut is useful. */
+  contextMinOutputTokens: 10_000,
+  /** Minimum wall-clock before a context-pressure cut is useful. */
+  contextMinWallClockMs: 5 * 60 * 1000,
   /** Pause if the run produces > 50,000 output tokens — protects the
    *  per-chunk cache and the user's perception of progress (a single
    *  agent turn that long usually batched many independent sub-tasks). */
@@ -71,7 +77,13 @@ export const CONTINUATION_THRESHOLDS = Object.freeze({
 export function shouldPauseForContinuation(state: ContinuationState): ContinuationDecision {
   if (state.modelEmittedPause) return { pause: true, reason: 'model_requested' };
   if (state.userRequestedPause === true) return { pause: true, reason: 'manual' };
-  if (state.contextUsedPct >= CONTINUATION_THRESHOLDS.contextUsedPct) {
+  const hasEnoughProgressForContextPause =
+    state.outputTokens >= CONTINUATION_THRESHOLDS.contextMinOutputTokens ||
+    state.wallClockMs >= CONTINUATION_THRESHOLDS.contextMinWallClockMs;
+  if (
+    state.contextUsedPct >= CONTINUATION_THRESHOLDS.contextUsedPct &&
+    hasEnoughProgressForContextPause
+  ) {
     return { pause: true, reason: 'context_threshold' };
   }
   if (state.outputTokens >= CONTINUATION_THRESHOLDS.outputTokens) {
@@ -104,9 +116,43 @@ export interface ContinuationPromptInput {
   originalUserPrompt: string;
 }
 
+function extractOriginalBriefFromContinuationPrompt(text: string): string | null {
+  const normalized = text.replace(/\r\n/g, '\n').trim();
+  if (!normalized.startsWith('# Continuation')) return null;
+  const marker = '\n## Original brief\n';
+  const markerIdx = normalized.indexOf(marker);
+  if (markerIdx === -1) return null;
+  const rest = normalized.slice(markerIdx + marker.length).trim();
+  if (rest.startsWith('# Continuation')) return rest;
+  const nextHeadingIdx = rest.search(/\n## [^\n]+/);
+  return (nextHeadingIdx === -1 ? rest : rest.slice(0, nextHeadingIdx)).trim();
+}
+
+const PAUSE_BOILERPLATE_RX =
+  /(?:^|\n\n)— (?:Run paused|Paused) after \d+s[\s\S]*?(?:pick up where I left off|do more)\. —/g;
+
+export function stripContinuationPauseBoilerplate(text: string): string {
+  return text
+    .replace(PAUSE_BOILERPLATE_RX, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export function normalizeContinuationOriginalPrompt(text: string): string {
+  let current = text.trim();
+  for (let i = 0; i < 5; i += 1) {
+    const extracted = extractOriginalBriefFromContinuationPrompt(current);
+    if (extracted === null || extracted.length === 0 || extracted === current) break;
+    current = extracted;
+  }
+  return current;
+}
+
 /** Pure, byte-stable prompt reconstruction. Snapshot-tested so a future
  *  edit doesn't quietly shift the cache shape. */
 export function buildContinuationPrompt(input: ContinuationPromptInput): string {
+  const originalUserPrompt = normalizeContinuationOriginalPrompt(input.originalUserPrompt);
+  const decisionRecap = stripContinuationPauseBoilerplate(input.decisionRecap);
   const lines: string[] = [];
   lines.push('# Continuation');
   lines.push('');
@@ -118,7 +164,7 @@ export function buildContinuationPrompt(input: ContinuationPromptInput): string 
   );
   lines.push('');
   lines.push('## Original brief');
-  lines.push(input.originalUserPrompt.trim());
+  lines.push(originalUserPrompt);
   lines.push('');
   if (input.todos !== null && input.todos.items.length > 0) {
     lines.push('## Plan (latest set_todos snapshot)');
@@ -129,7 +175,11 @@ export function buildContinuationPrompt(input: ContinuationPromptInput): string 
     lines.push('');
   }
   lines.push('## What was decided + what is next');
-  lines.push(input.decisionRecap.trim());
+  lines.push(
+    decisionRecap.length > 0
+      ? decisionRecap
+      : 'The previous run paused before writing a useful recap; inspect the current files and continue the unfinished work.',
+  );
   lines.push('');
   if (input.fsState.length > 0) {
     lines.push('## Filesystem state at pause point');

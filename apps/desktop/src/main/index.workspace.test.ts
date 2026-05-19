@@ -113,6 +113,28 @@ describe('createRuntimeTextEditorFs', () => {
     expect(listFsUpdatedEvents(sendEvent)).toHaveLength(1);
   });
 
+  it('refuses fs.create when the path already exists in the runtime fs', async () => {
+    const db = initInMemoryDb();
+    const design = createDesign(db, 'Existing');
+    const sendEvent = vi.fn();
+    const logger = { error: vi.fn() };
+    const { fs } = createRuntimeTextEditorFs({
+      db,
+      designId: design.id,
+      generationId: 'gen-create-existing',
+      logger,
+      previousHtml: '<main>pizza restaurant</main>',
+      sendEvent,
+    });
+
+    await expect(fs.create('index.html', '<main>generic replacement</main>')).rejects.toThrow(
+      'File already exists: index.html',
+    );
+    expect(viewDesignFile(db, design.id, 'index.html')).toBeNull();
+    expect(fs.view('index.html')?.content).toBe('<main>pizza restaurant</main>');
+    expect(listFsUpdatedEvents(sendEvent)).toHaveLength(0);
+  });
+
   it('persists fs.create to db and writes disk when workspace is bound', async () => {
     const db = initInMemoryDb();
     const design = createDesign(db, 'Workspace');

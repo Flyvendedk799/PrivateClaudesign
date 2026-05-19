@@ -6,7 +6,11 @@
 
 import type { ChatMessage } from '@open-codesign/shared';
 import { describe, expect, it } from 'vitest';
-import { buildHistoryFromChatRows, capHistoryToTurnBoundary } from './store';
+import {
+  buildHistoryFromChatRows,
+  capHistoryToTurnBoundary,
+  isSyntheticContinuationPrompt,
+} from './store';
 
 type Row = { kind: string; payload?: unknown };
 
@@ -191,6 +195,38 @@ describe('buildHistoryFromChatRows', () => {
     const out = buildHistoryFromChatRows(rows);
     const userMsgs = out.filter((m) => m.role === 'user');
     expect(userMsgs.map((m) => m.content)).toEqual(['real prompt']);
+  });
+
+  it('does not add synthetic continuation prompts as separate user turns', () => {
+    const synthetic = [
+      '# Continuation',
+      '',
+      'You are continuing a previously-paused run.',
+      '',
+      '## Original brief',
+      'Create a premium pizza restaurant landing page.',
+      '',
+      '## What was decided + what is next',
+      'pause boilerplate',
+      '',
+      'Continue.',
+    ].join('\n');
+    const rows: Row[] = [
+      userRow('Create a premium pizza restaurant landing page.'),
+      toolCallRow({ toolName: 'str_replace_based_edit_tool', toolCallId: 'create-1' }),
+      { kind: 'continuation_pending', payload: {} },
+      userRow(synthetic),
+      toolCallRow({ toolName: 'verify_artifact', toolCallId: 'verify-1' }),
+    ];
+    const out = buildHistoryFromChatRows(rows);
+    const userMsgs = out.filter((m) => m.role === 'user');
+    const toolMsgs = out.filter((m) => m.role === 'tool');
+
+    expect(isSyntheticContinuationPrompt(synthetic)).toBe(true);
+    expect(userMsgs.map((m) => m.content)).toEqual([
+      'Create a premium pizza restaurant landing page.',
+    ]);
+    expect(toolMsgs.map((m) => m.toolCallId)).toEqual(['create-1', 'verify-1']);
   });
 
   it('emits a budget-clip marker when the byte budget would be exceeded', () => {

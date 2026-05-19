@@ -17,6 +17,7 @@ import {
   generateTitle,
   generateViaAgent,
   shouldPauseForContinuation,
+  stripContinuationPauseBoilerplate,
 } from '@open-codesign/core';
 // Backlog-3 §8 — DESIGN_SKILLS (~204KB) and FRAME_TEMPLATES (~48KB) seed
 // the per-generation virtual fs but are never read until the first run
@@ -899,6 +900,11 @@ export function createRuntimeTextEditorFs({
       return { content, numLines: content.split('\n').length };
     },
     async create(path: string, content: string) {
+      if (fsMap.has(path)) {
+        throw new Error(
+          `File already exists: ${path}. Use str_replace or patch to edit existing files; only use create for new paths.`,
+        );
+      }
       await persistMutation(path, content);
       fsMap.set(path, content);
       emitFsUpdated(path, content);
@@ -2100,6 +2106,10 @@ function registerIpcHandlers(db: Database | null): void {
       params.modelId,
     );
     const recap = buildAbortContinuationRecap(params.db, params.designId);
+    const decisionRecapOverride =
+      params.decisionRecapOverride !== undefined
+        ? stripContinuationPauseBoilerplate(params.decisionRecapOverride)
+        : undefined;
     const outputTokens = params.outputTokensOverride ?? 0;
     const outcome = persistContinuationRowOnce(
       continuationRowsWritten,
@@ -2119,7 +2129,10 @@ function registerIpcHandlers(db: Database | null): void {
           kind: 'continuation_pending',
           payload: {
             reason: params.reason,
-            decisionRecap: params.decisionRecapOverride ?? recap.decisionRecap,
+            decisionRecap:
+              decisionRecapOverride !== undefined && decisionRecapOverride.length > 0
+                ? decisionRecapOverride
+                : recap.decisionRecap,
             outputTokens,
             contextUsedPct: contextUsedPctFinal,
             wallClockMs,

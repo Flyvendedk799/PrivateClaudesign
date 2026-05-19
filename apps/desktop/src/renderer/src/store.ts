@@ -1411,6 +1411,7 @@ export function buildHistoryFromChatRows(
     if (row.kind === 'user') {
       const text = (row.payload as { text?: string } | null)?.text;
       if (typeof text !== 'string' || text.length === 0) continue;
+      if (isSyntheticContinuationPrompt(text)) continue;
       current = { userText: text, toolPayloads: [], assistantText: [] };
       turns.push(current);
     } else if (current !== null) {
@@ -1566,6 +1567,11 @@ async function buildHistoryFromChat(designId: string | null): Promise<ChatMessag
  *  more about X") is NOT a resume intent. Exported for unit tests. */
 export function isFreeTextResumeIntent(prompt: string): boolean {
   return /^(continue|resume|keep going|proceed|go on)[\.!?]?$/i.test(prompt.trim());
+}
+
+export function isSyntheticContinuationPrompt(prompt: string): boolean {
+  const normalized = prompt.replace(/\r\n/g, '\n').trim();
+  return normalized.startsWith('# Continuation') && normalized.includes('\n## Original brief\n');
 }
 
 /** 2026-05-07 — true when the design has a `continuation_pending` row
@@ -3069,7 +3075,12 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         });
         return;
       }
-      await get().sendPrompt({ prompt, _historyOverride: history });
+      await get().sendPrompt({
+        prompt,
+        _historyOverride: history,
+        silent: true,
+        skipPromptAssist: true,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : tr('errors.unknown');
       get().pushToast({

@@ -60,6 +60,7 @@ export {
   buildContinuationPrompt,
   CONTINUATION_THRESHOLDS,
   shouldPauseForContinuation,
+  stripContinuationPauseBoilerplate,
 } from './continuation.js';
 export type {
   ContinuationDecision,

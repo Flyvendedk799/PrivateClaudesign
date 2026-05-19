@@ -38,6 +38,19 @@ describe('computeAbortContinuationRecap', () => {
     expect(out.decisionRecap).toBe('newest summary');
   });
 
+  it('skips assistant pause boilerplate when choosing the decision recap', () => {
+    const pauseOnly = [
+      '— Paused after 2670s of work to keep this turn responsive. The artifact above is what landed; type **continue** (or any follow-up) to pick up where I left off. —',
+      '',
+      '— Run paused after 2670s. The artifact above is what landed; type **keep going** (or any follow-up) to do more. —',
+    ].join('\n');
+    const out = computeAbortContinuationRecap([
+      row({ seq: 0, kind: 'assistant_text', payload: { text: 'older useful recap' } }),
+      row({ seq: 1, kind: 'assistant_text', payload: { text: pauseOnly } }),
+    ]);
+    expect(out.decisionRecap).toBe('older useful recap');
+  });
+
   it('captures the seq of the most recent set_todos tool_call', () => {
     const out = computeAbortContinuationRecap([
       row({ seq: 0, kind: 'user', payload: { text: 'hi' } }),
@@ -65,6 +78,36 @@ describe('computeAbortContinuationRecap', () => {
       row({ seq: 1, kind: 'user', payload: { text: 'Continue.' } }),
     ]);
     expect(out.lastUserBrief).toBe('objective brief');
+  });
+
+  it('unwraps synthetic continuation prompts instead of storing them as the next brief', () => {
+    const synthetic = [
+      '# Continuation',
+      '',
+      'You are continuing a previously-paused run.',
+      '',
+      '## Original brief',
+      '# Continuation',
+      '',
+      'You are continuing a previously-paused run.',
+      '',
+      '## Original brief',
+      'Create a premium pizza restaurant landing page.',
+      '',
+      '## What was decided + what is next',
+      'pause boilerplate',
+      '',
+      'Continue.',
+    ].join('\n');
+    const out = computeAbortContinuationRecap([
+      row({
+        seq: 0,
+        kind: 'user',
+        payload: { text: 'Create a premium pizza restaurant landing page.' },
+      }),
+      row({ seq: 1, kind: 'user', payload: { text: synthetic } }),
+    ]);
+    expect(out.lastUserBrief).toBe('Create a premium pizza restaurant landing page.');
   });
 
   it('truncates briefs longer than 2000 chars with an ellipsis', () => {

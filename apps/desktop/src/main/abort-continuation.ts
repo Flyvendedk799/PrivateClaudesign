@@ -43,6 +43,40 @@ function takePrefix(s: string, max: number): string {
   return `${s.slice(0, max - 1).trimEnd()}…`;
 }
 
+function extractOriginalBriefFromContinuationPrompt(text: string): string | null {
+  const normalized = text.replace(/\r\n/g, '\n').trim();
+  if (!normalized.startsWith('# Continuation')) return null;
+  const marker = '\n## Original brief\n';
+  const markerIdx = normalized.indexOf(marker);
+  if (markerIdx === -1) return null;
+  const rest = normalized.slice(markerIdx + marker.length).trim();
+  if (rest.startsWith('# Continuation')) return rest;
+  const nextHeadingIdx = rest.search(/\n## [^\n]+/);
+  return (nextHeadingIdx === -1 ? rest : rest.slice(0, nextHeadingIdx)).trim();
+}
+
+function normalizeUserBrief(text: string): string | undefined {
+  let current = text.trim();
+  for (let i = 0; i < 5; i += 1) {
+    const extracted = extractOriginalBriefFromContinuationPrompt(current);
+    if (extracted === null || extracted.length === 0 || extracted === current) break;
+    current = extracted;
+  }
+  if (current.length === 0 || RESUME_VERB_RX.test(current)) return undefined;
+  return takePrefix(current, MAX_BRIEF_LEN);
+}
+
+const PAUSE_BOILERPLATE_RX =
+  /(?:^|\n\n)— (?:Run paused|Paused) after \d+s[\s\S]*?(?:pick up where I left off|do more)\. —/g;
+
+function normalizeDecisionRecap(text: string): string | undefined {
+  const stripped = text
+    .replace(PAUSE_BOILERPLATE_RX, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return stripped.length > 0 ? takePrefix(stripped, MAX_RECAP_LEN) : undefined;
+}
+
 /**
  * Pure-function variant for unit tests — operates on an already-loaded
  * row array. The DB-bound `buildAbortContinuationRecap` is a one-line
@@ -68,14 +102,14 @@ export function computeAbortContinuationRecap(
       const payload = row.payload as { text?: string } | null;
       const text = payload?.text;
       if (typeof text === 'string' && text.trim().length > 0) {
-        lastAssistantText = text.trim();
+        lastAssistantText = normalizeDecisionRecap(text);
       }
     }
     if (lastUserBrief === undefined && row.kind === 'user') {
       const payload = row.payload as { text?: string } | null;
-      const text = payload?.text?.trim();
-      if (typeof text === 'string' && text.length > 0 && !RESUME_VERB_RX.test(text)) {
-        lastUserBrief = takePrefix(text, MAX_BRIEF_LEN);
+      const text = payload?.text;
+      if (typeof text === 'string') {
+        lastUserBrief = normalizeUserBrief(text);
       }
     }
     if (
@@ -89,7 +123,7 @@ export function computeAbortContinuationRecap(
 
   const decisionRecap =
     lastAssistantText !== undefined
-      ? takePrefix(lastAssistantText, MAX_RECAP_LEN)
+      ? lastAssistantText
       : 'Run was interrupted before producing a final summary.';
 
   return {
