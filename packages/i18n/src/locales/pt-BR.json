@@ -162,6 +162,19 @@
         "title": "Não foi possível iniciar uma nova conversa",
         "description": "Tente novamente — o design não foi alterado."
       }
+    },
+    "debugExport": {
+      "label": "Baixar handoff de debug",
+      "shortLabel": "Debug handoff",
+      "tooltip": "Baixe esta conversa e os arquivos atuais do projeto como um Markdown para entregar a um agente de código com IA.",
+      "noDesign": "Ainda não há design para exportar.",
+      "success": {
+        "title": "Handoff de debug exportado",
+        "description": "Salvo em {{path}}"
+      },
+      "failed": {
+        "title": "Não foi possível exportar o handoff de debug"
+      }
     }
   },
   "sidebar": {

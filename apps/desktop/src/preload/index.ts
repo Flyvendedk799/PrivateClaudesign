@@ -756,6 +756,12 @@ const api = {
         designId,
         sessionId,
       }) as Promise<{ sessionId: number }>,
+    exportDebugHandoff: (designId: string, sessionId: number) =>
+      ipcRenderer.invoke('chat:v1:export-debug-handoff', {
+        schemaVersion: 1,
+        designId,
+        sessionId,
+      }) as Promise<ExportInvokeResponse>,
     updateToolStatus: (input: {
       designId: string;
       seq: number;

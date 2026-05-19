@@ -3651,7 +3651,7 @@ if (!IS_VITEST) {
         });
         registerSnapshotsIpc(dbResult.db);
         registerWorkspaceIpc(dbResult.db, () => mainWindow);
-        registerChatMessagesIpc(dbResult.db);
+        registerChatMessagesIpc(dbResult.db, () => mainWindow);
         registerCommentsIpc(dbResult.db);
         registerGameArtifactsIpc(dbResult.db);
         // motion-graphics-plan §4 — list_compositions IPC for the

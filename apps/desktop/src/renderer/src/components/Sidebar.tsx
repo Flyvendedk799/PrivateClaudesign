@@ -8,7 +8,15 @@ import {
   selectEscalationHint,
   summarizeSnapshotDiff,
 } from '@open-codesign/shared';
-import { FolderOpen, Link2, MessageSquare, MessageSquarePlus, Paperclip, X } from 'lucide-react';
+import {
+  Download,
+  FolderOpen,
+  Link2,
+  MessageSquare,
+  MessageSquarePlus,
+  Paperclip,
+  X,
+} from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgentStream } from '../hooks/useAgentStream';
 import { useCodesignStore } from '../store';
@@ -112,6 +120,7 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
   const chatLoaded = useCodesignStore((s) => s.chatLoaded);
   const currentChatSessionId = useCodesignStore((s) => s.currentChatSessionId);
   const switchChatSession = useCodesignStore((s) => s.switchChatSession);
+  const exportDebugHandoff = useCodesignStore((s) => s.exportDebugHandoff);
   const streamingAssistantText = useCodesignStore((s) => s.streamingAssistantText);
   const streamingThinking = useCodesignStore((s) => s.streamingThinking);
   const streamingToolDraft = useCodesignStore((s) => s.streamingToolDraft);
@@ -451,7 +460,22 @@ export function Sidebar({ prompt, setPrompt, onSubmit }: SidebarProps) {
             }
           />
           <div className="flex items-center justify-between gap-[var(--space-2)] px-[2px]">
-            <ModelSwitcher variant="sidebar" />
+            <div className="flex min-w-0 items-center gap-[var(--space-2)]">
+              {currentDesignId !== null ? (
+                <button
+                  type="button"
+                  onClick={() => void exportDebugHandoff(currentChatSessionId)}
+                  disabled={!chatLoaded}
+                  title={t('chat.debugExport.tooltip')}
+                  aria-label={t('chat.debugExport.label')}
+                  className="inline-flex h-[24px] shrink-0 items-center gap-[5px] rounded-[var(--radius-2)] px-[var(--space-2)] text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-background-tertiary,_rgba(0,0,0,0.04))] disabled:opacity-50 disabled:pointer-events-none transition-colors"
+                >
+                  <Download className="w-[12px] h-[12px]" aria-hidden />
+                  <span className="truncate">{t('chat.debugExport.shortLabel')}</span>
+                </button>
+              ) : null}
+              <ModelSwitcher variant="sidebar" />
+            </div>
             <div
               className="flex shrink-0 items-center gap-[var(--space-2)] tabular-nums text-[10.5px] text-[var(--color-text-muted)]"
               style={{ fontFamily: 'var(--font-mono)' }}

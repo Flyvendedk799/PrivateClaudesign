@@ -162,6 +162,19 @@
         "title": "无法开始新对话",
         "description": "请重试，当前设计没有改变。"
       }
+    },
+    "debugExport": {
+      "label": "下载调试交接文件",
+      "shortLabel": "调试交接",
+      "tooltip": "将此对话和当前项目文件下载为 Markdown，方便交给 AI 编码助手调试。",
+      "noDesign": "还没有可导出的设计。",
+      "success": {
+        "title": "调试交接文件已导出",
+        "description": "已保存到 {{path}}"
+      },
+      "failed": {
+        "title": "无法导出调试交接文件"
+      }
     }
   },
   "sidebar": {

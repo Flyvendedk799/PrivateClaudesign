@@ -162,6 +162,19 @@
         "title": "Couldn't start a new conversation",
         "description": "Try again — the design is unchanged."
       }
+    },
+    "debugExport": {
+      "label": "Download debug handoff",
+      "shortLabel": "Debug handoff",
+      "tooltip": "Download this chat plus the current project files as a Markdown handoff for an AI coding agent.",
+      "noDesign": "No design to export yet.",
+      "success": {
+        "title": "Debug handoff exported",
+        "description": "Saved to {{path}}"
+      },
+      "failed": {
+        "title": "Couldn't export debug handoff"
+      }
     }
   },
   "sidebar": {

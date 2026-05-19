@@ -6,16 +6,28 @@
  * touching snapshot callers.
  */
 
-import type { ChatAppendInput, ChatMessageKind, ChatMessageRow } from '@open-codesign/shared';
+import { writeFile } from 'node:fs/promises';
+import type {
+  ChatAppendInput,
+  ChatMessageKind,
+  ChatMessageRow,
+  Design,
+  DesignFile,
+  DesignSnapshot,
+} from '@open-codesign/shared';
 import { CodesignError, ERROR_CODES } from '@open-codesign/shared';
 import type BetterSqlite3 from 'better-sqlite3';
-import { ipcMain } from './electron-runtime';
+import type { BrowserWindow } from 'electron';
+import { dialog, ipcMain } from './electron-runtime';
 import { seedGameArtifactsFromLatestSnapshot } from './game-artifacts-db';
 import { getLogger } from './logger';
 import {
   appendChatMessage,
+  getDesign,
   getDesignCurrentSession,
   listChatMessages,
+  listDesignFiles,
+  listSnapshots,
   newChatSession,
   seedChatFromSnapshots,
   seedDesignFilesFromLatestSnapshot,
@@ -26,6 +38,29 @@ import {
 type Database = BetterSqlite3.Database;
 
 const logger = getLogger('chat-messages-ipc');
+
+export interface ChatDebugHandoffResponse {
+  status: 'saved' | 'cancelled';
+  path?: string;
+  bytes?: number;
+}
+
+interface ChatDebugHandoffInput {
+  designId: string;
+  sessionId: number;
+}
+
+export interface BuildDebugHandoffMarkdownInput {
+  design: Design;
+  sessionId: number;
+  messages: readonly ChatMessageRow[];
+  files: readonly DesignFile[];
+  latestSnapshot: DesignSnapshot | null;
+  exportedAt: string;
+}
+
+const MAX_INLINE_FILE_CHARS = 180_000;
+const MAX_INLINE_PAYLOAD_CHARS = 16_000;
 
 const VALID_KINDS: ChatMessageKind[] = [
   'user',
@@ -171,6 +206,299 @@ function parseSetSession(raw: unknown): { designId: string; sessionId: number } 
   return { designId: r['designId'], sessionId: r['sessionId'] };
 }
 
+function parseDebugHandoffInput(raw: unknown): ChatDebugHandoffInput {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new CodesignError(
+      'chat:v1:export-debug-handoff expects an object payload',
+      ERROR_CODES.IPC_BAD_INPUT,
+    );
+  }
+  const r = raw as Record<string, unknown>;
+  requireSchemaV1(r, 'chat:v1:export-debug-handoff');
+  if (typeof r['designId'] !== 'string' || r['designId'].trim().length === 0) {
+    throw new CodesignError('designId must be a non-empty string', ERROR_CODES.IPC_BAD_INPUT);
+  }
+  if (
+    typeof r['sessionId'] !== 'number' ||
+    !Number.isInteger(r['sessionId']) ||
+    r['sessionId'] < 0
+  ) {
+    throw new CodesignError('sessionId must be a non-negative integer', ERROR_CODES.IPC_BAD_INPUT);
+  }
+  return { designId: r['designId'], sessionId: r['sessionId'] };
+}
+
+function filenameSegment(raw: string): string {
+  const clean = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return clean.length > 0 ? clean.slice(0, 48) : 'design';
+}
+
+function redactText(input: string): string {
+  return input
+    .replace(/sk-[A-Za-z0-9_-]{16,}/g, 'sk-[redacted]')
+    .replace(
+      /\b(api[_-]?key|authorization|bearer|password|token)(\s*[:=]\s*)(["']?)[^\s"',;)}\]]{8,}/gi,
+      (_match, key: string, sep: string, quote: string) => `${key}${sep}${quote}[redacted]`,
+    );
+}
+
+function byteLength(s: string): number {
+  return Buffer.byteLength(s, 'utf8');
+}
+
+function languageForPath(path: string): string {
+  const ext = path.toLowerCase().split('.').pop() ?? '';
+  switch (ext) {
+    case 'html':
+      return 'html';
+    case 'css':
+      return 'css';
+    case 'js':
+    case 'mjs':
+    case 'cjs':
+      return 'javascript';
+    case 'jsx':
+      return 'jsx';
+    case 'ts':
+      return 'typescript';
+    case 'tsx':
+      return 'tsx';
+    case 'json':
+      return 'json';
+    case 'md':
+      return 'markdown';
+    case 'py':
+      return 'python';
+    case 'gd':
+      return 'gdscript';
+    case 'svg':
+      return 'xml';
+    default:
+      return '';
+  }
+}
+
+function markdownFence(content: string, language = ''): string {
+  const maxTicks = Math.max(2, ...Array.from(content.matchAll(/`+/g), (m) => m[0].length));
+  const fence = '`'.repeat(maxTicks + 1);
+  return `${fence}${language}\n${content}\n${fence}`;
+}
+
+function safeJson(value: unknown, maxChars = MAX_INLINE_PAYLOAD_CHARS): string {
+  let text: string;
+  try {
+    text = JSON.stringify(value, null, 2);
+  } catch {
+    text = String(value);
+  }
+  text = redactText(text);
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n\n[truncated ${text.length - maxChars} chars]`;
+}
+
+function objectPayload(payload: unknown): Record<string, unknown> {
+  return typeof payload === 'object' && payload !== null
+    ? (payload as Record<string, unknown>)
+    : {};
+}
+
+function compactPayload(row: ChatMessageRow): unknown {
+  const payload = objectPayload(row.payload);
+  if (row.kind === 'reasoning_summary') {
+    const fullText = typeof payload['fullText'] === 'string' ? payload['fullText'] : '';
+    const { fullText: _fullText, ...rest } = payload;
+    return {
+      ...rest,
+      reasoningText: `[omitted from debug handoff: ${fullText.length} chars]`,
+    };
+  }
+  if (row.kind === 'tool_call') {
+    const result = payload['result'];
+    const resultText = result === undefined ? undefined : safeJson(result, 4000);
+    return {
+      toolName: payload['toolName'],
+      command: payload['command'],
+      status: payload['status'],
+      verbGroup: payload['verbGroup'],
+      durationMs: payload['durationMs'],
+      args: payload['args'],
+      ...(payload['error'] !== undefined ? { error: payload['error'] } : {}),
+      ...(resultText !== undefined ? { result: resultText } : {}),
+    };
+  }
+  return row.payload;
+}
+
+function messageSummary(row: ChatMessageRow): string {
+  const payload = objectPayload(row.payload);
+  if (row.kind === 'user') {
+    const text = typeof payload['text'] === 'string' ? payload['text'] : safeJson(row.payload);
+    return redactText(text);
+  }
+  if (row.kind === 'assistant_text') {
+    const text = typeof payload['text'] === 'string' ? payload['text'] : safeJson(row.payload);
+    return redactText(text);
+  }
+  if (row.kind === 'error') {
+    return safeJson(row.payload);
+  }
+  if (row.kind === 'artifact_delivered') {
+    return safeJson(row.payload);
+  }
+  if (row.kind === 'continuation_pending') {
+    return safeJson(row.payload);
+  }
+  return safeJson(compactPayload(row));
+}
+
+function fileEntryMarkdown(file: Pick<DesignFile, 'path' | 'content' | 'updatedAt'>): string {
+  const size = byteLength(file.content);
+  if (file.content.startsWith('data:')) {
+    const comma = file.content.indexOf(',');
+    const media = comma > 0 ? file.content.slice(5, comma) : 'data-url';
+    return `### \`${file.path}\`\n\nData URL omitted (${media}, ${size} bytes).`;
+  }
+  const redacted = redactText(file.content);
+  const body =
+    redacted.length <= MAX_INLINE_FILE_CHARS
+      ? redacted
+      : `${redacted.slice(0, MAX_INLINE_FILE_CHARS)}\n\n[truncated ${
+          redacted.length - MAX_INLINE_FILE_CHARS
+        } chars]`;
+  return `### \`${file.path}\`\n\n${markdownFence(body, languageForPath(file.path))}`;
+}
+
+function errorSignals(messages: readonly ChatMessageRow[]): string[] {
+  const signals: string[] = [];
+  for (const row of messages) {
+    const payload = objectPayload(row.payload);
+    if (row.kind === 'error') {
+      const message =
+        typeof payload['message'] === 'string' ? payload['message'] : safeJson(row.payload, 1000);
+      signals.push(`- seq ${row.seq} error: ${redactText(message)}`);
+    }
+    if (row.kind === 'tool_call') {
+      const status = payload['status'];
+      if (status === 'error') {
+        const tool = typeof payload['toolName'] === 'string' ? payload['toolName'] : 'tool_call';
+        const err = objectPayload(payload['error']);
+        const message =
+          typeof err['message'] === 'string'
+            ? err['message']
+            : typeof payload['errorMessage'] === 'string'
+              ? payload['errorMessage']
+              : 'tool call failed';
+        signals.push(`- seq ${row.seq} ${tool}: ${redactText(message)}`);
+      }
+    }
+  }
+  return signals.slice(-12);
+}
+
+function latestUserBrief(messages: readonly ChatMessageRow[]): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const row = messages[i];
+    if (row?.kind !== 'user') continue;
+    const payload = objectPayload(row.payload);
+    if (typeof payload['text'] === 'string' && payload['text'].trim().length > 0) {
+      return redactText(payload['text'].trim());
+    }
+  }
+  return '(no user message in this chat)';
+}
+
+export function buildDebugHandoffMarkdown(input: BuildDebugHandoffMarkdownInput): string {
+  const sessionMessages = input.messages.filter((msg) => (msg.sessionId ?? 0) === input.sessionId);
+  const latest = input.latestSnapshot;
+  const files =
+    input.files.length > 0
+      ? input.files
+      : latest !== null
+        ? [
+            {
+              schemaVersion: 1 as const,
+              id: `${latest.id}:artifact`,
+              designId: input.design.id,
+              path: 'snapshot-artifact.html',
+              content: latest.artifactSource,
+              createdAt: latest.createdAt,
+              updatedAt: latest.createdAt,
+            },
+          ]
+        : [];
+
+  const signals = errorSignals(sessionMessages);
+  const tree =
+    files.length === 0
+      ? '(no generated files found)'
+      : files
+          .map((f) => `- \`${f.path}\` (${byteLength(f.content)} bytes, updated ${f.updatedAt})`)
+          .join('\n');
+  const transcript =
+    sessionMessages.length === 0
+      ? '(no messages in this chat session)'
+      : sessionMessages
+          .map(
+            (row) =>
+              `### seq ${row.seq} - ${row.kind} - ${row.createdAt}\n\n${markdownFence(
+                messageSummary(row),
+                row.kind === 'tool_call' ? 'json' : '',
+              )}`,
+          )
+          .join('\n\n');
+  const sourceFiles =
+    files.length === 0 ? '(no source files available)' : files.map(fileEntryMarkdown).join('\n\n');
+
+  return `# Open CoDesign Debug Handoff
+
+This file is designed to be attached to an agentic AI coding assistant. Ask it to inspect the transcript and source files, identify the likely bug, patch the code with the smallest safe change, and verify the result.
+
+## Suggested Agent Prompt
+
+${markdownFence(
+  `You are debugging an Open CoDesign generated project.
+
+Use the handoff below as the source of truth. First identify the user-visible failure or unfinished request from the chat transcript. Then inspect the included source files, make a minimal fix, and explain how to verify it. Preserve unrelated behavior and avoid rewriting the whole project unless the code is unrecoverable.`,
+  'text',
+)}
+
+## Project
+
+- Design: ${input.design.name}
+- Design id: ${input.design.id}
+- Chat session: ${input.sessionId}
+- Exported at: ${input.exportedAt}
+- Messages included: ${sessionMessages.length}
+- Files included: ${files.length}
+- Latest snapshot: ${latest ? `${latest.id} (${latest.artifactType}, ${latest.createdAt})` : 'none'}
+- Workspace: ${input.design.workspacePath ?? 'internal storage'}
+
+## Latest User Request
+
+${markdownFence(latestUserBrief(sessionMessages))}
+
+## Problem Signals
+
+${signals.length > 0 ? signals.join('\n') : '- No explicit error rows or failed tool calls in this chat.'}
+
+## Current File Tree
+
+${tree}
+
+## Chat Transcript
+
+${transcript}
+
+## Source Files
+
+${sourceFiles}
+`;
+}
+
 export const CHAT_MESSAGES_CHANNELS_V1 = [
   'chat:v1:list',
   'chat:v1:append',
@@ -179,9 +507,13 @@ export const CHAT_MESSAGES_CHANNELS_V1 = [
   'chat:v1:new-session',
   'chat:v1:current-session',
   'chat:v1:set-session',
+  'chat:v1:export-debug-handoff',
 ] as const;
 
-export function registerChatMessagesIpc(db: Database): void {
+export function registerChatMessagesIpc(
+  db: Database,
+  getWindow: () => BrowserWindow | null = () => null,
+): void {
   ipcMain.handle('chat:v1:list', (_e: unknown, raw: unknown): ChatMessageRow[] => {
     const designId = parseDesignId(raw, 'chat:v1:list');
     return listChatMessages(db, designId);
@@ -285,6 +617,55 @@ export function registerChatMessagesIpc(db: Database): void {
       });
     }
   });
+
+  ipcMain.handle(
+    'chat:v1:export-debug-handoff',
+    async (_e: unknown, raw: unknown): Promise<ChatDebugHandoffResponse> => {
+      const input = parseDebugHandoffInput(raw);
+      const design = getDesign(db, input.designId);
+      if (design === null) {
+        throw new CodesignError('designId references a missing design', ERROR_CODES.IPC_BAD_INPUT);
+      }
+
+      const now = new Date().toISOString();
+      const stamp = now.replace(/[:.]/g, '-').slice(0, 19);
+      const defaultFilename = `codesign-debug-${filenameSegment(design.name)}-chat-${
+        input.sessionId
+      }-${stamp}.md`;
+      const opts: Electron.SaveDialogOptions = {
+        title: 'Export debug handoff',
+        defaultPath: defaultFilename,
+        filters: [{ name: 'Markdown', extensions: ['md'] }],
+      };
+      const win = getWindow();
+      const picked = win
+        ? await dialog.showSaveDialog(win, opts)
+        : await dialog.showSaveDialog(opts);
+      if (picked.canceled || !picked.filePath) {
+        return { status: 'cancelled' };
+      }
+
+      const snapshots = listSnapshots(db, input.designId);
+      const latestSnapshot = snapshots.at(-1) ?? null;
+      const content = buildDebugHandoffMarkdown({
+        design,
+        sessionId: input.sessionId,
+        messages: listChatMessages(db, input.designId),
+        files: listDesignFiles(db, input.designId),
+        latestSnapshot,
+        exportedAt: now,
+      });
+      await writeFile(picked.filePath, content, 'utf8');
+      const bytes = byteLength(content);
+      logger.info('chat.export_debug_handoff', {
+        designId: input.designId,
+        sessionId: input.sessionId,
+        path: picked.filePath,
+        bytes,
+      });
+      return { status: 'saved', path: picked.filePath, bytes };
+    },
+  );
 
   ipcMain.handle('chat:update-tool-status:v1', (_e: unknown, raw: unknown): { ok: true } => {
     const input = parseUpdateToolStatus(raw);

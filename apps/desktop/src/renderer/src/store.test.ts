@@ -1425,6 +1425,63 @@ describe('requestNewSession (in-design new conversation)', () => {
   });
 });
 
+describe('exportDebugHandoff', () => {
+  beforeAll(async () => {
+    await initI18n('en');
+  });
+
+  it('returns null and toasts when no design is active', async () => {
+    useCodesignStore.setState({ currentDesignId: null, toasts: [] });
+    const result = await useCodesignStore.getState().exportDebugHandoff();
+    expect(result).toBeNull();
+    expect(useCodesignStore.getState().toasts.at(-1)).toMatchObject({
+      variant: 'info',
+      title: 'No design to export yet.',
+    });
+  });
+
+  it('exports the current chat session through IPC and toasts success', async () => {
+    const exportDebugHandoff = vi.fn().mockResolvedValue({
+      status: 'saved',
+      path: '/tmp/codesign-debug.md',
+      bytes: 123,
+    });
+    vi.stubGlobal('window', {
+      codesign: { chat: { exportDebugHandoff } },
+      setTimeout,
+    });
+    useCodesignStore.setState({
+      currentDesignId: 'design-1',
+      currentChatSessionId: 4,
+      toasts: [],
+    });
+
+    const result = await useCodesignStore.getState().exportDebugHandoff();
+    expect(result).toBe('/tmp/codesign-debug.md');
+    expect(exportDebugHandoff).toHaveBeenCalledWith('design-1', 4);
+    expect(useCodesignStore.getState().toasts.at(-1)).toMatchObject({
+      variant: 'success',
+      title: 'Debug handoff exported',
+    });
+  });
+
+  it('uses an explicit session id when provided', async () => {
+    const exportDebugHandoff = vi.fn().mockResolvedValue({ status: 'cancelled' });
+    vi.stubGlobal('window', {
+      codesign: { chat: { exportDebugHandoff } },
+      setTimeout,
+    });
+    useCodesignStore.setState({
+      currentDesignId: 'design-1',
+      currentChatSessionId: 4,
+    });
+
+    const result = await useCodesignStore.getState().exportDebugHandoff(2);
+    expect(result).toBeNull();
+    expect(exportDebugHandoff).toHaveBeenCalledWith('design-1', 2);
+  });
+});
+
 describe('switchChatSession', () => {
   beforeAll(async () => {
     await initI18n('en');

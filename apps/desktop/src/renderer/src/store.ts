@@ -735,6 +735,10 @@ interface CodesignState {
    * Returns the new sessionId; toasts on success/failure.
    */
   requestNewSession: () => Promise<number | null>;
+  /** Export the selected in-design chat as a Markdown handoff optimized
+   *  for giving to an agentic coding assistant. Includes the selected chat
+   *  transcript plus the current generated file tree. */
+  exportDebugHandoff: (sessionId?: number) => Promise<string | null>;
   retryLastPrompt: () => Promise<void>;
   applyInlineComment: (comment: string) => Promise<void>;
   clearError: () => void;
@@ -3158,6 +3162,46 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       get().pushToast({
         variant: 'error',
         title: tr('chat.newSession.failed.title'),
+        description: msg,
+      });
+      return null;
+    }
+  },
+
+  async exportDebugHandoff(sessionId?: number): Promise<string | null> {
+    const state = get();
+    const designId = state.currentDesignId;
+    const targetSessionId = sessionId ?? state.currentChatSessionId;
+    if (designId === null) {
+      get().pushToast({
+        variant: 'info',
+        title: tr('chat.debugExport.noDesign'),
+      });
+      return null;
+    }
+    const exportFn = window.codesign?.chat?.exportDebugHandoff;
+    if (typeof exportFn !== 'function') {
+      get().pushToast({
+        variant: 'error',
+        title: tr('chat.debugExport.failed.title'),
+        description: 'IPC bridge unavailable',
+      });
+      return null;
+    }
+    try {
+      const res = await exportFn(designId, targetSessionId);
+      if (res.status !== 'saved' || !res.path) return null;
+      get().pushToast({
+        variant: 'success',
+        title: tr('chat.debugExport.success.title'),
+        description: tr('chat.debugExport.success.description', { path: res.path }),
+      });
+      return res.path;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : tr('errors.unknown');
+      get().pushToast({
+        variant: 'error',
+        title: tr('chat.debugExport.failed.title'),
         description: msg,
       });
       return null;

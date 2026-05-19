@@ -13,6 +13,9 @@ vi.mock('./electron-runtime', () => ({
       handlers.set(channel, fn);
     }),
   },
+  dialog: {
+    showSaveDialog: vi.fn(),
+  },
 }));
 
 vi.mock('./logger', () => ({
@@ -20,7 +23,7 @@ vi.mock('./logger', () => ({
 }));
 
 import { CodesignError } from '@open-codesign/shared';
-import { registerChatMessagesIpc } from './chat-messages-ipc';
+import { buildDebugHandoffMarkdown, registerChatMessagesIpc } from './chat-messages-ipc';
 import { appendChatMessage, createDesign, initInMemoryDb, listChatMessages } from './snapshots-db';
 
 function invoke(channel: string, payload: unknown): unknown {
@@ -304,5 +307,105 @@ describe('chat:v1:new-session + chat:v1:current-session', () => {
     expect(() =>
       invoke('chat:v1:new-session', { schemaVersion: 1, designId: 'no-such-id' }),
     ).toThrow(/Failed to start a new chat session/);
+  });
+});
+
+describe('buildDebugHandoffMarkdown', () => {
+  it('exports only the selected chat session and includes project files plus failure signals', () => {
+    const md = buildDebugHandoffMarkdown({
+      design: {
+        schemaVersion: 1,
+        id: 'design-1',
+        name: 'Broken Button',
+        createdAt: '2026-05-20T10:00:00.000Z',
+        updatedAt: '2026-05-20T10:05:00.000Z',
+        thumbnailText: null,
+        deletedAt: null,
+        workspacePath: null,
+        promptAssistMetadata: null,
+        currentSessionId: 1,
+        lastDecomposedArtifactHash: null,
+      },
+      sessionId: 1,
+      exportedAt: '2026-05-20T10:10:00.000Z',
+      latestSnapshot: null,
+      messages: [
+        {
+          schemaVersion: 2,
+          id: 1,
+          designId: 'design-1',
+          seq: 0,
+          kind: 'user',
+          payload: { text: 'Old chat that should not export' },
+          snapshotId: null,
+          createdAt: '2026-05-20T10:00:00.000Z',
+          sessionId: 0,
+        },
+        {
+          schemaVersion: 2,
+          id: 2,
+          designId: 'design-1',
+          seq: 1,
+          kind: 'user',
+          payload: { text: 'Fix the broken checkout button' },
+          snapshotId: null,
+          createdAt: '2026-05-20T10:01:00.000Z',
+          sessionId: 1,
+        },
+        {
+          schemaVersion: 2,
+          id: 3,
+          designId: 'design-1',
+          seq: 2,
+          kind: 'tool_call',
+          payload: {
+            toolName: 'text_editor',
+            args: { path: 'src/app.js' },
+            status: 'error',
+            error: { message: 'old string not found' },
+            startedAt: '2026-05-20T10:02:00.000Z',
+            verbGroup: 'Editing',
+          },
+          snapshotId: null,
+          createdAt: '2026-05-20T10:02:00.000Z',
+          sessionId: 1,
+        },
+        {
+          schemaVersion: 2,
+          id: 4,
+          designId: 'design-1',
+          seq: 3,
+          kind: 'reasoning_summary',
+          payload: {
+            fullText: 'private reasoning text',
+            durationMs: 10,
+            tokenEstimate: 5,
+            finalisedAt: '2026-05-20T10:03:00.000Z',
+          },
+          snapshotId: null,
+          createdAt: '2026-05-20T10:03:00.000Z',
+          sessionId: 1,
+        },
+      ],
+      files: [
+        {
+          schemaVersion: 1,
+          id: 'file-1',
+          designId: 'design-1',
+          path: 'src/app.js',
+          content: 'export function App() { return "broken"; }',
+          createdAt: '2026-05-20T10:01:00.000Z',
+          updatedAt: '2026-05-20T10:04:00.000Z',
+        },
+      ],
+    });
+
+    expect(md).toContain('Fix the broken checkout button');
+    expect(md).toContain('seq 2 text_editor: old string not found');
+    expect(md).toContain('src/app.js');
+    expect(md).toContain('export function App()');
+    expect(md).not.toContain('Old chat that should not export');
+    expect(md).not.toContain('private reasoning text');
+    expect(md).toContain('reasoningText');
   });
 });
