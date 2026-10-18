@@ -52,7 +52,7 @@
     "autoprefixer": "^10.4.20",
     "electron": "^39.8.8",
     "electron-builder": "^26.8.1",
-    "electron-builder-squirrel-windows": "26.8.1",
+    "electron-builder-squirrel-windows": "26.15.3",
     "electron-vite": "^2.3.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
